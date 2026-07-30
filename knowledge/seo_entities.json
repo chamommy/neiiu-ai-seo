@@ -1,0 +1,73 @@
+{
+  "seo": [
+    "search engine optimization",
+    "keyword",
+    "search intent",
+    "backlink",
+    "internal link",
+    "technical seo",
+    "on-page seo",
+    "google search console",
+    "sitemap",
+    "canonical",
+    "schema markup",
+    "core web vitals"
+  ],
+  "wordpress": [
+    "wordpress",
+    "plugin",
+    "theme",
+    "hosting",
+    "database",
+    "cache",
+    "wp-admin",
+    "woocommerce",
+    "page builder",
+    "security",
+    "backup",
+    "permalink"
+  ],
+  "artificial intelligence": [
+    "artificial intelligence",
+    "machine learning",
+    "deep learning",
+    "neural network",
+    "large language model",
+    "transformer",
+    "training data",
+    "fine-tuning",
+    "inference",
+    "python",
+    "pytorch",
+    "hugging face"
+  ],
+  "laptop gaming": [
+    "gaming laptop",
+    "gpu",
+    "cpu",
+    "ram",
+    "ssd",
+    "refresh rate",
+    "fps",
+    "nvidia",
+    "amd",
+    "intel",
+    "cooling",
+    "display"
+  ],
+"python": [
+  "python",
+  "programming language",
+  "pip",
+  "package",
+  "library",
+  "virtual environment",
+  "documentation",
+  "tutorial",
+  "django",
+  "flask",
+  "pandas",
+  "numpy",
+  "machine learning"
+]
+}

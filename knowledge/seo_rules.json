@@ -1,0 +1,36 @@
+{
+  "title": {
+    "min": 30,
+    "max": 60,
+    "penalty_missing": 15,
+    "penalty_length": 5
+  },
+  "meta_description": {
+    "min": 70,
+    "max": 170,
+    "penalty_missing": 10,
+    "penalty_length": 5
+  },
+  "h1": {
+    "ideal_count": 1,
+    "penalty_missing": 15,
+    "penalty_multiple": 5
+  },
+  "content": {
+    "minimum_words": 300,
+    "penalty_thin": 10
+  },
+  "images": {
+    "maximum_penalty": 10
+  },
+  "internal_links": {
+    "minimum": 1,
+    "penalty_missing": 5
+  },
+  "canonical": {
+    "penalty_missing": 5
+  },
+  "noindex": {
+    "penalty": 20
+  }
+}
