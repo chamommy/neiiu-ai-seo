@@ -10,9 +10,17 @@ from analyzer.seo_score import analyze_seo
 from analyzer.content_analyzer import analyze_content
 from analyzer.content_recommendation import recommend_content
 from analyzer.heading_analyzer import analyze_headings
-from config import ENTITY_FILE, REPORTS_DIR, RULES_FILE
+from analyzer.knowledge_analyzer import analyze_knowledge_gap
+from config import ENTITY_FILE, KNOWLEDGE_FILE, REPORTS_DIR, RULES_FILE
 from crawler.crawler import fetch_page
 from knowledge.knowledge_loader import load_json
+from knowledge.knowledge_engine import (
+    load_knowledge,
+    get_topic,
+)
+from analyzer.knowledge_analyzer import (
+    analyze_knowledge_gap,
+)
 from models.intent_predictor import (
     load_intent_model,
     predict_intent,
@@ -188,6 +196,10 @@ def print_result(report: dict) -> None:
         report["heading_analysis"]
     )
 
+    print_knowledge_result(
+    report["knowledge_analysis"]
+    )
+
 def print_content_recommendation(result: dict) -> None:
 
     print("\n" + "=" * 60)
@@ -284,6 +296,46 @@ def print_heading_result(result: dict) -> None:
     else:
         print("- Struktur heading sudah cukup baik")
 
+def print_knowledge_result(result: dict) -> None:
+
+    print("\n" + "=" * 60)
+    print("KNOWLEDGE GAP ANALYSIS")
+    print("=" * 60)
+
+    print("\nCurrent Metrics:")
+
+    for key, value in result["current_metrics"].items():
+        print(f"- {key}: {value}")
+
+    print("\nGaps:")
+
+    for key, value in result["gaps"].items():
+        print(f"- {key}: {value}")
+
+    print("\nMissing Must-Have:")
+
+    if result["missing_must_have"]:
+        for item in result["missing_must_have"]:
+            print(f"- {item}")
+    else:
+        print("- Tidak ada")
+
+    print("\nMasalah:")
+
+    if result["problems"]:
+        for item in result["problems"]:
+            print(f"- {item}")
+    else:
+        print("- Tidak ditemukan masalah utama")
+
+    print("\nRekomendasi:")
+
+    if result["recommendations"]:
+        for item in result["recommendations"]:
+            print(f"- {item}")
+    else:
+        print("- Tidak ada rekomendasi utama")        
+
 def main() -> None:
 
     url = normalize_url(
@@ -346,6 +398,26 @@ def main() -> None:
             content_result
         )
 
+        knowledge = load_knowledge(
+            KNOWLEDGE_FILE
+        )
+
+        topic_knowledge = get_topic(
+            knowledge,
+            "seo",
+        )
+
+        knowledge_input = {
+            "content": content_result,
+            "heading_analysis": heading_result,
+            "entity": entity_result,
+            "page": page_data,
+        }
+
+        knowledge_result = analyze_knowledge_gap(
+            report_data=knowledge_input,
+            topic_knowledge=topic_knowledge,
+        )
         
         report = {
             "analyzed_at": datetime.now().isoformat(
@@ -360,6 +432,7 @@ def main() -> None:
             "content": content_result,
             "content_recommendation": content_recommendation,
             "heading_analysis": heading_result,
+            "knowledge_analysis": knowledge_result,
             "seo_score": analysis["seo_score"],
             "page": page_data,
             "entity": entity_result,
@@ -386,8 +459,14 @@ def main() -> None:
         )
 
     except requests.exceptions.HTTPError as error:
+        status_code = (
+            error.response.status_code
+            if error.response is not None
+            else "unknown"
+        )
         print(
-            f"ERROR HTTP: {error}"
+            f"ERROR HTTP {status_code}: "
+            "Server website menolak atau gagal memproses request."
         )
 
     except requests.exceptions.SSLError:

@@ -3,6 +3,12 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 
+KNOWLEDGE_FILE = (
+    BASE_DIR
+    / "knowledge"
+    / "seo_knowledge.json"
+)
+
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 Chrome/120 Safari/537.36"

@@ -12,7 +12,6 @@
       "sitemap",
       "core web vitals"
     ],
-
     "ideal": {
       "word_count": 2200,
       "h1": 1,
@@ -23,7 +22,6 @@
       "entity_coverage": 80,
       "internal_links": 15
     },
-
     "must_have": [
       "faq",
       "schema",
