@@ -9,6 +9,7 @@ from analyzer.entity_analyzer import analyze_entities
 from analyzer.seo_score import analyze_seo
 from analyzer.content_analyzer import analyze_content
 from analyzer.content_recommendation import recommend_content
+from analyzer.heading_analyzer import analyze_headings
 from config import ENTITY_FILE, REPORTS_DIR, RULES_FILE
 from crawler.crawler import fetch_page
 from knowledge.knowledge_loader import load_json
@@ -67,6 +68,7 @@ def save_report(report: dict) -> Path:
 
 
 def print_entity_result(entity_result: dict) -> None:
+
     print("\n" + "=" * 60)
     print("ENTITY ANALYSIS")
     print("=" * 60)
@@ -111,6 +113,7 @@ def print_entity_result(entity_result: dict) -> None:
 
 
 def print_result(report: dict) -> None:
+    
     page = report["page"]
 
     print("\n" + "=" * 60)
@@ -181,7 +184,12 @@ def print_result(report: dict) -> None:
         report["content_recommendation"]
     )
 
+    print_heading_result(
+        report["heading_analysis"]
+    )
+
 def print_content_recommendation(result: dict) -> None:
+
     print("\n" + "=" * 60)
     print("CONTENT RECOMMENDATION")
     print("=" * 60)
@@ -202,7 +210,7 @@ def print_content_recommendation(result: dict) -> None:
     else:
         print("- Tidak ada rekomendasi utama")
 
-def print_content_result(content: dict):
+def print_content_result(content: dict) -> None:
 
     print("\n" + "=" * 60)
     print("CONTENT ANALYSIS")
@@ -217,15 +225,67 @@ def print_content_result(content: dict):
     print(f"Keyword in H1         : {content['keyword_in_h1']}")
     print(f"Paragraph Count       : {content['paragraph_count']}")
     print(
-    f"Longest Paragraph     : "
-    f"{content['longest_paragraph_length']} kata"
+        f"Longest Paragraph     : "
+        f"{content['longest_paragraph_length']} kata"
     )
     print(
         f"Average Paragraph     : "
         f"{content['average_paragraph_length']} kata"
     )
 
+def print_heading_result(result: dict) -> None:
+
+    print("\n" + "=" * 60)
+    print("HEADING ANALYSIS")
+    print("=" * 60)
+
+    print(
+        f"Heading Score  : "
+        f"{result['heading_score']}/100"
+    )
+    print(
+        f"Jumlah H1      : "
+        f"{result['h1_count']}"
+    )
+    print(
+        f"Jumlah H2      : "
+        f"{result['h2_count']}"
+    )
+    print(
+        f"Jumlah H3      : "
+        f"{result['h3_count']}"
+    )
+    print(
+        f"Keyword di H1  : "
+        f"{result['keyword_in_h1']}"
+    )
+    print(
+        f"Keyword di H2  : "
+        f"{result['keyword_in_h2']}"
+    )
+    print(
+        f"Keyword di H3  : "
+        f"{result['keyword_in_h3']}"
+    )
+
+    print("\nMasalah heading:")
+
+    if result["problems"]:
+        for problem in result["problems"]:
+            print(f"- {problem}")
+    else:
+        print("- Tidak ditemukan masalah utama")
+
+    print("\nRekomendasi heading:")
+
+    if result["recommendations"]:
+        for recommendation in result["recommendations"]:
+            print(f"- {recommendation}")
+    else:
+        print("- Struktur heading sudah cukup baik")
+
 def main() -> None:
+
     url = normalize_url(
         input("Masukkan URL website: ")
     )
@@ -273,8 +333,13 @@ def main() -> None:
         )
 
         content_result = analyze_content(
-        page=page_data,
-        keyword=keyword,
+            page=page_data,
+            keyword=keyword,
+        )
+
+        heading_result = analyze_headings(
+            page=page_data,
+            keyword=keyword,
         )
 
         content_recommendation = recommend_content(
@@ -294,6 +359,7 @@ def main() -> None:
             "intent": intent_result,
             "content": content_result,
             "content_recommendation": content_recommendation,
+            "heading_analysis": heading_result,
             "seo_score": analysis["seo_score"],
             "page": page_data,
             "entity": entity_result,

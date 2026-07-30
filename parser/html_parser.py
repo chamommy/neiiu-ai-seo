@@ -124,6 +124,11 @@ def parse_html(
         for tag in soup.find_all("h2")
     ]
 
+    h3_tags = [
+    clean_text(tag.get_text(" ", strip=True))
+    for tag in soup.find_all("h3")
+    ]
+
     visible_text = get_visible_text(soup)
     word_count = len(visible_text.split())
 
@@ -167,7 +172,9 @@ def parse_html(
             "h1_count": len(h1_tags),
             "h2": h2_tags,
             "h2_count": len(h2_tags),
-        },
+            "h3": h3_tags,
+            "h3_count": len(h3_tags),
+     },
         "images": {
             "total": len(images),
             "without_alt": images_without_alt,
