@@ -83,32 +83,224 @@ function resetChat() {
     input.focus();
 }
 
-async function refreshHistory() {
-    const response = await fetch("/api/chats");
+async function togglePin(
+    chatId,
+    isPinned
+) {
+    const response = await fetch(
+        `/api/chats/${chatId}/pin`,
+        {
+            method: "PATCH",
+            headers: {
+                "Content-Type":
+                    "application/json",
+            },
+            body: JSON.stringify({
+                is_pinned: isPinned,
+            }),
+        }
+    );
+
     const data = await response.json();
-    const container = document.getElementById("history");
+
+    if (!response.ok) {
+        alert(
+            data.detail
+            || "Gagal mengubah pin chat."
+        );
+        return;
+    }
+
+    await refreshHistory();
+}
+
+
+async function deleteHistoryChat(
+    chatId
+) {
+    const confirmed = confirm(
+        "Hapus chat ini secara permanen?"
+    );
+
+    if (!confirmed) {
+        return;
+    }
+
+    const response = await fetch(
+        `/api/chats/${chatId}`,
+        {
+            method: "DELETE",
+        }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        alert(
+            data.detail
+            || "Gagal menghapus chat."
+        );
+        return;
+    }
+
+    if (
+        Number(state.chatId)
+        === Number(chatId)
+    ) {
+        resetChat();
+    }
+
+    await refreshHistory();
+}
+
+async function refreshHistory() {
+    const response =
+        await fetch("/api/chats");
+
+    const data =
+        await response.json();
+
+    const container =
+        document.getElementById(
+            "history"
+        );
 
     container.innerHTML = "";
 
     for (const chat of data.chats) {
-        const button = document.createElement("button");
-        button.className = "history-item";
-        button.dataset.chatId = chat.id;
+        const row =
+            document.createElement(
+                "div"
+            );
 
-        const title = document.createElement("span");
-        title.textContent = chat.title;
+        row.className =
+            "history-row";
 
-        const mode = document.createElement("small");
-        mode.textContent = chat.mode;
+        if (chat.is_pinned) {
+            row.classList.add(
+                "pinned"
+            );
+        }
 
-        button.appendChild(title);
-        button.appendChild(mode);
+        const openButton =
+            document.createElement(
+                "button"
+            );
 
-        button.addEventListener("click", () => {
-            loadChat(chat.id);
-        });
+        openButton.className =
+            "history-item";
 
-        container.appendChild(button);
+        openButton.dataset.chatId =
+            chat.id;
+
+        const title =
+            document.createElement(
+                "span"
+            );
+
+        title.className =
+            "history-title";
+
+        title.textContent =
+            `${chat.is_pinned ? "📌 " : ""}${chat.title}`;
+
+        openButton.appendChild(title);
+
+        openButton.addEventListener(
+            "click",
+            () => {
+                loadChat(chat.id);
+            }
+        );
+
+        const menuWrapper =
+            document.createElement(
+                "div"
+            );
+
+        menuWrapper.className =
+            "history-menu-wrapper";
+
+        const menuButton =
+            document.createElement(
+                "button"
+            );
+
+        menuButton.className =
+            "history-menu-button";
+
+        menuButton.textContent =
+            "⋯";
+
+        const menu =
+            document.createElement(
+                "div"
+            );
+
+        menu.className =
+            "history-menu";
+
+        const pinButton =
+            document.createElement(
+                "button"
+            );
+
+        pinButton.textContent =
+            chat.is_pinned
+                ? "Unpin"
+                : "Pin";
+
+        pinButton.addEventListener(
+            "click",
+            async (event) => {
+                event.stopPropagation();
+
+                await togglePin(
+                    chat.id,
+                    !Boolean(
+                        chat.is_pinned
+                    )
+                );
+            }
+        );
+
+        const deleteButton =
+            document.createElement(
+                "button"
+            );
+
+        deleteButton.className =
+            "danger";
+
+        deleteButton.textContent =
+            "Delete";
+
+        deleteButton.addEventListener(
+            "click",
+            async (event) => {
+                event.stopPropagation();
+
+                await deleteHistoryChat(
+                    chat.id
+                );
+            }
+        );
+
+        menu.appendChild(pinButton);
+        menu.appendChild(
+            deleteButton
+        );
+
+        menuWrapper.appendChild(
+            menuButton
+        );
+
+        menuWrapper.appendChild(menu);
+
+        row.appendChild(openButton);
+        row.appendChild(menuWrapper);
+
+        container.appendChild(row);
     }
 }
 

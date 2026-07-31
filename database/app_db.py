@@ -77,9 +77,33 @@ def init_db() -> None:
                     REFERENCES chats(id)
                     ON DELETE CASCADE
             );
+            """
+        )
 
+        chat_columns = {
+            row["name"]
+            for row in db.execute(
+                "PRAGMA table_info(chats)"
+            ).fetchall()
+        }
+
+        if "is_pinned" not in chat_columns:
+            db.execute(
+                """
+                ALTER TABLE chats
+                ADD COLUMN is_pinned
+                INTEGER NOT NULL DEFAULT 0
+                """
+            )
+
+        db.executescript(
+            """
             CREATE INDEX IF NOT EXISTS idx_chats_user_updated
-            ON chats(user_id, updated_at DESC);
+            ON chats(
+                user_id,
+                is_pinned DESC,
+                updated_at DESC
+            );
 
             CREATE INDEX IF NOT EXISTS idx_messages_chat
             ON messages(chat_id, id);
@@ -254,10 +278,19 @@ def list_chats(user_id: int):
     with db_connection() as db:
         return db.execute(
             """
-            SELECT id, title, mode, created_at, updated_at
+            SELECT
+                id,
+                title,
+                mode,
+                is_pinned,
+                created_at,
+                updated_at
             FROM chats
             WHERE user_id = ?
-            ORDER BY updated_at DESC, id DESC
+            ORDER BY
+                is_pinned DESC,
+                updated_at DESC,
+                id DESC
             """,
             (user_id,),
         ).fetchall()
@@ -274,6 +307,32 @@ def get_chat(chat_id: int, user_id: int):
             (chat_id, user_id),
         ).fetchone()
 
+def update_chat_pinned(
+    chat_id: int,
+    user_id: int,
+    is_pinned: bool,
+) -> None:
+    with db_connection() as db:
+        cursor = db.execute(
+            """
+            UPDATE chats
+            SET
+                is_pinned = ?,
+                updated_at = ?
+            WHERE id = ? AND user_id = ?
+            """,
+            (
+                1 if is_pinned else 0,
+                utc_now(),
+                chat_id,
+                user_id,
+            ),
+        )
+
+        if cursor.rowcount == 0:
+            raise ValueError(
+                "Chat tidak ditemukan."
+            )
 
 def delete_chat(chat_id: int, user_id: int) -> None:
     with db_connection() as db:

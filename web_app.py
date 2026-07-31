@@ -45,6 +45,7 @@ from database.app_db import (
     update_user_active,
     update_user_password,
     update_user_tokens,
+    update_chat_pinned,
 )
 
 
@@ -91,6 +92,9 @@ class ChatRequest(BaseModel):
     )
     mode: Literal["normal", "seo"] = "normal"
     chat_id: int | None = None
+
+class PinRequest(BaseModel):
+    is_pinned: bool
 
 
 @app.on_event("startup")
@@ -321,6 +325,31 @@ def api_chat_detail(
         ],
     }
 
+@app.patch("/api/chats/{chat_id}/pin")
+def api_pin_chat(
+    chat_id: int,
+    payload: PinRequest,
+    request: Request,
+):
+    user = require_user(request)
+
+    try:
+        update_chat_pinned(
+            chat_id=chat_id,
+            user_id=int(user["id"]),
+            is_pinned=payload.is_pinned,
+        )
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=404,
+            detail=str(error),
+        ) from error
+
+    return {
+        "status": "success",
+        "is_pinned": payload.is_pinned,
+    }
 
 @app.delete("/api/chats/{chat_id}")
 def api_delete_chat(

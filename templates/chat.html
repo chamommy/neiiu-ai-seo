@@ -40,16 +40,58 @@
             <div class="side-label">History</div>
             <div id="history">
                 {% for chat in chats %}
-                    <button
-                        class="history-item"
+                    <div
+                        class="history-row {% if chat.is_pinned %}pinned{% endif %}"
                         data-chat-id="{{ chat.id }}"
                     >
-                        <span>{{ chat.title }}</span>
-                        <small>{{ chat.mode }}</small>
-                    </button>
+                        <button
+                            class="history-item"
+                            data-chat-id="{{ chat.id }}"
+                        >
+                            <span class="history-title">
+                                {% if chat.is_pinned %}
+                                    📌
+                                {% endif %}
+
+                                {{ chat.title }}
+                            </span>
+                        </button>
+
+                        <div class="history-menu-wrapper">
+                            <button
+                                class="history-menu-button"
+                                type="button"
+                                aria-label="Chat options"
+                            >
+                                ⋯
+                            </button>
+
+                            <div class="history-menu">
+                                <button
+                                    class="history-pin"
+                                    data-chat-id="{{ chat.id }}"
+                                    data-pinned="{{ chat.is_pinned }}"
+                                    type="button"
+                                >
+                                    {% if chat.is_pinned %}
+                                        Unpin
+                                    {% else %}
+                                        Pin
+                                    {% endif %}
+                                </button>
+
+                                <button
+                                    class="history-delete"
+                                    data-chat-id="{{ chat.id }}"
+                                    type="button"
+                                >
+                                    Delete
+                                </button>
+                            </div>
+                        </div>
+                    </div>
                 {% endfor %}
             </div>
-        </div>
 
         <div class="sidebar-bottom">
             <div class="account-row">

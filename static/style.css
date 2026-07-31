@@ -498,3 +498,109 @@ textarea {
         grid-template-columns: 1fr;
     }
 }
+
+.history-row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 3px;
+    border-radius: 9px;
+}
+
+.history-row:hover,
+.history-row.active {
+    background: #161616;
+}
+
+.history-row.pinned {
+    background: #0b2114;
+}
+
+.history-row .history-item {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    padding: 9px 8px;
+    background: transparent;
+}
+
+.history-title {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.history-menu-wrapper {
+    position: relative;
+    flex: 0 0 auto;
+}
+
+.history-menu-button {
+    display: none;
+    width: 30px;
+    height: 30px;
+    border: 0;
+    border-radius: 7px;
+    cursor: pointer;
+    color: #aaa;
+    font-size: 19px;
+    background: transparent;
+}
+
+.history-row:hover
+.history-menu-button,
+.history-menu-wrapper:focus-within
+.history-menu-button {
+    display: block;
+}
+
+.history-menu-button:hover {
+    color: white;
+    background: #292929;
+}
+
+.history-menu {
+    position: absolute;
+    z-index: 30;
+    top: 34px;
+    right: 0;
+    display: none;
+    min-width: 130px;
+    padding: 6px;
+    border: 1px solid #292929;
+    border-radius: 10px;
+    background: #111;
+    box-shadow:
+        0 12px 35px
+        rgba(0, 0, 0, 0.65);
+}
+
+.history-menu-wrapper:focus-within
+.history-menu {
+    display: grid;
+}
+
+.history-menu button {
+    width: 100%;
+    padding: 9px 10px;
+    border: 0;
+    border-radius: 7px;
+    cursor: pointer;
+    text-align: left;
+    color: #ddd;
+    background: transparent;
+}
+
+.history-menu button:hover {
+    background: #242424;
+}
+
+.history-menu button.danger {
+    color: #ff8585;
+}
+
+.history-menu button.danger:hover {
+    background: #301010;
+}
