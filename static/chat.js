@@ -22,8 +22,13 @@ function removeWelcome() {
     document.getElementById("welcome")?.remove();
 }
 
+function removeMessageNames() {
+    document.querySelectorAll(".message-name").forEach((item) => item.remove());
+}
+
 function addMessage(role, content) {
     removeWelcome();
+    removeMessageNames();
 
     const row = document.createElement("div");
     row.className = `message-row ${role}`;
@@ -31,14 +36,9 @@ function addMessage(role, content) {
     const bubble = document.createElement("div");
     bubble.className = "message-bubble";
 
-    const name = document.createElement("div");
-    name.className = "message-name";
-    name.textContent = role === "user" ? "Kamu" : "NEIIU AI";
-
     const body = document.createElement("div");
     body.textContent = content;
 
-    bubble.appendChild(name);
     bubble.appendChild(body);
     row.appendChild(bubble);
     messages.appendChild(row);
