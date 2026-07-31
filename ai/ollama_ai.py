@@ -15,8 +15,8 @@ class OllamaAI(BaseAI):
         self,
         model: str = "qwen3:4b",
         base_url: str = "http://localhost:11434",
-        timeout: int = 300,
-        max_tokens: int = 1200,
+        timeout: int = 900,
+        max_tokens: int = 700,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
