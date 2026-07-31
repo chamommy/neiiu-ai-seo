@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>NEIIU AI</title>
-    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v=3">
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v=4">
     <style>
         .message-name {
             display: none !important;
@@ -47,6 +47,7 @@
                         <button
                             class="history-item"
                             data-chat-id="{{ chat.id }}"
+                            type="button"
                         >
                             <span class="history-title">
                                 {% if chat.is_pinned %}
@@ -92,6 +93,7 @@
                     </div>
                 {% endfor %}
             </div>
+        </div>
 
         <div class="sidebar-bottom">
             <div class="account-row">
@@ -153,7 +155,7 @@
     </main>
 </div>
 
-<script src="{{ url_for('static', path='/chat.js') }}?v=3"></script>
+<script src="{{ url_for('static', path='/chat.js') }}?v=4"></script>
 <script>
     document.querySelectorAll(".message-name").forEach((item) => item.remove());
 </script>

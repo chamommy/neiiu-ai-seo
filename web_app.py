@@ -358,10 +358,17 @@ def api_delete_chat(
 ):
     user = require_user(request)
 
-    delete_chat(
-        chat_id,
-        int(user["id"]),
-    )
+    try:
+        delete_chat(
+            chat_id,
+            int(user["id"]),
+        )
+
+    except ValueError as error:
+        raise HTTPException(
+            status_code=404,
+            detail=str(error),
+        ) from error
 
     return {"status": "success"}
 

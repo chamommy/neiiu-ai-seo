@@ -604,3 +604,79 @@ textarea {
 .history-menu button.danger:hover {
     background: #301010;
 }
+
+.popup-backdrop {
+    position: fixed;
+    z-index: 1000;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 20px;
+    background: rgba(0, 0, 0, 0.62);
+}
+
+.popup-dialog {
+    width: min(360px, 100%);
+    padding: 20px;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    color: #f4f4f4;
+    background: #111;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.7);
+}
+
+.popup-dialog h2 {
+    margin: 0 0 8px;
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.popup-dialog p {
+    margin: 0;
+    color: #bdbdbd;
+    line-height: 1.5;
+}
+
+.popup-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 20px;
+}
+
+.popup-button {
+    min-width: 82px;
+    min-height: 38px;
+    padding: 0 14px;
+    border: 1px solid #333;
+    border-radius: 7px;
+    cursor: pointer;
+    color: #eee;
+    background: #1d1d1d;
+}
+
+.popup-button:hover {
+    background: #292929;
+}
+
+.popup-button.primary {
+    border-color: #1e7f4b;
+    background: #15934f;
+}
+
+.popup-button.primary:hover {
+    background: #19a85b;
+}
+
+.popup-button.danger {
+    border-color: #8b2424;
+    background: #b52b2b;
+}
+
+.popup-button.danger:hover {
+    background: #ca3333;
+}
+
+.popup-button.secondary {
+    color: #cfcfcf;
+}

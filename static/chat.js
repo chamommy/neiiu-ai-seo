@@ -11,6 +11,76 @@ const form = document.getElementById("chatForm");
 const tokenLabel = document.getElementById("tokenLabel");
 const modeTitle = document.getElementById("modeTitle");
 const modeSubtitle = document.getElementById("modeSubtitle");
+const history = document.getElementById("history");
+
+function showPopup({
+    title,
+    message,
+    confirmText = "OK",
+    cancelText = null,
+    danger = false,
+}) {
+    return new Promise((resolve) => {
+        const backdrop = document.createElement("div");
+        backdrop.className = "popup-backdrop";
+
+        const dialog = document.createElement("div");
+        dialog.className = "popup-dialog";
+        dialog.setAttribute("role", "dialog");
+        dialog.setAttribute("aria-modal", "true");
+
+        const heading = document.createElement("h2");
+        heading.textContent = title;
+
+        const body = document.createElement("p");
+        body.textContent = message;
+
+        const actions = document.createElement("div");
+        actions.className = "popup-actions";
+
+        function close(value) {
+            backdrop.remove();
+            resolve(value);
+        }
+
+        if (cancelText) {
+            const cancelButton = document.createElement("button");
+            cancelButton.type = "button";
+            cancelButton.className = "popup-button secondary";
+            cancelButton.textContent = cancelText;
+            cancelButton.addEventListener("click", () => close(false));
+            actions.appendChild(cancelButton);
+        }
+
+        const confirmButton = document.createElement("button");
+        confirmButton.type = "button";
+        confirmButton.className = danger
+            ? "popup-button danger"
+            : "popup-button primary";
+        confirmButton.textContent = confirmText;
+        confirmButton.addEventListener("click", () => close(true));
+        actions.appendChild(confirmButton);
+
+        backdrop.addEventListener("click", (event) => {
+            if (event.target === backdrop) {
+                close(false);
+            }
+        });
+
+        dialog.addEventListener("keydown", (event) => {
+            if (event.key === "Escape") {
+                close(false);
+            }
+        });
+
+        dialog.appendChild(heading);
+        dialog.appendChild(body);
+        dialog.appendChild(actions);
+        backdrop.appendChild(dialog);
+        document.body.appendChild(backdrop);
+        confirmButton.focus();
+    });
+}
 
 function escapeText(value) {
     const div = document.createElement("div");
@@ -118,9 +188,13 @@ async function togglePin(
 async function deleteHistoryChat(
     chatId
 ) {
-    const confirmed = confirm(
-        "Hapus chat ini secara permanen?"
-    );
+    const confirmed = await showPopup({
+        title: "Hapus chat?",
+        message: "History dan semua isi chat ini akan dihapus permanen.",
+        confirmText: "Hapus",
+        cancelText: "Batal",
+        danger: true,
+    });
 
     if (!confirmed) {
         return;
@@ -136,10 +210,10 @@ async function deleteHistoryChat(
     const data = await response.json();
 
     if (!response.ok) {
-        alert(
-            data.detail
-            || "Gagal menghapus chat."
-        );
+        await showPopup({
+            title: "Gagal menghapus",
+            message: data.detail || "Gagal menghapus chat.",
+        });
         return;
     }
 
@@ -151,6 +225,11 @@ async function deleteHistoryChat(
     }
 
     await refreshHistory();
+
+    await showPopup({
+        title: "Chat dihapus",
+        message: "History chat berhasil dihapus.",
+    });
 }
 
 async function refreshHistory() {
@@ -160,12 +239,7 @@ async function refreshHistory() {
     const data =
         await response.json();
 
-    const container =
-        document.getElementById(
-            "history"
-        );
-
-    container.innerHTML = "";
+    history.innerHTML = "";
 
     for (const chat of data.chats) {
         const row =
@@ -189,9 +263,17 @@ async function refreshHistory() {
 
         openButton.className =
             "history-item";
+        openButton.type = "button";
 
         openButton.dataset.chatId =
             chat.id;
+
+        if (
+            Number(state.chatId)
+            === Number(chat.id)
+        ) {
+            openButton.classList.add("active");
+        }
 
         const title =
             document.createElement(
@@ -205,13 +287,6 @@ async function refreshHistory() {
             `${chat.is_pinned ? "📌 " : ""}${chat.title}`;
 
         openButton.appendChild(title);
-
-        openButton.addEventListener(
-            "click",
-            () => {
-                loadChat(chat.id);
-            }
-        );
 
         const menuWrapper =
             document.createElement(
@@ -245,24 +320,18 @@ async function refreshHistory() {
                 "button"
             );
 
+        pinButton.className =
+            "history-pin";
+        pinButton.type = "button";
+        pinButton.dataset.chatId =
+            chat.id;
+        pinButton.dataset.pinned =
+            chat.is_pinned ? "1" : "0";
+
         pinButton.textContent =
             chat.is_pinned
                 ? "Unpin"
                 : "Pin";
-
-        pinButton.addEventListener(
-            "click",
-            async (event) => {
-                event.stopPropagation();
-
-                await togglePin(
-                    chat.id,
-                    !Boolean(
-                        chat.is_pinned
-                    )
-                );
-            }
-        );
 
         const deleteButton =
             document.createElement(
@@ -270,21 +339,13 @@ async function refreshHistory() {
             );
 
         deleteButton.className =
-            "danger";
+            "history-delete danger";
+        deleteButton.type = "button";
+        deleteButton.dataset.chatId =
+            chat.id;
 
         deleteButton.textContent =
             "Delete";
-
-        deleteButton.addEventListener(
-            "click",
-            async (event) => {
-                event.stopPropagation();
-
-                await deleteHistoryChat(
-                    chat.id
-                );
-            }
-        );
 
         menu.appendChild(pinButton);
         menu.appendChild(
@@ -300,7 +361,7 @@ async function refreshHistory() {
         row.appendChild(openButton);
         row.appendChild(menuWrapper);
 
-        container.appendChild(row);
+        history.appendChild(row);
     }
 }
 
@@ -431,10 +492,46 @@ document.getElementById("newChat").addEventListener("click", () => {
     }
 });
 
-document.querySelectorAll(".history-item").forEach((button) => {
-    button.addEventListener("click", () => {
-        loadChat(Number(button.dataset.chatId));
-    });
+history.addEventListener("click", async (event) => {
+    const pinButton = event.target.closest(".history-pin");
+    if (pinButton) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        const isPinned =
+            pinButton.dataset.pinned === "True"
+            || pinButton.dataset.pinned === "true"
+            || pinButton.dataset.pinned === "1";
+
+        await togglePin(
+            Number(pinButton.dataset.chatId),
+            !isPinned
+        );
+        return;
+    }
+
+    const deleteButton = event.target.closest(".history-delete");
+    if (deleteButton) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        await deleteHistoryChat(
+            Number(deleteButton.dataset.chatId)
+        );
+        return;
+    }
+
+    const menuButton = event.target.closest(".history-menu-button");
+    if (menuButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+    }
+
+    const historyItem = event.target.closest(".history-item");
+    if (historyItem) {
+        await loadChat(Number(historyItem.dataset.chatId));
+    }
 });
 
 input.addEventListener("input", () => {

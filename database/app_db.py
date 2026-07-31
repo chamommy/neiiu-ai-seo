@@ -336,13 +336,18 @@ def update_chat_pinned(
 
 def delete_chat(chat_id: int, user_id: int) -> None:
     with db_connection() as db:
-        db.execute(
+        cursor = db.execute(
             """
             DELETE FROM chats
             WHERE id = ? AND user_id = ?
             """,
             (chat_id, user_id),
         )
+
+        if cursor.rowcount == 0:
+            raise ValueError(
+                "Chat tidak ditemukan."
+            )
 
 
 def list_messages(chat_id: int):
