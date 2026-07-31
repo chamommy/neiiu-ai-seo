@@ -11,15 +11,18 @@ class AIManager:
         self,
         provider: str = "ollama",
         model: str = "qwen3:4b",
+        max_tokens: int = 300,
     ) -> None:
         self.provider = provider.strip().lower()
         self.model = model
+        self.max_tokens = max_tokens
         self.client = self._create_client()
 
     def _create_client(self) -> BaseAI:
         if self.provider == "ollama":
             return OllamaAI(
                 model=self.model,
+                max_tokens=self.max_tokens,
             )
 
         if self.provider == "openai":
