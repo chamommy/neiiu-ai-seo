@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="id">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Admin · NEIIU AI</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+</head>
+<body class="admin-body">
+    <header class="admin-top">
+        <a href="/chat" class="brand">
+            <img
+                src="https://ik.imagekit.io/haim3/neiiuai%20logo.jpg"
+                alt="NEIIU AI"
+            >
+            <span>NEIIU AI</span>
+        </a>
+
+        <a href="/chat" class="text-link">Kembali ke chat</a>
+    </header>
+
+    <main class="admin-container">
+        <section class="admin-card">
+            <h1>User Management</h1>
+            <p class="muted">
+                Hanya admin yang dapat membuat user dan mengatur token.
+            </p>
+
+            {% if message %}
+                <div class="alert">{{ message }}</div>
+            {% endif %}
+        </section>
+
+        <section class="admin-card">
+            <h2>Buat user</h2>
+
+            <form method="post" action="/admin/users" class="admin-form">
+                <input name="username" placeholder="Username" required>
+                <input
+                    name="password"
+                    type="password"
+                    placeholder="Password minimal 6 karakter"
+                    required
+                >
+
+                <select name="role">
+                    <option value="user">User</option>
+                    <option value="admin">Admin</option>
+                </select>
+
+                <input
+                    name="token_balance"
+                    type="number"
+                    min="0"
+                    value="100"
+                    required
+                >
+
+                <button class="primary" type="submit">
+                    Create user
+                </button>
+            </form>
+        </section>
+
+        <section class="admin-card">
+            <h2>Daftar user</h2>
+
+            <div class="user-table">
+                {% for item in users %}
+                    <article class="user-row">
+                        <div>
+                            <strong>{{ item.username }}</strong>
+                            <small>
+                                {{ item.role }} ·
+                                {% if item.is_active %}
+                                    aktif
+                                {% else %}
+                                    nonaktif
+                                {% endif %}
+                            </small>
+                        </div>
+
+                        <form
+                            method="post"
+                            action="/admin/users/{{ item.id }}/tokens"
+                        >
+                            <input
+                                name="token_balance"
+                                type="number"
+                                min="0"
+                                value="{{ item.token_balance }}"
+                            >
+                            <button>Save token</button>
+                        </form>
+
+                        <form
+                            method="post"
+                            action="/admin/users/{{ item.id }}/active"
+                        >
+                            <input
+                                type="hidden"
+                                name="is_active"
+                                value="{% if item.is_active %}0{% else %}1{% endif %}"
+                            >
+                            <button>
+                                {% if item.is_active %}
+                                    Disable
+                                {% else %}
+                                    Enable
+                                {% endif %}
+                            </button>
+                        </form>
+
+                        <form
+                            method="post"
+                            action="/admin/users/{{ item.id }}/password"
+                        >
+                            <input
+                                name="password"
+                                type="password"
+                                placeholder="Password baru"
+                                required
+                            >
+                            <button>Reset password</button>
+                        </form>
+                    </article>
+                {% endfor %}
+            </div>
+        </section>
+    </main>
+</body>
+</html>

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="id">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>NEIIU AI</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+</head>
+<body>
+<div class="app-shell">
+    <aside class="sidebar">
+        <a href="/chat" class="brand">
+            <img
+                src="https://ik.imagekit.io/haim3/neiiuai%20logo.jpg"
+                alt="NEIIU AI"
+            >
+            <span>NEIIU AI</span>
+        </a>
+
+        <button id="newChat" class="new-chat">
+            + New chat
+        </button>
+
+        <div class="side-section">
+            <div class="side-label">Mode</div>
+            <button class="mode active" data-mode="normal">
+                Normal
+            </button>
+            <button class="mode" data-mode="seo">
+                SEO Expert
+            </button>
+        </div>
+
+        <div class="side-section history-wrap">
+            <div class="side-label">History</div>
+            <div id="history">
+                {% for chat in chats %}
+                    <button
+                        class="history-item"
+                        data-chat-id="{{ chat.id }}"
+                    >
+                        <span>{{ chat.title }}</span>
+                        <small>{{ chat.mode }}</small>
+                    </button>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="sidebar-bottom">
+            <div class="account-row">
+                <div>
+                    <strong>{{ user.username }}</strong>
+                    <small id="tokenLabel">
+                        {{ user.token_balance }} token
+                    </small>
+                </div>
+
+                {% if user.role == "admin" %}
+                    <a href="/admin" class="text-link">
+                        Admin
+                    </a>
+                {% endif %}
+            </div>
+
+            <form method="post" action="/logout">
+                <button class="logout">Logout</button>
+            </form>
+        </div>
+    </aside>
+
+    <main class="chat-main">
+        <header class="chat-header">
+            <div>
+                <strong id="modeTitle">Normal Mode</strong>
+                <small id="modeSubtitle">
+                    Tanya apa saja kepada NEIIU AI.
+                </small>
+            </div>
+        </header>
+
+        <section id="messages" class="messages">
+            <div id="welcome" class="welcome">
+                <img
+                    src="https://ik.imagekit.io/haim3/neiiuai%20logo.jpg"
+                    alt="NEIIU AI"
+                >
+                <h1 class="brand-green">NEIIU AI</h1>
+                <p>Apa yang bisa gue bantu hari ini?</p>
+            </div>
+        </section>
+
+        <div class="composer-shell">
+            <form id="chatForm" class="composer">
+                <textarea
+                    id="messageInput"
+                    rows="1"
+                    placeholder="Ketik pesan..."
+                    required
+                ></textarea>
+
+                <button id="sendButton" type="submit">
+                    ↑
+                </button>
+            </form>
+        </div>
+    </main>
+</div>
+
+<script src="{{ url_for('static', path='/chat.js') }}"></script>
+</body>
+</html>
