@@ -3,9 +3,18 @@ import requests
 from config import REQUEST_TIMEOUT, USER_AGENT
 
 
-def fetch_page(url: str) -> dict:
+def fetch_page(
+    url: str,
+    user_agent: str = USER_AGENT,
+) -> dict:
+    """
+    Mengambil satu halaman HTML.
+
+    user_agent bisa diganti supaya halaman yang melakukan cloaking
+    bisa diambil dalam kedua versinya, lihat analyzer/cloak_detector.py
+    """
     headers = {
-        "User-Agent": USER_AGENT,
+        "User-Agent": user_agent,
         "Accept": "text/html,application/xhtml+xml",
     }
 
@@ -31,4 +40,5 @@ def fetch_page(url: str) -> dict:
         "status_code": response.status_code,
         "content_type": content_type,
         "html": response.text,
+        "user_agent": user_agent,
     }

@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="id">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>NEIIU — Generator Landing Page</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v=4">
+    <link rel="stylesheet" href="{{ url_for('static', path='/neiiu.css') }}?v=1">
+</head>
+<body class="neiiu-body">
+
+<header class="neiiu-top">
+    <a href="/chat" class="brand">
+        <img
+            src="/static/logo.jpg"
+            alt="NEIIU AI"
+        >
+        <span>NEIIU AI</span>
+    </a>
+
+    <nav class="neiiu-nav">
+        <a href="/chat">Chat</a>
+        {% if user.role == 'admin' %}
+        <a href="/admin">Admin</a>
+        {% endif %}
+        <span class="badge">
+            Token: <b id="tokenBalance">{{ user.token_balance }}</b>
+        </span>
+        <form method="post" action="/logout" style="margin:0">
+            <button type="submit">Keluar</button>
+        </form>
+    </nav>
+</header>
+
+<main class="neiiu-wrap">
+
+    <h1 class="neiiu-title">Generator Landing Page + AMP</h1>
+    <p class="neiiu-sub">
+        Masukkan keyword. NEIIU akan mencari di Google, menganalisis
+        halaman yang sedang ngerank, lalu menyusun landing page dan
+        versi AMP baru dari pola yang mereka pakai.
+        Satu run butuh puluhan menit, jadi prosesnya jalan di belakang
+        layar dan halaman ini menampilkan kemajuannya.
+    </p>
+
+    <section class="card">
+        <h2>Buat Halaman Baru</h2>
+
+        <form id="jobForm">
+            <div class="grid">
+                <div class="field">
+                    <label for="keyword">Keyword</label>
+                    <input
+                        type="text"
+                        id="keyword"
+                        name="keyword"
+                        placeholder="contoh: slot gacor"
+                        maxlength="120"
+                        required
+                        autocomplete="off"
+                    >
+                    <span class="hint">
+                        Topik yang dicari orang di Google, dan yang
+                        mau di-rank.
+                    </span>
+                </div>
+
+                <div class="field">
+                    <label for="brandName">Brand</label>
+                    <input
+                        type="text"
+                        id="brandName"
+                        name="brandName"
+                        placeholder="contoh: ABECE"
+                        maxlength="60"
+                        autocomplete="off"
+                    >
+                    <span class="hint">
+                        Nama situs yang muncul di halamannya.
+                        Berbeda dari keyword. Kosongkan untuk memakai
+                        SITE_NAME dari .env
+                    </span>
+                </div>
+
+                <div class="field" style="grid-column: 1 / -1">
+                    <label for="baseUrl">Domain brand</label>
+                    <input
+                        type="text"
+                        id="baseUrl"
+                        name="baseUrl"
+                        placeholder="contoh: https://abece.com"
+                        maxlength="200"
+                        autocomplete="off"
+                    >
+                    <span class="hint">
+                        Dipakai untuk canonical, sitemap, dan
+                        structured data. Kosongkan untuk memakai
+                        SITE_BASE_URL dari .env
+                    </span>
+                </div>
+
+                <div class="field">
+                    <label for="provider">Sumber SERP</label>
+                    <select id="provider" name="provider">
+                        <option value="serper">Serper.dev (butuh API key)</option>
+                        <option value="google_cse">Google CSE (butuh API key)</option>
+                        <option value="manual">Manual (dari serp_manual.json)</option>
+                    </select>
+                    <span class="hint">
+                        Default dari .env: <b>{{ default_provider }}</b>
+                    </span>
+                </div>
+
+                <div class="field">
+                    <label for="crawl">Halaman di-crawl</label>
+                    <input
+                        type="number"
+                        id="crawl"
+                        name="crawl"
+                        min="1"
+                        max="20"
+                        value="{{ default_crawl }}"
+                    >
+                    <span class="hint">
+                        Makin sedikit, makin cepat selesai.
+                    </span>
+                </div>
+
+                <div class="field" style="grid-column: 1 / -1">
+                    <label for="reference">
+                        URL halaman acuan (opsional)
+                    </label>
+                    <input
+                        type="text"
+                        id="reference"
+                        name="reference"
+                        placeholder="kosongkan biar NEIIU yang pilih sendiri"
+                        autocomplete="off"
+                    >
+                    <span class="hint">
+                        Yang diambil dari halaman ini hanya struktur
+                        section dan gaya visualnya, bukan teks atau
+                        kodenya.
+                    </span>
+                </div>
+            </div>
+
+            <div class="checks">
+                <label class="check">
+                    <input type="checkbox" id="useCache" checked>
+                    Pakai cache SERP (12 jam)
+                </label>
+                <label class="check">
+                    <input type="checkbox" id="analyzeOnly">
+                    Analisis saja, tanpa membuat halaman
+                </label>
+            </div>
+
+            <button type="submit" class="primary-btn" id="submitBtn">
+                Jalankan
+            </button>
+
+            <div id="formNotice" class="notice" hidden></div>
+        </form>
+    </section>
+
+    <section class="card" id="progressCard" hidden>
+        <h2>Sedang Berjalan</h2>
+
+        <div class="steps" id="stepDots"></div>
+        <div class="step-now" id="stepNow">Menunggu giliran...</div>
+        <div class="step-count" id="stepCount"></div>
+
+        <div class="log" id="jobLog"></div>
+    </section>
+
+    <section class="card">
+        <h2>Riwayat</h2>
+        <div id="jobList">
+            <div class="empty">Memuat...</div>
+        </div>
+    </section>
+
+</main>
+
+<script src="{{ url_for('static', path='/neiiu.js') }}?v=1"></script>
+</body>
+</html>

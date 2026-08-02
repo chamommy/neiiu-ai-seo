@@ -10,7 +10,7 @@
     <header class="admin-top">
         <a href="/chat" class="brand">
             <img
-                src="https://ik.imagekit.io/haim3/neiiuai%20logo.jpg"
+                src="/static/logo.jpg"
                 alt="NEIIU AI"
             >
             <span>NEIIU AI</span>
@@ -126,6 +126,107 @@
                     </article>
                 {% endfor %}
             </div>
+        </section>
+
+        <section class="admin-card" id="ip">
+            <h2>Akses per alamat IP</h2>
+
+            <p class="muted">
+                Membatasi perangkat mana yang boleh membuka NEIIU AI.
+                Berguna setelah server dibuka ke jaringan lokal, supaya
+                bukan sembarang perangkat di jaringan yang sama bisa
+                sampai ke halaman login.
+            </p>
+
+            <div class="ip-status">
+                <div>
+                    <strong>
+                        Status:
+                        {% if ip_enabled %}
+                            <span class="ip-on">Menyala</span>
+                        {% else %}
+                            <span class="ip-off">Mati</span>
+                        {% endif %}
+                    </strong>
+                    <small>
+                        {% if ip_enabled %}
+                            Hanya alamat di daftar bawah yang bisa masuk.
+                        {% else %}
+                            Semua perangkat di jaringan bisa masuk.
+                        {% endif %}
+                    </small>
+                </div>
+
+                <form method="post" action="/admin/ip/toggle">
+                    <input
+                        type="hidden"
+                        name="enabled"
+                        value="{% if ip_enabled %}0{% else %}1{% endif %}"
+                    >
+                    <button class="primary" type="submit">
+                        {% if ip_enabled %}
+                            Matikan penyaringan
+                        {% else %}
+                            Nyalakan penyaringan
+                        {% endif %}
+                    </button>
+                </form>
+            </div>
+
+            <p class="ip-hint">
+                Alamat perangkat yang kamu pakai sekarang:
+                <code>{{ client_ip }}</code>
+            </p>
+
+            <form method="post" action="/admin/ip" class="admin-form">
+                <input
+                    name="value"
+                    placeholder="192.168.1.20 atau 192.168.1.0/24"
+                    value="{{ client_ip }}"
+                    required
+                >
+                <input name="label" placeholder="Keterangan, misal: laptop kantor">
+                <button class="primary" type="submit">Tambah IP</button>
+            </form>
+
+            <p class="ip-hint muted">
+                Isi satu alamat, atau satu rentang dengan format CIDR.
+                <code>192.168.1.0/24</code> mengizinkan seluruh jaringan
+                rumah sekaligus, berguna karena alamat perangkat bisa
+                berganti sendiri setiap tersambung ulang.
+            </p>
+
+            <div class="user-table">
+                {% for item in allowed_ips %}
+                    <article class="user-row">
+                        <div>
+                            <strong>{{ item.value }}</strong>
+                            <small>
+                                {{ item.label or 'tanpa keterangan' }}
+                                · ditambahkan {{ item.created_by }}
+                            </small>
+                        </div>
+
+                        <form
+                            method="post"
+                            action="/admin/ip/{{ item.id }}/delete"
+                        >
+                            <button>Hapus</button>
+                        </form>
+                    </article>
+                {% else %}
+                    <p class="muted">
+                        Belum ada alamat yang didaftarkan.
+                    </p>
+                {% endfor %}
+            </div>
+
+            <p class="ip-hint muted">
+                Komputer yang menjalankan server ini
+                (<code>127.0.0.1</code>) selalu bisa masuk dan tidak
+                bisa dihapus dari daftar. Itu jaring pengaman supaya
+                daftar yang salah atur masih bisa dibetulkan.
+            </p>
         </section>
     </main>
 </body>

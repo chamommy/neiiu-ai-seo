@@ -1,0 +1,6 @@
+application/x-ndjson: match=True got_len=32 want_len=32
+  got='Café — naïve “quote” 日本語 emoji 😀'
+application/json: match=True got_len=32 want_len=32
+  got='Café — naïve “quote” 日本語 emoji 😀'
+text/plain: match=False got_len=49 want_len=32
+  got='CafÃ© â\x80\x94 naÃ¯ve â\x80\x9cquoteâ\x80\x9d æ\x97¥æ\x9c¬èª\x9e emoji ð\x9f\x98\x80'

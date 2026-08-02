@@ -1,0 +1,363 @@
+/* Halaman generator NEIIU. Memakai token warna dari style.css. */
+
+.neiiu-body {
+    display: block;
+    min-height: 100vh;
+}
+
+.neiiu-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 14px 22px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    position: sticky;
+    top: 0;
+    z-index: 5;
+}
+
+.neiiu-top .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--green);
+    text-decoration: none;
+    font-weight: 700;
+}
+
+.neiiu-top .brand img {
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+}
+
+.neiiu-nav {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.neiiu-nav a,
+.neiiu-nav button {
+    padding: 8px 14px;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    text-decoration: none;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.neiiu-nav a:hover,
+.neiiu-nav button:hover {
+    border-color: var(--green-dark);
+}
+
+.neiiu-wrap {
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 26px 22px 70px;
+}
+
+.neiiu-title {
+    margin: 0 0 6px;
+    font-size: 26px;
+    letter-spacing: -0.4px;
+}
+
+.neiiu-sub {
+    margin: 0 0 26px;
+    color: var(--muted);
+    font-size: 15px;
+    line-height: 1.6;
+}
+
+.card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 22px;
+    margin-bottom: 22px;
+}
+
+.card h2 {
+    margin: 0 0 16px;
+    font-size: 17px;
+    letter-spacing: -0.2px;
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 14px;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.field label {
+    font-size: 13px;
+    color: var(--muted);
+}
+
+.field input[type="text"],
+.field input[type="number"],
+.field select {
+    padding: 11px 13px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    width: 100%;
+}
+
+.field input:focus,
+.field select:focus {
+    outline: none;
+    border-color: var(--green-dark);
+}
+
+.field .hint {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+}
+
+.checks {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    margin: 16px 0 4px;
+}
+
+.check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    color: var(--text);
+    cursor: pointer;
+}
+
+.primary-btn {
+    margin-top: 18px;
+    padding: 13px 26px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--green);
+    color: #04180d;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.primary-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.notice {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: var(--muted);
+}
+
+.notice.error {
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+.notice.ok {
+    border-color: var(--green-dark);
+    color: var(--green);
+}
+
+/* progres */
+
+.steps {
+    display: flex;
+    gap: 5px;
+    margin-bottom: 14px;
+}
+
+.step-dot {
+    flex: 1;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+}
+
+.step-dot.done {
+    background: var(--green);
+    border-color: var(--green);
+}
+
+.step-dot.active {
+    background: var(--green-dark);
+    border-color: var(--green);
+}
+
+.step-now {
+    font-size: 15px;
+    margin-bottom: 4px;
+}
+
+.step-count {
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 14px;
+}
+
+.log {
+    max-height: 260px;
+    overflow-y: auto;
+    background: #050505;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.75;
+    color: var(--muted);
+}
+
+.log div:last-child {
+    color: var(--text);
+}
+
+/* daftar job */
+
+.job {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--panel-2);
+    padding: 16px 18px;
+    margin-bottom: 12px;
+}
+
+.job-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.job-keyword {
+    font-weight: 700;
+    font-size: 15.5px;
+}
+
+.badge {
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+.badge.success {
+    color: var(--green);
+    border-color: var(--green-dark);
+}
+
+.badge.error {
+    color: var(--danger);
+    border-color: var(--danger);
+}
+
+.badge.running {
+    color: #ffd166;
+    border-color: #7a5c1e;
+}
+
+.job-meta {
+    margin-top: 8px;
+    font-size: 13px;
+    color: var(--muted);
+    line-height: 1.7;
+}
+
+.job-stats {
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+    font-size: 13px;
+}
+
+.job-stats b {
+    color: var(--text);
+}
+
+.job-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 14px;
+}
+
+.job-actions a,
+.job-actions button {
+    padding: 7px 13px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    font-size: 13px;
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.job-actions a:hover,
+.job-actions button:hover {
+    border-color: var(--green-dark);
+}
+
+.job-actions .danger {
+    color: var(--danger);
+}
+
+.job-actions .primary-link {
+    border-color: var(--green-dark);
+    color: var(--green);
+    font-weight: 600;
+}
+
+.job-problems {
+    margin: 10px 0 0;
+    padding-left: 18px;
+    font-size: 13px;
+    color: var(--muted);
+    line-height: 1.7;
+}
+
+.empty {
+    color: var(--muted);
+    font-size: 14px;
+    padding: 8px 0;
+}
+
+@media (max-width: 640px) {
+    .neiiu-wrap {
+        padding: 20px 16px 60px;
+    }
+
+    .card {
+        padding: 18px;
+    }
+}

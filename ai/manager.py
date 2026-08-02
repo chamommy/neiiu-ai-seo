@@ -12,10 +12,12 @@ class AIManager:
         provider: str = "ollama",
         model: str = "qwen3:4b",
         max_tokens: int = 300,
+        context_length: int = 4096,
     ) -> None:
         self.provider = provider.strip().lower()
         self.model = model
         self.max_tokens = max_tokens
+        self.context_length = context_length
         self.client = self._create_client()
 
     def _create_client(self) -> BaseAI:
@@ -23,6 +25,7 @@ class AIManager:
             return OllamaAI(
                 model=self.model,
                 max_tokens=self.max_tokens,
+                context_length=self.context_length,
             )
 
         if self.provider == "openai":
@@ -39,9 +42,11 @@ class AIManager:
         prompt: str,
         system_prompt: str | None = None,
         response_schema: dict | None = None,
+        on_progress=None,
     ) -> dict:
         return self.client.ask(
             prompt=prompt,
             system_prompt=system_prompt,
             response_schema=response_schema,
+            on_progress=on_progress,
         )

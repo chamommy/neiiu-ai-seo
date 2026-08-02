@@ -1,0 +1,33 @@
+# Rahasia. JANGAN PERNAH di-commit.
+.env
+.env.*
+!.env.example
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Database lokal
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Hasil generate dan cache pipeline
+output/
+database/cache/
+database/serp_cache/
+database/reports/
+
+# Editor dan OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

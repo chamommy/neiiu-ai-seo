@@ -47,6 +47,46 @@ a {
     color: var(--green);
 }
 
+.ip-status {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 14px 16px;
+    margin: 14px 0;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel-2);
+}
+
+.ip-status small {
+    display: block;
+    color: var(--muted);
+    margin-top: 4px;
+}
+
+.ip-on {
+    color: var(--green);
+}
+
+.ip-off {
+    color: var(--muted);
+}
+
+.ip-hint {
+    font-size: 13px;
+    line-height: 1.7;
+    margin: 10px 0;
+}
+
+.ip-hint code {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 1px 6px;
+}
+
 .muted {
     color: var(--muted);
 }
