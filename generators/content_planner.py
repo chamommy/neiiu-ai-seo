@@ -17,7 +17,13 @@ from ai.neiiu_prompts import (
     build_serp_insight_prompt,
     build_template_content_prompt,
 )
+from generators.content_batches import (
+    answer_chars,
+    merge_batch_content,
+    plan_batches,
+)
 from generators.template_filler import (
+    balance_paired_roles,
     build_dynamic_schema,
     fit_content_to_spec,
     scale_spec,
@@ -45,6 +51,21 @@ from utils.text import (
 # yang nanti benar-benar diminta ke Ollama.
 CONTEXT_MARGIN = 512
 
+# Porsi ruang satu giliran yang disediakan untuk teks jawaban;
+# sisanya untuk daftar permintaan di promptnya. Jawaban diberi porsi
+# lebih besar karena itulah yang dipakai halaman, sementara daftar
+# permintaan cuma pengantar. Porsi yang terbalik membuat giliran
+# penuh keterangan tapi jawabannya terpotong.
+ANSWER_SHARE = 0.65
+
+# Sasaran panjang jawaban satu giliran. Bukan batas context - context
+# masih sanggup lebih - melainkan ukuran yang membuat prosesnya
+# terbaca maju. Di CPU 3,5 token per detik, angka ini kira-kira 17
+# menit per giliran; giliran yang tiga kali lebih besar cuma
+# memindahkan seluruh risiko ke satu permintaan yang kalau gagal
+# menghanguskan sejam kerja.
+BATCH_ANSWER_TOKENS = 3500
+
 
 def round_up(value: int, step: int) -> int:
     return ((value + step - 1) // step) * step
@@ -56,9 +77,16 @@ def ask_structured(
     schema: dict,
     max_tokens: int,
     on_progress=None,
+    context_length: int = 0,
 ) -> dict:
     """
     Mengirim prompt ke AI dan mengembalikan objek JSON hasilnya.
+
+    context_length boleh dipatok dari luar. Itu penting untuk
+    permintaan yang dikirim beberapa kali berturut-turut: mengubah
+    num_ctx membuat Ollama memuat ulang model dan membuang cache
+    prompt, sehingga awalan yang sengaja dibuat identik justru
+    diproses ulang dari nol setiap giliran.
     """
     needed = (
         estimate_tokens(system_prompt)
@@ -72,7 +100,7 @@ def ask_structured(
     # tanpa error dan hasilnya jadi ngawur, tapi memasang context
     # jauh lebih besar dari yang dipakai cuma memperlambat inferensi
     # dan memakan memori.
-    context_length = max(4096, round_up(needed, 2048))
+    context_length = context_length or max(4096, round_up(needed, 2048))
 
     if context_length > AI_CONTEXT_LENGTH:
         print(
@@ -312,10 +340,17 @@ def generate_template_content(
     """
     Menghasilkan potongan teks sebanyak slot di template pengguna.
 
-    Schema-nya dibentuk dari template, bukan konstanta, supaya
-    jumlah yang diminta ke model sama persis dengan jumlah tempat
-    yang tersedia. Hasilnya tetap dicocokkan ulang sesudahnya,
-    karena dukungan minItems di llama.cpp berbeda antar versi.
+    Dikerjakan beberapa giliran, bukan sekali kirim. Template
+    sungguhan punya jauh lebih banyak teks daripada yang muat dalam
+    satu context: halaman 720 KB yang dipakai menguji punya 658
+    potongan teks. Selama semuanya diminta sekaligus, satu-satunya
+    jalan adalah memotong daftar permintaan, dan slot yang terpotong
+    terbit dengan kalimat asli milik template.
+
+    Schema tiap giliran dibentuk dari template, bukan konstanta,
+    supaya jumlah yang diminta sama persis dengan jumlah tempat yang
+    tersedia. Hasilnya tetap dicocokkan ulang sesudahnya, karena
+    dukungan minItems di llama.cpp berbeda antar versi.
     """
     # Jatah panjang di spec bersatuan kolom tampilan, karena itu yang
     # menentukan apakah teksnya masih muat di tata letak template.
@@ -328,63 +363,118 @@ def generate_template_content(
 
     spec = scale_spec(spec, zona.get("chars_per_column", 1.0))
 
-    system_prompt, user_prompt = build_template_content_prompt(
+    # Berapa karakter yang muat dalam satu token sangat berbeda antar
+    # aksara. Tokenizer byte-level memecah aksara Thai hampir satu
+    # token per karakter, sedangkan teks Latin sekitar dua.
+    per_token = 1.0 if zona["word_mode"] == "unspaced" else 2.0
+
+    # Brief-nya diukur dengan permintaan kosong, karena bagian itulah
+    # yang sama di setiap giliran. Sisanya yang bisa dipakai memuat
+    # daftar permintaan sekaligus jawabannya.
+    sistem_contoh, brief_contoh = build_template_content_prompt(
         analysis=analysis,
         insight=insight,
-        spec=spec,
+        spec={},
         brand=brand,
     )
 
-    # Ruang jawaban dihitung dari kebutuhan template, bukan dipatok.
-    # Template kecil tidak perlu menunggu model menulis 5000 token.
-    needed_chars = sum(
-        (rule.get("max_length_any") or rule["max_length"])
-        * max(rule["count"], 1)
-        for rule in spec.values()
+    tetap = estimate_tokens(sistem_contoh) + estimate_tokens(brief_contoh)
+    ruang = AI_CONTEXT_LENGTH - tetap - CONTEXT_MARGIN
+
+    # Ruangnya dibagi dua: daftar permintaan di sisi prompt, dan teks
+    # jawaban di sisi keluaran. Porsi jawaban dibuat lebih besar
+    # karena itu yang dipakai, sementara daftar permintaannya cuma
+    # pengantar.
+    batches = plan_batches(
+        spec,
+        answer_budget=max(
+            400,
+            int(
+                min(ruang * ANSWER_SHARE, BATCH_ANSWER_TOKENS) * per_token
+            ),
+        ),
+        prompt_budget=max(400, int(ruang * (1 - ANSWER_SHARE) * per_token)),
     )
 
-    # Berapa karakter yang muat dalam satu token sangat berbeda antar
-    # aksara. Tokenizer byte-level memecah aksara Thai hampir satu
-    # token per karakter, sedangkan teks Latin sekitar tiga. Memakai
-    # angka Latin untuk halaman Thai memberi jatah kira-kira setengah
-    # dari yang dibutuhkan, dan jawaban model terpotong di tengah
-    # JSON - yang berarti seluruh langkah 5 gagal, bukan sekadar
-    # hasilnya pendek.
-    per_token = 1.0 if zona["word_mode"] == "unspaced" else 2.0
+    # num_ctx dipatok satu nilai untuk semua giliran. Mengubahnya di
+    # tengah membuat Ollama memuat ulang model dan membuang cache
+    # prompt, sehingga awalan yang sengaja dibuat identik justru
+    # diproses ulang dari nol - persis yang mau dihindari.
+    context_length = max(4096, round_up(AI_CONTEXT_LENGTH, 2048))
 
-    diminta = int(needed_chars / per_token) + 400
+    hasil: list[dict] = []
+    warnings: list[str] = []
+    metadata: dict = {}
 
-    # Plafonnya sisa context, bukan angka di config.
-    #
-    # Jawaban yang menabrak batas context tidak berhenti dengan rapi;
-    # ia putus di tengah JSON, dan itu berarti seluruh langkah ini
-    # gagal - bukan sekadar hasilnya lebih pendek. AI_MAX_TOKENS_PLAN
-    # ditetapkan waktu template yang diuji masih seukuran halaman
-    # contoh; template sungguhan 720 KB butuh jauh lebih banyak, dan
-    # memaksakan angka lama memotong jawaban setelah satu jam
-    # menunggu.
-    tersisa = (
-        AI_CONTEXT_LENGTH
-        - estimate_tokens(system_prompt)
-        - estimate_tokens(user_prompt)
-        - CONTEXT_MARGIN
-    )
+    if len(batches) > 1:
+        warnings.append(
+            f"Isi halaman ditulis dalam {len(batches)} giliran karena "
+            "teksnya tidak muat diminta sekaligus."
+        )
 
-    max_tokens = max(600, min(diminta, tersisa))
+    for nomor, bagian in enumerate(batches, start=1):
+        system_prompt, user_prompt = build_template_content_prompt(
+            analysis=analysis,
+            insight=insight,
+            spec=bagian,
+            brand=brand,
+        )
 
-    raw = ask_structured(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        schema=build_dynamic_schema(spec),
-        max_tokens=max_tokens,
-        on_progress=on_progress,
-    )
+        needed_chars = answer_chars(bagian)
 
-    content, warnings = fit_content_to_spec(raw, spec, fallbacks or {})
+        # Plafonnya sisa context, bukan angka di config. Jawaban yang
+        # menabrak batas context tidak berhenti dengan rapi; ia putus
+        # di tengah JSON, dan itu berarti seluruh giliran gagal.
+        tersisa = (
+            context_length
+            - estimate_tokens(system_prompt)
+            - estimate_tokens(user_prompt)
+            - CONTEXT_MARGIN
+        )
 
-    content["_metadata"] = raw.get("_metadata", {})
+        max_tokens = max(
+            600,
+            min(int(needed_chars / per_token) + 400, tersisa),
+        )
+
+        raw = ask_structured(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            schema=build_dynamic_schema(bagian),
+            max_tokens=max_tokens,
+            on_progress=batch_progress(on_progress, nomor, len(batches)),
+            context_length=context_length,
+        )
+
+        isi, peringatan = fit_content_to_spec(raw, bagian, fallbacks or {})
+
+        hasil.append(isi)
+        warnings.extend(peringatan)
+        metadata = raw.get("_metadata", metadata)
+
+    content = merge_batch_content(hasil, spec)
+
+    warnings.extend(balance_paired_roles(content))
+
+    content["_metadata"] = metadata
 
     return content, warnings
+
+
+def batch_progress(on_progress, nomor: int, jumlah: int):
+    """
+    Menyisipkan nomor giliran ke laporan kemajuan.
+
+    Tanpa ini, pencacah token kembali ke nol tiap giliran dan
+    prosesnya terbaca seperti mengulang dari awal, bukan maju.
+    """
+    if not on_progress:
+        return None
+
+    def report(info: dict) -> None:
+        on_progress({**info, "batch": nomor, "batches": jumlah})
+
+    return report
 
 
 def check_language(plan: dict, region: str) -> str:

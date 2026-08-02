@@ -74,6 +74,48 @@ class PipelineError(RuntimeError):
     """
 
 
+def content_failure_hint(error: Exception) -> str:
+    """
+    Memilih saran yang cocok dengan kegagalannya.
+
+    Dulu satu saran dipakai untuk semua sebab: "pastikan Ollama
+    berjalan dan model sudah ter-pull". Untuk satu-satunya sebab yang
+    memang itu, kalimatnya benar. Untuk sisanya ia menyuruh orang
+    memeriksa hal yang sama sekali tidak rusak, sekaligus menutupi
+    sebab yang sesungguhnya.
+
+    Contoh nyatanya: job yang dihentikan di tengah jalan membuat
+    Ollama menjawab 500 untuk permintaan yang batal, dan pesan lama
+    membacanya sebagai "Ollama mati" padahal Ollama sehat dan job itu
+    memang sengaja dihentikan.
+    """
+    teks = str(error).lower()
+
+    # Kesalahan dari lapisan Ollama sudah menjelaskan sebab dan jalan
+    # keluarnya sendiri; menambahi saran umum cuma mengaburkannya.
+    if "tidak dapat dihubungi" in teks or "tidak mengirim data" in teks:
+        return ""
+
+    if "500" in teks and "/api/chat" in teks:
+        return (
+            "Ollama memutus permintaannya di tengah jalan. Paling "
+            "sering ini berarti prosesnya dihentikan - server "
+            "dimatikan atau job dibatalkan - bukan Ollama yang mati. "
+            "Kalau berulang tanpa dihentikan siapa pun, cek log "
+            "Ollama."
+        )
+
+    if "bukan json" in teks or "json terstruktur" in teks:
+        return (
+            "Jawaban model berhenti sebelum JSON-nya selesai. "
+            "Templatenya kemungkinan meminta terlalu banyak teks "
+            "sekaligus untuk model ini; kurangi jumlah halaman yang "
+            "di-crawl atau pakai template yang lebih ringkas."
+        )
+
+    return "Pastikan Ollama berjalan dan model sudah ter-pull."
+
+
 def build_brand(
     brand_name: str = "",
     base_url: str = "",
@@ -647,18 +689,28 @@ def run_neiiu(
         berkala, prosesnya tidak bisa dibedakan dari yang menggantung.
         """
         def report(info: dict) -> None:
+            # Isi template dikerjakan beberapa giliran, karena satu
+            # permintaan tidak muat menampung seluruh teks halaman.
+            # Nomor gilirannya ikut ditampilkan supaya kemajuannya
+            # terbaca sebagai maju, bukan sebagai mengulang.
+            giliran = ""
+
+            if info.get("batches", 1) > 1:
+                giliran = f"bagian {info['batch']}/{info['batches']} — "
+
             if info["tokens"] == 0:
                 emit(
                     step,
                     "info",
-                    "  memproses prompt, belum ada token keluar...",
+                    f"  {giliran}memproses prompt, "
+                    "belum ada token keluar...",
                 )
                 return
 
             emit(
                 step,
                 "info",
-                f"  menulis... {info['tokens']} token "
+                f"  {giliran}menulis... {info['tokens']} token "
                 f"({info['elapsed']} detik)",
             )
 
@@ -838,10 +890,12 @@ def run_neiiu(
             template=template,
         )
 
+        saran = content_failure_hint(error)
+
         raise PipelineError(
             f"Gagal menyusun konten: {error}. "
-            "Pastikan Ollama berjalan dan model sudah ter-pull. "
-            "Analisis SERP tetap tersimpan."
+            + (f"{saran} " if saran else "")
+            + "Analisis SERP tetap tersimpan."
         ) from error
 
     language_warning = check_language(plan, region)

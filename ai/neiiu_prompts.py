@@ -287,6 +287,10 @@ ROLE_LABELS = {
 }
 
 
+# Sampai berapa banyak teks batas panjangnya disebut satu per satu.
+MAX_PER_ITEM_LIMITS = 30
+
+
 def build_template_content_prompt(
     analysis: dict,
     insight: dict,
@@ -321,10 +325,19 @@ def build_template_content_prompt(
             kebutuhan.append(
                 f"- {role}: 1 teks, maksimal {limit} karakter ({label})"
             )
-        elif len(set(jatah)) > 1 and len(jatah) == count:
+        elif (
+            len(set(jatah)) > 1
+            and len(jatah) == count
+            and count <= MAX_PER_ITEM_LIMITS
+        ):
             # Slot dalam satu kelompok jarang sama lebarnya. Batas
             # per teks disebutkan supaya model menakar sendiri, bukan
             # menulis semuanya sepanjang slot terlebar lalu dipotong.
+            #
+            # Hanya untuk kelompok kecil. Menyebut batas satu per satu
+            # untuk 355 label menghabiskan ribuan token prompt demi
+            # keterangan yang selisihnya beberapa karakter, dan ruang
+            # itu jauh lebih berguna dipakai menulis jawabannya.
             kebutuhan.append(
                 f"- {role}: tepat {count} teks ({label}), batas per teks: "
                 + ", ".join(
@@ -361,7 +374,16 @@ def build_template_content_prompt(
         else ""
     )
 
-    user_prompt = f"""
+    # Bagian ini SAMA PERSIS di setiap giliran, dan harus tetap
+    # begitu. Ollama menyimpan hasil pemrosesan prompt dan memakainya
+    # ulang selama awalannya identik; terukur di mesin ini, prompt
+    # 1389 token yang pertama kali makan 242 detik jadi 0,2 detik
+    # saat diulang. Karena itu seluruh brief dan seluruh aturan
+    # ditaruh di depan, dan daftar yang berubah-ubah tiap giliran
+    # ditaruh paling belakang. Menyisipkan apa pun yang berbeda per
+    # giliran ke dalam blok ini akan membatalkan cache-nya dan
+    # membuat setiap giliran membayar prefill dari nol.
+    brief = f"""
 # MENGISI TEMPLATE HALAMAN
 
 Keyword utama: {keyword}
@@ -390,14 +412,13 @@ Pertanyaan yang dicari orang:
     limit=10,
 )}
 
-# YANG HARUS KAMU TULIS
+# ATURAN
 
-Halamannya memakai template yang sudah jadi, jadi jumlah teksnya
-tidak boleh dikira-kira. Tulis persis sebanyak ini:
-
-{chr(10).join(kebutuhan)}
-{bagian_padanan}
-Aturan:
+- Semua teks harus tentang "{keyword}" dan tidak boleh melenceng
+  ke topik lain, apa pun bunyi teks lama yang digantikan.
+- Tulis ulang dengan kalimatmu sendiri. Jangan menyalin susunan
+  kalimat teks lama, karena halaman ini harus berdiri sebagai
+  tulisan baru, bukan versi ubahan.
 - Batas karakter itu keras. Teks yang lebih panjang akan merusak
   tata letak halaman, karena kolom dan kartunya sudah dipatok.
 - nav_label, table_cell, dan label mengisi menu, tombol, dan sel
@@ -414,9 +435,19 @@ Aturan:
 - Jangan menjanjikan hasil, keuntungan, atau kemenangan.
 """.strip()
 
+    # Mulai dari sini isinya berbeda tiap giliran.
+    permintaan = f"""
+# YANG HARUS KAMU TULIS SEKARANG
+
+Halamannya memakai template yang sudah jadi, jadi jumlah teksnya
+tidak boleh dikira-kira. Tulis persis sebanyak ini:
+
+{chr(10).join(kebutuhan)}
+{bagian_padanan}""".rstrip()
+
     return (
         content_planner_system_prompt(language_code),
-        user_prompt,
+        f"{brief}\n\n{permintaan}",
     )
 
 

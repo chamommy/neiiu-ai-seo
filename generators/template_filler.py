@@ -52,14 +52,22 @@ LIST_ROLES = (
     "label",
 )
 
-# Peran yang isi satu slotnya hanya masuk akal kalau slot pasangannya
-# ikut terisi. Pertanyaan tanpa jawaban barunya, atau ulasan tanpa nama
-# pengulas barunya, terbaca lebih janggal daripada kartu yang seluruhnya
-# masih memakai teks lama template.
-PAIRED_ROLES = {
+# Peran yang jumlah isiannya dibatasi oleh pasangannya, DAN ARAHNYA
+# hanya satu.
+#
+# Yang terbaca sebagai halaman rusak adalah pertanyaan baru yang
+# berdiri di atas jawaban lama. Kebalikannya tidak: jawaban baru di
+# bawah pertanyaan yang tidak dikenali sebagai slot tetap wajar,
+# karena pertanyaan itu tertulis ulang lewat perannya sendiri.
+#
+# Dulu batas ini dipasang dua arah, dan itu merugikan dua kali.
+# Template dengan 8 tempat pertanyaan tapi 17 tempat jawaban membuat
+# 9 jawaban dibiarkan memakai kalimat asli template. Lebih parah,
+# template yang menaruh nama pengulas di dalam kalimat ulasannya -
+# jadi tidak punya slot review_author sama sekali - membuat SELURUH
+# ulasannya tidak terisi, karena batasnya jadi nol.
+CAPPED_BY_PAIR = {
     "faq_question": "faq_answer",
-    "faq_answer": "faq_question",
-    "review_text": "review_author",
     "review_author": "review_text",
 }
 
@@ -73,33 +81,6 @@ GENERATED_ROLES = ("date", "review_date", "lang", "city", "brand")
 # ke sesuatu yang nyata di situs itu; menggantinya dengan kata lain
 # membuat tautannya menyesatkan meskipun alamatnya tidak berubah.
 KEEP_MEANING_ROLES = ("nav_label", "table_cell", "label")
-
-
-# Berapa banyak teks yang paling banyak diminta ke AI untuk peran
-# yang isinya label pendek.
-#
-# Template sungguhan bukan halaman contoh. Satu template toko 720 KB
-# punya 477 tautan yang semuanya tertangkap sebagai label menu, dan
-# isinya ternyata perabot antarmuka: "Clear search", "Choose your
-# location", "Total items in cart". Meminta model lokal menulis 477
-# label sekaligus bukan cuma lambat - promptnya saja memakan 13.800
-# dari 16.384 token context, sehingga jawabannya tidak punya ruang
-# tersisa, terpotong di tengah JSON, dan seluruh job gagal setelah
-# lebih dari satu jam menunggu.
-#
-# Menulis ulang label seperti itu juga tidak menambah apa-apa; yang
-# ada malah merusak tombol yang fungsinya sudah benar.
-#
-# Yang lewat batas ini TIDAK ditinggalkan begitu saja: teks lamanya
-# dipakai kembali, dan nama brand lama di dalamnya tetap diganti
-# lewat brand_edits. Yang hilang hanya penulisan ulang kalimatnya.
-AI_SLOT_CAP = {
-    "nav_label": 24,
-    "label": 24,
-    "caption": 24,
-    "list_item": 20,
-    "table_cell": 20,
-}
 
 
 def derive_spec(slot_map: dict) -> dict:
@@ -117,11 +98,15 @@ def derive_spec(slot_map: dict) -> dict:
         if role in GENERATED_ROLES:
             continue
 
-        batas = AI_SLOT_CAP.get(role)
-
-        if batas and len(slots) > batas:
-            slots = slots[:batas]
-
+        # Semua slot ikut, tanpa dibatasi.
+        #
+        # Dulu ada batas per peran di sini, karena satu permintaan ke
+        # model tidak muat menampung 658 teks sekaligus. Batas itu
+        # menyelesaikan masalah yang salah: yang tidak muat bukan
+        # templatenya, melainkan cara memintanya. Sejak permintaannya
+        # dipecah beberapa giliran di content_batches, seluruh slot
+        # kebagian dan tidak ada lagi kalimat asli template yang
+        # tertinggal di halaman terbit.
         budgets = [slot["budget"] for slot in slots]
 
         spec[role] = {
@@ -400,45 +385,44 @@ def fit_content_to_spec(
 
         filled[role] = items
 
-    # Penyeimbangan pasangan dilakukan PALING AKHIR, sesudah
-    # penambalan, bukan sebelumnya.
-    #
-    # Penambalan hanya punya bahan cadangan untuk satu sisi:
-    # pertanyaan bisa diambil dari "People also ask", jawabannya
-    # tidak ada. Jadi kalau model kurang menulis, pertanyaan bisa
-    # penuh 8 sementara jawaban tetap 3. Slot ke-4 sampai ke-8
-    # lalu terbit dengan pertanyaan baru tentang keyword baru di
-    # atas jawaban lama milik pemilik template.
-    #
-    # Dipotong sampai sejajar berarti kartu sisanya memakai
-    # pertanyaan lama DAN jawaban lama, yang setidaknya masih
-    # nyambung satu sama lain.
-    for kiri, kanan in (
-        ("faq_question", "faq_answer"),
-        ("review_text", "review_author"),
-    ):
-        if kiri not in filled or kanan not in filled:
-            continue
-
-        a, b = filled[kiri], filled[kanan]
-
-        if len(a) == len(b):
-            continue
-
-        cukup = min(len(a), len(b))
-
-        warnings.append(
-            f"{len(a)} {kiri} dan {len(b)} {kanan} tidak sejajar; "
-            f"dipakai {cukup} pasang supaya tidak ada pertanyaan baru "
-            "yang berdiri di atas jawaban lama."
-        )
-
-        filled[kiri] = a[:cukup]
-        filled[kanan] = b[:cukup]
-
     filled["_by_old"] = pair_by_old_text(spec, filled)
 
     return filled, warnings
+
+
+def balance_paired_roles(content: dict) -> list[str]:
+    """
+    Menyamakan jumlah pertanyaan dengan jumlah jawaban yang tersedia.
+
+    Dijalankan SESUDAH semua giliran disatukan, bukan di dalam tiap
+    giliran. Pertanyaan dan jawabannya sering jatuh di giliran yang
+    berbeda, dan menyeimbangkan per giliran berarti memangkas satu
+    sisi hanya karena pasangannya belum dikerjakan - giliran yang
+    isinya pertanyaan saja akan dipotong habis jadi nol.
+
+    Arahnya satu, sama seperti CAPPED_BY_PAIR: yang dipangkas
+    pertanyaannya, bukan jawabannya. Pertanyaan baru di atas jawaban
+    lama terbaca sebagai halaman rusak; jawaban yang lebih banyak
+    dari pertanyaannya tidak.
+    """
+    catatan: list[str] = []
+
+    for dibatasi, pembatas in CAPPED_BY_PAIR.items():
+        a = content.get(dibatasi)
+        b = content.get(pembatas)
+
+        if not a or b is None or len(a) <= len(b):
+            continue
+
+        catatan.append(
+            f"{len(a)} {dibatasi} dan {len(b)} {pembatas} tidak sejajar; "
+            f"dipakai {len(b)} supaya tidak ada pertanyaan baru yang "
+            "berdiri di atas jawaban lama."
+        )
+
+        content[dibatasi] = a[: len(b)]
+
+    return catatan
 
 
 def pair_by_old_text(spec: dict, filled: dict) -> dict:
@@ -588,16 +572,22 @@ def build_edits(
             # kartu terakhir terbit dengan pertanyaan baru di atas
             # jawaban lama - persis kesalahan yang paling sulit
             # dilihat, karena strukturnya sama sekali tidak rusak.
-            pasangan = PAIRED_ROLES.get(role)
+            pasangan = CAPPED_BY_PAIR.get(role)
+            slot_pasangan = roles.get(pasangan, []) if pasangan else []
 
-            if pasangan:
-                muat = min(len(slots), len(roles.get(pasangan, [])))
+            # Batas hanya berlaku kalau pasangannya memang ada di
+            # template ini. Template yang tidak punya slot pasangan
+            # sama sekali bukan template yang setengah berganti; ia
+            # cuma menaruh keterangan itu di tempat lain.
+            if pasangan and slot_pasangan:
+                muat = min(len(slots), len(slot_pasangan))
 
                 if muat < len(slots):
                     notes.append(
                         f"Template punya {len(slots)} tempat {role} tapi "
-                        f"{muat} tempat {pasangan}; diisi {muat} pasang "
-                        "supaya tidak ada yang setengah berganti."
+                        f"{len(slot_pasangan)} tempat {pasangan}; diisi "
+                        f"{muat} supaya tidak ada pertanyaan baru yang "
+                        "berdiri di atas jawaban lama."
                     )
 
                 slots = slots[:muat]
