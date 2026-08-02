@@ -69,6 +69,9 @@ CHROME_TAGS = {"nav", "header", "footer", "aside", "menu"}
 # Tag yang teksnya selalu berupa label pendek, di mana pun letaknya.
 LABEL_TAGS = {"a", "button", "label", "option", "th", "abbr", "summary"}
 
+# Atribut yang isinya dibaca orang, bukan mesin.
+LABEL_ATTRS = {"placeholder", "aria-label", "title"}
+
 # Teks di dalam tag ini tidak pernah diganti sama sekali. Isinya
 # bukan kalimat untuk pembaca melainkan nilai yang dibaca mesin.
 NEVER_TAGS = {"script", "style", "code", "pre", "textarea"}
@@ -266,6 +269,17 @@ def classify(slot: dict) -> str:
 
             if slot.get("attr") == "alt":
                 return "caption"
+
+            # Atribut yang isinya tetap dibaca orang meski tidak
+            # tampil sebagai teks biasa: tulisan abu-abu di kolom
+            # pencarian, keterangan yang dibacakan pembaca layar,
+            # tooltip yang muncul saat kursor berhenti. Selama ini
+            # dilewati, sehingga nama brand lama masih tertinggal di
+            # placeholder "Cari Di Google OSB99" dan aria-label
+            # "Keunggulan OSB99" di halaman yang seluruh teksnya
+            # sudah berganti.
+            if slot.get("attr") in LABEL_ATTRS:
+                return "nav_label"
 
             return ""
 

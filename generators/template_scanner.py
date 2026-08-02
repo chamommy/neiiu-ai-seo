@@ -74,9 +74,21 @@ TEXT_ATTRIBUTES = {
     ("img", "alt"),
     ("amp-img", "alt"),
     ("time", "datetime"),
-    ("a", "title"),
     ("html", "lang"),
     ("meta", "charset"),
+}
+
+# Atribut yang isinya dibaca orang di tag mana pun, bukan cuma di
+# satu tag tertentu: tulisan abu-abu di kolom isian, keterangan yang
+# dibacakan pembaca layar, tooltip yang muncul saat kursor berhenti.
+#
+# Tidak terlihat sebagai teks halaman, tapi tetap terbaca - dan
+# selama dilewati, nama brand lama tertinggal di situ meski seluruh
+# teks yang tampak sudah berganti.
+TEXT_ATTRIBUTES_ANY_TAG = {
+    "placeholder",
+    "aria-label",
+    "title",
 }
 
 
@@ -326,7 +338,11 @@ class SlotScanner(HTMLParser):
         wanted = {
             name.lower()
             for name, value in attrs
-            if (tag, name) in TEXT_ATTRIBUTES and value is not None
+            if value is not None
+            and (
+                (tag, name) in TEXT_ATTRIBUTES
+                or name in TEXT_ATTRIBUTES_ANY_TAG
+            )
         }
 
         if not wanted:

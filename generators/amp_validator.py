@@ -11,8 +11,24 @@ https://validator.ampproject.org sebelum benar-benar diunggah.
 """
 
 import re
+from urllib.parse import urlparse
 
 from config import AMP_CSS_MAX_BYTES
+
+
+# Penyedia font yang boleh dimuat lewat <link rel=stylesheet> di
+# halaman AMP. Daftarnya milik spesifikasi AMP, bukan pilihan kita.
+AMP_FONT_PROVIDERS = {
+    "fonts.googleapis.com",
+    "cdn.materialdesignicons.com",
+    "cloud.typography.com",
+    "fast.fonts.net",
+    "maxcdn.bootstrapcdn.com",
+    "p.typekit.net",
+    "pro.fontawesome.com",
+    "use.fontawesome.com",
+    "use.typekit.net",
+}
 
 
 FORBIDDEN_TAGS = {
@@ -213,14 +229,27 @@ def validate_amp(html: str) -> dict:
             "dilarang di AMP."
         )
 
-    if re.search(
-        r'<link[^>]+rel\s*=\s*["\']stylesheet["\']',
+    # Pengecualian penyedia font memang disebut di pesannya, tapi
+    # dulu tidak pernah benar-benar diterapkan: SETIAP <link
+    # rel=stylesheet> dinyatakan salah, termasuk fonts.googleapis.com
+    # yang justru ada di daftar resmi AMP. Akibatnya template
+    # pengguna yang sebenarnya sah divonis invalid, dan vonis palsu
+    # seperti itu membuat pengguna membongkar halaman yang tidak ada
+    # masalahnya.
+    for tag in re.findall(
+        r'<link[^>]+rel\s*=\s*["\']?stylesheet["\']?[^>]*>',
         head,
         re.IGNORECASE,
     ):
+        href = re.search(r'href\s*=\s*["\']([^"\']+)["\']', tag, re.I)
+        host = urlparse(href.group(1)).netloc.lower() if href else ""
+
+        if host in AMP_FONT_PROVIDERS:
+            continue
+
         errors.append(
             "Stylesheet eksternal tidak diizinkan, kecuali font "
-            "dari penyedia yang diizinkan AMP."
+            f"dari penyedia yang diizinkan AMP: {host or tag[:60]}"
         )
 
     return {
