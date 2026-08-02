@@ -10,14 +10,13 @@ from config import (
     AI_CONNECT_TIMEOUT_SECONDS,
     AI_STALL_TIMEOUT_SECONDS,
 )
-from utils.text import THAI_RANGE
+# Satu perhitungan token dipakai bersama seluruh program. Dulu ada
+# dua salinan - satu di sini untuk batas waktu, satu di
+# content_planner untuk num_ctx - dan keduanya sempat memakai angka
+# yang berbeda, sehingga context dan kesabaran dihitung dari dua
+# perkiraan yang tidak pernah cocok.
+from utils.text import estimate_tokens
 
-
-# Berapa karakter yang muat dalam satu token, per jenis aksara.
-# Tokenizer byte-level memecah aksara Thai hampir satu token per
-# karakter, sementara teks Latin sekitar tiga.
-LATIN_CHARS_PER_TOKEN = 3.0
-THAI_CHARS_PER_TOKEN = 1.0
 
 # Kecepatan pemrosesan prompt yang dipakai menghitung jatah waktu.
 # Diukur di mesin ini: 1389 token dalam 242 detik, yaitu 5,7 token
@@ -26,24 +25,6 @@ THAI_CHARS_PER_TOKEN = 1.0
 # turun dan batas yang pas-pasan akan lewat tepat sebelum token
 # pertama keluar - membunuh job yang sebenarnya sehat.
 PREFILL_TOKENS_PER_SECOND = 2.5
-
-
-def estimate_tokens(text: str) -> int:
-    """
-    Memperkirakan jumlah token satu potongan teks.
-
-    Dihitung per jenis aksara, bukan dengan satu angka pembagi.
-    Prompt berbahasa Thai yang diperkirakan memakai angka Latin
-    keluar tiga kali lebih kecil dari sebenarnya.
-    """
-    body = text or ""
-
-    thai = sum(1 for char in body if THAI_RANGE.match(char))
-    lain = len(body) - thai
-
-    return int(
-        thai / THAI_CHARS_PER_TOKEN + lain / LATIN_CHARS_PER_TOKEN
-    ) + 1
 
 
 class OllamaAI(BaseAI):

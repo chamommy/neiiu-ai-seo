@@ -75,6 +75,33 @@ GENERATED_ROLES = ("date", "review_date", "lang", "city", "brand")
 KEEP_MEANING_ROLES = ("nav_label", "table_cell", "label")
 
 
+# Berapa banyak teks yang paling banyak diminta ke AI untuk peran
+# yang isinya label pendek.
+#
+# Template sungguhan bukan halaman contoh. Satu template toko 720 KB
+# punya 477 tautan yang semuanya tertangkap sebagai label menu, dan
+# isinya ternyata perabot antarmuka: "Clear search", "Choose your
+# location", "Total items in cart". Meminta model lokal menulis 477
+# label sekaligus bukan cuma lambat - promptnya saja memakan 13.800
+# dari 16.384 token context, sehingga jawabannya tidak punya ruang
+# tersisa, terpotong di tengah JSON, dan seluruh job gagal setelah
+# lebih dari satu jam menunggu.
+#
+# Menulis ulang label seperti itu juga tidak menambah apa-apa; yang
+# ada malah merusak tombol yang fungsinya sudah benar.
+#
+# Yang lewat batas ini TIDAK ditinggalkan begitu saja: teks lamanya
+# dipakai kembali, dan nama brand lama di dalamnya tetap diganti
+# lewat brand_edits. Yang hilang hanya penulisan ulang kalimatnya.
+AI_SLOT_CAP = {
+    "nav_label": 24,
+    "label": 24,
+    "caption": 24,
+    "list_item": 20,
+    "table_cell": 20,
+}
+
+
 def derive_spec(slot_map: dict) -> dict:
     """
     Menurunkan kebutuhan konten dari template.
@@ -89,6 +116,11 @@ def derive_spec(slot_map: dict) -> dict:
     for role, slots in roles.items():
         if role in GENERATED_ROLES:
             continue
+
+        batas = AI_SLOT_CAP.get(role)
+
+        if batas and len(slots) > batas:
+            slots = slots[:batas]
 
         budgets = [slot["budget"] for slot in slots]
 

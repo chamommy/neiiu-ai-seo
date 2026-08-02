@@ -127,6 +127,50 @@ def trim_to_width(text: str, limit: int, tolerance: float = 1.0) -> str:
     return trimmed.rstrip(" ,.;:-")
 
 
+# Berapa karakter yang muat dalam satu token, per jenis aksara.
+#
+# Angka Latin di bawah sengaja jauh lebih kecil dari 3 karakter per
+# token yang berlaku untuk prosa biasa. Prompt pengisian template
+# bukan prosa: isinya potongan label, deretan spasi dan baris baru,
+# tanda baca, dan nama menu yang dipecah tokenizer jauh lebih halus.
+# Diukur pada prompt sungguhan, 26.916 karakter jadi 13.838 token -
+# 1,95 karakter per token, bukan 3.
+#
+# Melebihkan perkiraan hanya membuat context sedikit lebih besar dari
+# perlunya. Mengecilkannya berakibat fatal: num_ctx dipasang kekecilan,
+# jawaban model putus di tengah JSON, dan seluruh langkah gagal
+# setelah satu jam menunggu - bukan sekadar hasilnya lebih pendek.
+LATIN_CHARS_PER_TOKEN = 2.0
+THAI_CHARS_PER_TOKEN = 1.0
+
+
+def estimate_tokens(text: str) -> int:
+    """
+    Memperkirakan jumlah token satu potongan teks.
+
+    Dihitung per jenis aksara, bukan dengan satu angka pembagi.
+    Aksara Thai satu hurufnya tiga byte di UTF-8 dan tokenizer BPE
+    tingkat byte memecahnya sekitar satu token per huruf, sehingga
+    prompt Thai yang diperkirakan memakai angka Latin keluar tiga
+    kali lebih kecil dari sebenarnya.
+
+    Dipakai di dua tempat yang keduanya tidak boleh kekecilan: saat
+    menentukan num_ctx, dan saat menghitung berapa lama menunggu
+    Ollama memproses prompt sebelum token pertama keluar.
+    """
+    body = text or ""
+
+    if not body:
+        return 0
+
+    thai = sum(1 for char in body if THAI_RANGE.match(char))
+    lain = len(body) - thai
+
+    return int(
+        thai / THAI_CHARS_PER_TOKEN + lain / LATIN_CHARS_PER_TOKEN
+    ) + 1
+
+
 def thai_share(text: str) -> float:
     """
     Porsi karakter beraksara Thai dalam satu teks.

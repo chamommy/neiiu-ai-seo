@@ -31,31 +31,19 @@ from config import (
     AI_PROVIDER,
 )
 from utils.region import get_region, slug_for_url
-from utils.text import THAI_RANGE, count_words, thai_share
+from utils.text import (
+    THAI_RANGE,
+    count_words,
+    estimate_tokens,
+    thai_share,
+)
 
 
-def estimate_tokens(text: str) -> int:
-    """
-    Perkiraan kasar jumlah token.
-
-    Bahasa Indonesia rata-rata sekitar 3 karakter per token pada
-    tokenizer model modern. Aksara Thai jauh lebih boros: satu
-    hurufnya tiga byte di UTF-8, dan tokenizer BPE tingkat byte
-    memecahnya sekitar satu token per huruf.
-
-    Perbedaan ini bukan soal ketelitian. Angka ini yang menentukan
-    num_ctx, dan kalau kekecilan Ollama memotong prompt dari
-    depan tanpa error. Yang terpotong duluan justru system prompt,
-    tempat perintah bahasanya berada, sehingga halaman Thai bisa
-    terbit dalam bahasa Indonesia tanpa satu pun tanda kesalahan.
-    """
-    if not text:
-        return 0
-
-    thai = sum(1 for char in text if THAI_RANGE.match(char))
-    other = len(text) - thai
-
-    return thai + other // 3
+# Ruang yang disisakan di luar prompt dan jawaban. Angkanya sama
+# dengan kelonggaran yang dipasang ask_structured saat menghitung
+# num_ctx, supaya batas yang dihitung di sini tidak melewati context
+# yang nanti benar-benar diminta ke Ollama.
+CONTEXT_MARGIN = 512
 
 
 def round_up(value: int, step: int) -> int:
@@ -364,10 +352,25 @@ def generate_template_content(
     # hasilnya pendek.
     per_token = 1.0 if zona["word_mode"] == "unspaced" else 2.0
 
-    max_tokens = min(
-        AI_MAX_TOKENS_PLAN,
-        max(600, int(needed_chars / per_token) + 400),
+    diminta = int(needed_chars / per_token) + 400
+
+    # Plafonnya sisa context, bukan angka di config.
+    #
+    # Jawaban yang menabrak batas context tidak berhenti dengan rapi;
+    # ia putus di tengah JSON, dan itu berarti seluruh langkah ini
+    # gagal - bukan sekadar hasilnya lebih pendek. AI_MAX_TOKENS_PLAN
+    # ditetapkan waktu template yang diuji masih seukuran halaman
+    # contoh; template sungguhan 720 KB butuh jauh lebih banyak, dan
+    # memaksakan angka lama memotong jawaban setelah satu jam
+    # menunggu.
+    tersisa = (
+        AI_CONTEXT_LENGTH
+        - estimate_tokens(system_prompt)
+        - estimate_tokens(user_prompt)
+        - CONTEXT_MARGIN
     )
+
+    max_tokens = max(600, min(diminta, tersisa))
 
     raw = ask_structured(
         system_prompt=system_prompt,
