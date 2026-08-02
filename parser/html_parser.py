@@ -3,6 +3,8 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
+from utils.text import count_words
+
 
 def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
@@ -130,7 +132,12 @@ def parse_html(
     ]
 
     visible_text = get_visible_text(soup)
-    word_count = len(visible_text.split())
+    # Dihitung sadar aksara, bukan dengan memecah spasi. Halaman
+    # berbahasa Thai ditulis tanpa spasi antar kata, dan memecah
+    # spasi membuat jumlah katanya sekitar seperlima dari yang
+    # sebenarnya. Angka ini dipakai untuk density keyword dan target
+    # panjang halaman, jadi kesalahannya merambat ke mana-mana.
+    word_count = count_words(visible_text)
 
     images = soup.find_all("img")
     images_without_alt = []

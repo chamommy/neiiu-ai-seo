@@ -23,7 +23,30 @@ Aturan:
 """.strip()
 
 
-CONTENT_PLANNER_SYSTEM_PROMPT = """
+# Instruksi bahasa ditulis dua kali: sekali dalam bahasa Indonesia
+# supaya konsisten dengan aturan lain, sekali dalam bahasa
+# sasarannya sendiri. Model kecil cenderung menjawab dalam bahasa
+# yang dipakai promptnya, dan satu baris perintah di tengah prompt
+# berbahasa Indonesia sering kalah oleh kecenderungan itu.
+LANGUAGE_ORDERS = {
+    "id": "Tulis seluruh isi halaman dalam bahasa Indonesia.",
+    "th": (
+        "Tulis SELURUH isi halaman dalam bahasa Thai, memakai aksara "
+        "Thai. Jangan memakai bahasa Indonesia atau Inggris untuk "
+        "judul, paragraf, FAQ, maupun bagian lain.\n"
+        "เขียนเนื้อหาทั้งหมดเป็นภาษาไทยโดยใช้อักษรไทยเท่านั้น "
+        "ห้ามใช้ภาษาอินโดนีเซียหรือภาษาอังกฤษ"
+    ),
+}
+
+
+def content_planner_system_prompt(language_code: str = "id") -> str:
+    """
+    System prompt penyusun konten, dengan bahasa sasaran ditegaskan.
+    """
+    order = LANGUAGE_ORDERS.get(language_code, LANGUAGE_ORDERS["id"])
+
+    return f"""
 Kamu adalah content strategist SEO yang menyusun landing page baru.
 
 Aturan:
@@ -34,9 +57,11 @@ Aturan:
 - Heading harus deskriptif dan menjawab kebutuhan pencari.
 - Jangan memakai placeholder seperti "lorem ipsum" atau "xxx".
 - Jangan menjanjikan hasil, keuntungan, atau kemenangan.
-- Gunakan bahasa Indonesia yang natural dan enak dibaca.
 - Berikan hanya hasil akhir, tanpa proses berpikir.
 - Ikuti JSON Schema yang diberikan sistem.
+
+BAHASA (paling penting):
+{order}
 """.strip()
 
 
@@ -240,6 +265,114 @@ Aturan tambahan:
     )
 
 
+ROLE_LABELS = {
+    "title": "judul halaman (tag title)",
+    "meta_description": "meta description",
+    "meta_keywords": "daftar keyword dipisah koma",
+    "h1": "heading utama H1",
+    "heading": "heading bagian",
+    "paragraph": "paragraf isi artikel",
+    "faq_question": "pertanyaan FAQ",
+    "faq_answer": "jawaban FAQ",
+    "review_text": "isi ulasan pengguna",
+    "review_author": "nama orang yang menulis ulasan",
+    "caption": "keterangan gambar",
+}
+
+
+def build_template_content_prompt(
+    analysis: dict,
+    insight: dict,
+    spec: dict,
+    brand: dict,
+) -> tuple[str, str]:
+    """
+    Menyusun prompt untuk mengisi template milik pengguna.
+
+    Bedanya dengan brief biasa: di sini bentuk halamannya sudah
+    ditentukan template, jadi yang diminta adalah sejumlah potongan
+    teks dengan jumlah dan panjang yang persis, bukan rencana
+    halaman yang bebas bentuk.
+    """
+    keyword = analysis["keyword"]
+    blueprint = analysis["blueprint"]
+
+    brand_name = brand.get("site_name", "").strip()
+    language_code = brand.get("region", "id")
+    language_name = brand.get("language_name", "Indonesia")
+
+    kebutuhan: list[str] = []
+
+    for role, rule in sorted(spec.items()):
+        label = ROLE_LABELS.get(role, role)
+        count = rule["count"]
+        limit = rule["max_length"]
+
+        if role in {"title", "meta_description", "meta_keywords", "h1"}:
+            kebutuhan.append(
+                f"- {role}: 1 teks, maksimal {limit} karakter ({label})"
+            )
+        else:
+            kebutuhan.append(
+                f"- {role}: tepat {count} teks, "
+                f"masing-masing maksimal {limit} karakter ({label})"
+            )
+
+    user_prompt = f"""
+# MENGISI TEMPLATE HALAMAN
+
+Keyword utama: {keyword}
+Nama brand: {brand_name or "-"}
+Bahasa isi halaman: {language_name}
+Negara sasaran: {brand.get("region_label", "Indonesia")}
+
+{LANGUAGE_ORDERS.get(language_code, LANGUAGE_ORDERS["id"])}
+
+## Yang Perlu Diketahui Dari Halaman Pertama Google
+Intent pencarian: {insight.get("search_intent", "-")}
+Ringkasan SERP: {insight.get("serp_summary", "-")}
+
+Celah konten yang bisa diambil:
+{format_list(insight.get("content_gaps", []), limit=6)}
+
+Tema yang sering muncul di heading kompetitor:
+{format_list(
+    [item["term"] for item in blueprint["heading_topics"]],
+    limit=10,
+)}
+
+Pertanyaan yang dicari orang:
+{format_list(
+    blueprint["people_also_ask"] + blueprint["competitor_questions"],
+    limit=10,
+)}
+
+# YANG HARUS KAMU TULIS
+
+Halamannya memakai template yang sudah jadi, jadi jumlah teksnya
+tidak boleh dikira-kira. Tulis persis sebanyak ini:
+
+{chr(10).join(kebutuhan)}
+
+Aturan:
+- Batas karakter itu keras. Teks yang lebih panjang akan merusak
+  tata letak halaman, karena kolom dan kartunya sudah dipatok.
+- Jangan menomori atau memberi awalan seperti "1." di setiap teks.
+- Setiap teks berdiri sendiri dan langsung berisi, tanpa pembuka.
+- Sebut "{brand_name}" secukupnya saja, tidak di setiap teks.
+- Jangan mengarang data tentang "{brand_name}" seperti jumlah
+  member, lisensi, penghargaan, atau tahun berdiri.
+- Nama penulis ulasan tulis sebagai nama orang yang wajar di
+  {brand.get("region_label", "Indonesia")}.
+- Jangan menjanjikan hasil, keuntungan, atau kemenangan.
+""".strip()
+
+    return (
+        content_planner_system_prompt(language_code),
+        user_prompt,
+    )
+
+
 def build_content_plan_prompt(
     analysis: dict,
     insight: dict,
@@ -282,13 +415,18 @@ def build_content_plan_prompt(
     )
 
     brand_name = brand.get("site_name", "").strip()
+    language_code = brand.get("region", "id")
+    language_name = brand.get("language_name", "Indonesia")
 
     user_prompt = f"""
 # BRIEF LANDING PAGE BARU
 
 Keyword utama: {keyword}
 Nama brand: {brand_name or "-"}
-Bahasa: Indonesia
+Bahasa isi halaman: {language_name}
+Negara sasaran: {brand.get("region_label", "Indonesia")}
+
+{LANGUAGE_ORDERS.get(language_code, LANGUAGE_ORDERS["id"])}
 
 ## Bedanya Keyword dan Brand
 Keyword "{keyword}" adalah topik yang dicari orang di Google.
@@ -379,6 +517,6 @@ Aturan brand:
 """.strip()
 
     return (
-        CONTENT_PLANNER_SYSTEM_PROMPT,
+        content_planner_system_prompt(language_code),
         user_prompt,
     )

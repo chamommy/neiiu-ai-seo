@@ -64,15 +64,27 @@ GOOGLE_CSE_CX = os.getenv(
     "",
 ).strip()
 
-SERP_COUNTRY = os.getenv(
-    "SERP_COUNTRY",
+# Zona bawaan kalau job tidak menyebutkan zonanya sendiri.
+#
+# Satu zona menentukan negara dan bahasa pencarian Google sekaligus
+# bahasa halaman yang dibuat. Dulu keduanya diatur terpisah lewat
+# SERP_COUNTRY dan SERP_LANGUAGE, dan keduanya bisa saling
+# bertentangan: mencari di Google Thailand tapi menulis halamannya
+# dalam bahasa Indonesia. Daftar zona ada di utils/region.py.
+SERP_REGION = os.getenv(
+    "SERP_REGION",
     "id",
 ).strip().lower()
 
-SERP_LANGUAGE = os.getenv(
-    "SERP_LANGUAGE",
-    "id",
-).strip().lower()
+# Dua nama lama di atas sudah tidak dipakai. Kalau masih ada di .env
+# milik pemasangan lama, isinya akan diabaikan tanpa disadari, jadi
+# dikatakan sekali di sini.
+for _lama in ("SERP_COUNTRY", "SERP_LANGUAGE"):
+    if os.getenv(_lama):
+        print(
+            f"[NEIIU] {_lama} di .env sudah tidak dipakai. "
+            "Ganti dengan SERP_REGION (id atau th)."
+        )
 
 SERP_TOP_N = int(
     os.getenv(

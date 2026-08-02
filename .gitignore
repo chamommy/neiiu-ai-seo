@@ -31,3 +31,6 @@ database/reports/
 .idea/
 Thumbs.db
 desktop.ini
+
+# Template HTML yang diunggah pengguna
+uploads/

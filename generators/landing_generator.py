@@ -51,7 +51,7 @@ def generate_landing_page(
     """
     Merender halaman HTML lengkap yang siap diunggah.
     """
-    css = build_css(design, amp=False)
+    css = build_css(design, amp=False, region=brand.get("region", "id"))
 
     schema = build_schema_graph(
         plan=plan,
@@ -61,7 +61,7 @@ def generate_landing_page(
     )
 
     return f"""<!doctype html>
-<html lang="id">
+<html lang="{escape(brand.get("html_lang", "id"))}" dir="{escape(brand.get("direction", "ltr"))}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">

@@ -424,6 +424,10 @@ form.addEventListener("submit", async (event) => {
         reference: document.getElementById("reference").value.trim(),
         use_cache: document.getElementById("useCache").checked,
         analyze_only: document.getElementById("analyzeOnly").checked,
+        region: document.getElementById("region").value,
+        template_id: Number(
+            document.getElementById("templateId").value
+        ) || 0,
     };
 
     try {
@@ -474,4 +478,185 @@ jobList.addEventListener("click", async (event) => {
     }
 });
 
+
+// ---------- Template milik pengguna ----------
+
+const templateForm = document.getElementById("templateForm");
+const templateNotice = document.getElementById("templateNotice");
+const templateList = document.getElementById("templateList");
+const templateSelect = document.getElementById("templateId");
+const uploadBtn = document.getElementById("uploadBtn");
+
+function showTemplateNotice(message, kind) {
+    templateNotice.textContent = message;
+    templateNotice.className = "notice" + (kind ? " " + kind : "");
+    templateNotice.hidden = false;
+}
+
+function formatBytes(value) {
+    if (value >= 1024 * 1024) {
+        return (value / (1024 * 1024)).toFixed(1) + " MB";
+    }
+
+    return Math.max(Math.round(value / 1024), 1) + " KB";
+}
+
+function renderTemplates(items) {
+    // Pilihan yang sedang aktif dipertahankan, supaya daftar yang
+    // dimuat ulang setelah unggahan tidak diam-diam mengganti
+    // template yang sudah dipilih pengguna.
+    const chosen = templateSelect.value;
+
+    templateSelect.innerHTML =
+        '<option value="0">Tanpa template (tiru struktur kompetitor)</option>';
+
+    if (!items.length) {
+        templateList.innerHTML =
+            '<div class="empty">Belum ada template yang diunggah.</div>';
+        return;
+    }
+
+    templateList.innerHTML = items
+        .map((item) => {
+            const slots = Object.entries(item.slot_summary || {})
+                .map(([role, count]) => role + " " + count)
+                .join(", ");
+
+            return `
+                <div class="job-card">
+                    <div class="job-head">
+                        <strong>${escapeHtml(item.name)}</strong>
+                        <button class="link-btn" data-hapus-template="${item.id}">
+                            Hapus
+                        </button>
+                    </div>
+                    <div class="job-meta">
+                        landing ${formatBytes(item.landing_bytes)}
+                        ${
+                            item.amp_bytes
+                                ? "&middot; AMP " + formatBytes(item.amp_bytes)
+                                : "&middot; tanpa AMP"
+                        }
+                    </div>
+                    <div class="job-meta">Bagian yang akan diisi: ${
+                        escapeHtml(slots) || "-"
+                    }</div>
+                    ${
+                        item.notes
+                            ? `<div class="job-meta">${escapeHtml(item.notes)}</div>`
+                            : ""
+                    }
+                </div>
+            `;
+        })
+        .join("");
+
+    for (const item of items) {
+        const option = document.createElement("option");
+        option.value = String(item.id);
+        option.textContent = item.name;
+        templateSelect.appendChild(option);
+    }
+
+    templateSelect.value = items.some((item) => String(item.id) === chosen)
+        ? chosen
+        : "0";
+}
+
+async function refreshTemplates() {
+    try {
+        const payload = await api("/api/neiiu/templates");
+        renderTemplates(payload.templates || []);
+    } catch (error) {
+        templateList.innerHTML =
+            '<div class="empty">Gagal memuat template: ' +
+            escapeHtml(error.message) +
+            "</div>";
+    }
+}
+
+templateForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    templateNotice.hidden = true;
+
+    const landing = document.getElementById("landingFile").files[0];
+
+    if (!landing) {
+        showTemplateNotice("Pilih berkas landing page dulu.", "error");
+        return;
+    }
+
+    const data = new FormData();
+    data.append("name", document.getElementById("templateName").value.trim());
+    data.append("landing", landing);
+
+    const amp = document.getElementById("ampFile").files[0];
+
+    if (amp) {
+        data.append("amp", amp);
+    }
+
+    uploadBtn.disabled = true;
+
+    try {
+        // Sengaja tidak lewat api(): FormData harus dikirim tanpa
+        // Content-Type buatan sendiri, supaya batas multipart-nya
+        // ditentukan browser.
+        const response = await fetch("/api/neiiu/templates", {
+            method: "POST",
+            body: data,
+        });
+
+        const payload = await response.json();
+
+        if (!response.ok) {
+            throw new Error(payload.detail || "Gagal mengunggah template.");
+        }
+
+        const ringkas = Object.entries(payload.slots || {})
+            .map(([role, count]) => role + " " + count)
+            .join(", ");
+
+        showTemplateNotice(
+            `Template tersimpan. ${payload.total_slots} bagian dikenali` +
+                (ringkas ? ` (${ringkas}).` : ".") +
+                (payload.notes && payload.notes.length
+                    ? " " + payload.notes.join(" ")
+                    : ""),
+            "ok"
+        );
+
+        templateForm.reset();
+        await refreshTemplates();
+        templateSelect.value = String(payload.template_id);
+    } catch (error) {
+        showTemplateNotice(error.message, "error");
+    } finally {
+        uploadBtn.disabled = false;
+    }
+});
+
+templateList.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-hapus-template]");
+
+    if (!button) {
+        return;
+    }
+
+    if (!confirm("Hapus template ini?")) {
+        return;
+    }
+
+    try {
+        await api("/api/neiiu/templates/" + button.dataset.hapusTemplate, {
+            method: "DELETE",
+        });
+
+        await refreshTemplates();
+    } catch (error) {
+        showTemplateNotice(error.message, "error");
+    }
+});
+
 refreshJobs();
+refreshTemplates();

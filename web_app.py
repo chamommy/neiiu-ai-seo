@@ -12,9 +12,11 @@ from typing import Literal
 
 from fastapi import (
     FastAPI,
+    File,
     Form,
     HTTPException,
     Request,
+    UploadFile,
 )
 from fastapi.responses import (
     FileResponse,
@@ -26,6 +28,9 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.formparsers import MultiPartException
 from starlette.middleware.sessions import (
     SessionMiddleware,
 )
@@ -41,6 +46,7 @@ from config import (
     CRAWL_TOP_N,
     OUTPUT_DIR,
     SERP_PROVIDER,
+    SERP_REGION,
     SERP_TOP_N,
 )
 from database.ip_allowlist_db import (
@@ -60,7 +66,20 @@ from database.neiiu_jobs_db import (
     list_jobs,
     reset_stuck_jobs,
 )
+from database.neiiu_templates_db import (
+    MAX_TEMPLATE_BYTES,
+    MAX_TEMPLATES_PER_USER,
+    TemplateError,
+    create_template,
+    delete_template,
+    init_templates_db,
+    list_templates,
+    read_template_files,
+)
+from generators.template_scanner import TemplateTooDeep, scan
+from generators.template_slots import build_slot_map
 from serp.serp_search import slugify
+from utils.region import REGIONS
 from services.neiiu_runner import (
     active_job_id,
     submit_job,
@@ -283,6 +302,15 @@ class NeiiuJobRequest(BaseModel):
     reference: str = Field(default="", max_length=500)
     use_cache: bool = True
     analyze_only: bool = False
+    # Zona dibatasi ke daftar yang dikenal di sini juga, bukan cuma
+    # di registry. Zona yang salah berarti seluruh halaman ditulis
+    # dalam bahasa yang keliru, dan itu terlalu mahal untuk ditebak.
+    region: Literal["id", "th"] = (
+        SERP_REGION if SERP_REGION in {"id", "th"} else "id"
+    )
+    # 0 berarti tidak memakai template unggahan, jadi jalur lama
+    # yang meniru struktur kompetitor tetap dipakai.
+    template_id: int = Field(default=0, ge=0)
 
 
 @app.on_event("startup")
@@ -290,6 +318,7 @@ def startup() -> None:
     init_db()
     init_jobs_db()
     init_ip_db()
+    init_templates_db()
 
     # Job runner hidup di dalam proses ini. Kalau server sebelumnya
     # mati di tengah run, jobnya tertinggal di status running tanpa
@@ -993,6 +1022,12 @@ def neiiu_page(request: Request):
             "user": dict(user),
             "default_provider": SERP_PROVIDER,
             "default_crawl": CRAWL_TOP_N,
+            "default_region": SERP_REGION,
+            "regions": [
+                {"code": spec["code"], "label": spec["label"]}
+                for spec in REGIONS.values()
+            ],
+            "max_template_mb": MAX_TEMPLATE_BYTES // (1024 * 1024),
         },
     )
 
@@ -1012,6 +1047,26 @@ def api_neiiu_create_job(
             status_code=400,
             detail="Keyword tidak boleh kosong.",
         )
+
+    # Kepemilikan template diperiksa sebelum job dibuat. Tanpa ini,
+    # siapa pun bisa memakai template pengguna lain hanya dengan
+    # menebak nomornya, dan isinya akan ikut terbaca lewat hasil
+    # generate.
+    #
+    # Diperiksa SEBELUM token dipotong. Kalau urutannya dibalik,
+    # pengguna yang salah pilih template - atau yang templatenya baru
+    # saja dihapus di tab lain - kehilangan satu token untuk job yang
+    # tidak pernah dibuat, dan tidak ada jalur pengembalian sama
+    # sekali: refund hanya jalan lewat fail_job, yang butuh job yang
+    # sudah ada di database.
+    if payload.template_id:
+        try:
+            read_template_files(payload.template_id, user_id)
+        except TemplateError as error:
+            raise HTTPException(
+                status_code=404,
+                detail=str(error),
+            ) from error
 
     try:
         remaining_tokens = consume_one_token(user_id)
@@ -1033,6 +1088,8 @@ def api_neiiu_create_job(
         reference_url=payload.reference.strip(),
         use_cache=payload.use_cache,
         analyze_only=payload.analyze_only,
+        region=payload.region,
+        template_id=payload.template_id,
     )
 
     submit_job(job_id)
@@ -1045,6 +1102,296 @@ def api_neiiu_create_job(
             0 if active_job_id() is None else 1
         ),
     }
+
+
+async def read_upload(
+    upload: UploadFile | None,
+    label: str,
+) -> str:
+    """
+    Membaca satu berkas unggahan dengan batas ukuran yang ditegakkan.
+
+    Dibaca bertahap sambil dihitung, bukan sekaligus. Membaca
+    seluruhnya lebih dulu berarti berkas 500 MB sudah terlanjur
+    masuk memori sebelum sempat ditolak, dan job runner berjalan di
+    dalam proses server yang sama sehingga kehabisan memori di sini
+    mematikan layanan untuk semua pengguna.
+    """
+    if upload is None or not upload.filename:
+        return ""
+
+    chunks: list[bytes] = []
+    total = 0
+
+    while True:
+        chunk = await upload.read(64 * 1024)
+
+        if not chunk:
+            break
+
+        total += len(chunk)
+
+        if total > MAX_TEMPLATE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Berkas {label} melebihi "
+                    f"{MAX_TEMPLATE_BYTES // (1024 * 1024)} MB."
+                ),
+            )
+
+        chunks.append(chunk)
+
+    raw = b"".join(chunks)
+
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            return raw.decode("utf-8-sig")
+        except UnicodeDecodeError as error:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Berkas {label} bukan teks UTF-8. "
+                    "Simpan ulang templatenya dengan encoding UTF-8."
+                ),
+            ) from error
+
+
+def summarize_template(html_text: str) -> dict:
+    """
+    Menghitung slot yang bisa diisi di satu template.
+    """
+    slot_map = build_slot_map(scan(html_text))
+
+    return {
+        "counts": slot_map["counts"],
+        "total": sum(
+            len(items) for items in slot_map["roles"].values()
+        ),
+        "skipped": len(slot_map["skipped"]),
+    }
+
+
+@app.get("/api/neiiu/templates")
+def api_neiiu_list_templates(request: Request):
+    user = require_user(request)
+
+    return {
+        "templates": [
+            {
+                **dict(row),
+                "slot_summary": json.loads(row["slot_summary"] or "{}"),
+            }
+            for row in list_templates(int(user["id"]))
+        ],
+        "max_templates": MAX_TEMPLATES_PER_USER,
+        "max_bytes": MAX_TEMPLATE_BYTES,
+    }
+
+
+# Batas seluruh badan permintaan unggah: dua berkas sebesar batas
+# per berkas, plus ruang untuk pembatas multipart dan nama berkas.
+MAX_UPLOAD_BODY = MAX_TEMPLATE_BYTES * 2 + 64 * 1024
+
+
+@app.post("/api/neiiu/templates")
+async def api_neiiu_upload_template(request: Request):
+    """
+    Menerima template landing page dan AMP milik pengguna.
+
+    Berkasnya sengaja TIDAK diambil lewat parameter UploadFile.
+    FastAPI mengurai seluruh badan permintaan untuk mengisi parameter
+    itu sebelum satu baris pun isi fungsi ini berjalan, jadi
+    pemeriksaan login di bawah datang terlambat: siapa saja tanpa
+    login bisa mengirim badan permintaan 200 MB, dan Starlette sudah
+    menuliskannya ke berkas sementara di disk sebelum jawabannya 401.
+    Dengan mengurai sendiri, urutannya jadi benar: login dulu, ukuran
+    dulu, baru badan permintaannya disentuh.
+    """
+    user = require_user(request)
+
+    declared = request.headers.get("content-length")
+
+    if declared is None:
+        raise HTTPException(
+            status_code=411,
+            detail=(
+                "Permintaan unggah harus menyertakan Content-Length. "
+                "Kirim ulang lewat formulir unggah di halaman NEIIU."
+            ),
+        )
+
+    try:
+        declared_size = int(declared)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail="Content-Length tidak sah.",
+        ) from error
+
+    if declared_size > MAX_UPLOAD_BODY:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Total unggahan melebihi "
+                f"{MAX_UPLOAD_BODY // (1024 * 1024)} MB."
+            ),
+        )
+
+    try:
+        form = await request.form(
+            max_files=4,
+            max_fields=8,
+            max_part_size=MAX_TEMPLATE_BYTES,
+        )
+    except MultiPartException as error:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Berkas melebihi "
+                f"{MAX_TEMPLATE_BYTES // (1024 * 1024)} MB."
+            ),
+        ) from error
+
+    try:
+        name = str(form.get("name") or "")
+        landing = form.get("landing")
+        amp = form.get("amp")
+
+        # Diperiksa terhadap kelas milik Starlette, bukan milik
+        # FastAPI. request.form() menghasilkan objek Starlette, dan
+        # UploadFile milik FastAPI adalah turunannya - jadi memeriksa
+        # dengan yang FastAPI selalu bernilai salah dan setiap
+        # unggahan yang sah ikut ditolak.
+        if not isinstance(landing, StarletteUploadFile):
+            raise HTTPException(
+                status_code=400,
+                detail="Berkas landing page belum dipilih.",
+            )
+
+        if not isinstance(amp, StarletteUploadFile):
+            amp = None
+
+        landing_html = await read_upload(landing, "landing page")
+
+        if not landing_html.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Berkas landing page kosong.",
+            )
+
+        amp_html = await read_upload(amp, "AMP")
+        landing_filename = landing.filename
+    finally:
+        await form.close()
+
+    # Pemindaian dijalankan di thread terpisah. Ia murni CPU dan bisa
+    # memakan waktu lama untuk berkas besar; dijalankan langsung di
+    # sini ia menahan event loop, sehingga satu unggahan membekukan
+    # seluruh server untuk semua pengguna, bukan cuma permintaannya
+    # sendiri.
+    try:
+        summary = await run_in_threadpool(summarize_template, landing_html)
+    except TemplateTooDeep as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+    notes: list[str] = []
+
+    if summary["total"] == 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Tidak ada satu pun bagian isi yang dikenali di "
+                "template ini. Pastikan ada judul, heading, dan "
+                "paragraf, atau tandai sendiri dengan atribut "
+                'data-neiiu="title" dan seterusnya.'
+            ),
+        )
+
+    if amp_html:
+        try:
+            amp_summary = await run_in_threadpool(
+                summarize_template,
+                amp_html,
+            )
+        except TemplateTooDeep as error:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Berkas AMP: {error}",
+            ) from error
+
+        if amp_summary["total"] == 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Berkas AMP tidak punya satu pun bagian isi yang "
+                    "bisa dikenali. Kalau dibiarkan, AMP-nya akan "
+                    "terbit dengan teks lama sementara landing page "
+                    "sudah berganti isi."
+                ),
+            )
+
+        # Halaman AMP yang isinya berbeda dari halaman kanoniknya
+        # dianggap pelanggaran oleh Google, jadi selisih jumlah slot
+        # perlu diketahui pengguna sejak awal, bukan setelah
+        # halamannya terbit.
+        for role, count in summary["counts"].items():
+            other = amp_summary["counts"].get(role, 0)
+
+            if other != count:
+                notes.append(
+                    f"Jumlah {role} berbeda antara landing ({count}) "
+                    f"dan AMP ({other})."
+                )
+
+    try:
+        template_id = create_template(
+            user_id=int(user["id"]),
+            name=name or landing_filename or "Template",
+            landing_html=landing_html,
+            amp_html=amp_html,
+            slot_summary=json.dumps(
+                summary["counts"],
+                ensure_ascii=False,
+            ),
+            notes=" ".join(notes),
+        )
+    except TemplateError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+    return {
+        "status": "success",
+        "template_id": template_id,
+        "slots": summary["counts"],
+        "total_slots": summary["total"],
+        "notes": notes,
+    }
+
+
+@app.delete("/api/neiiu/templates/{template_id}")
+def api_neiiu_delete_template(
+    template_id: int,
+    request: Request,
+):
+    user = require_user(request)
+
+    try:
+        delete_template(template_id, int(user["id"]))
+    except TemplateError as error:
+        raise HTTPException(
+            status_code=404,
+            detail=str(error),
+        ) from error
+
+    return {"status": "success"}
 
 
 @app.get("/api/neiiu/jobs")
@@ -1143,8 +1490,31 @@ def neiiu_preview(
 
     return HTMLResponse(
         path.read_text(encoding="utf-8"),
-        headers={"X-Content-Type-Options": "nosniff"},
+        headers=preview_headers(),
     )
+
+
+def preview_headers() -> dict:
+    """
+    Header untuk menampilkan halaman hasil dengan aman.
+
+    Sejak template bisa diunggah pengguna, halaman hasil memuat
+    skrip milik orang lain: pemasang iklan, penghitung kunjungan,
+    dan apa pun yang ada di template. Tanpa pengaman, skrip itu
+    berjalan di origin aplikasi ini, dengan cookie sesi ikut
+    terkirim, dan bisa memanggil endpoint admin atas nama siapa pun
+    yang sedang membuka pratinjaunya.
+
+    "sandbox allow-scripts" membuat halamannya diperlakukan sebagai
+    origin tersendiri yang tidak dikenal: skripnya tetap jalan
+    sehingga halaman AMP tetap tampil benar, tapi tidak punya jalan
+    ke cookie, penyimpanan, maupun endpoint aplikasi ini.
+    """
+    return {
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox allow-scripts allow-popups",
+        "Referrer-Policy": "no-referrer",
+    }
 
 
 @app.get("/neiiu/jobs/{job_id}/download/{name}")

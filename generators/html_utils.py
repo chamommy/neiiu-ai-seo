@@ -5,6 +5,8 @@ Utilitas kecil yang dipakai bersama oleh generator HTML dan AMP.
 import html
 import re
 
+from utils.text import anchor_id
+
 
 def escape(value: str) -> str:
     """
@@ -17,13 +19,41 @@ def heading_id(value: str) -> str:
     """
     Membuat anchor id dari teks heading.
     """
-    slug = re.sub(
-        r"[^a-z0-9]+",
-        "-",
-        str(value or "").lower(),
-    ).strip("-")
+    # Aksara non-Latin dipertahankan. Kalau dibuang, setiap heading
+    # Thai menghasilkan id yang sama, seluruh tautan daftar isi
+    # menunjuk ke satu tempat, dan halamannya punya id kembar.
+    return anchor_id(value)
 
-    return slug[:60] or "bagian"
+
+def unique_ids(values: list[str]) -> list[str]:
+    """
+    Membuat anchor id yang dijamin tidak kembar dalam satu halaman.
+
+    anchor_id sendiri tidak bisa menjamin ini: ia memotong di 60
+    karakter dan mengubah semua tanda baca jadi tanda hubung, jadi
+    dua heading yang berbeda tetap bisa menghasilkan id yang sama.
+    Kalau itu terjadi, dua tautan daftar isi menunjuk ke tempat yang
+    sama dan HTML-nya punya id kembar.
+
+    Penomoran dilakukan sekali untuk seluruh daftar, bukan per
+    panggilan, supaya daftar isi dan judul section selalu memakai id
+    yang sama persis.
+    """
+    seen: dict[str, int] = {}
+    result: list[str] = []
+
+    for value in values:
+        base = heading_id(value)
+
+        if base in seen:
+            seen[base] += 1
+            base = f"{base}-{seen[base]}"
+        else:
+            seen[base] = 1
+
+        result.append(base)
+
+    return result
 
 
 def minify_css(css: str) -> str:

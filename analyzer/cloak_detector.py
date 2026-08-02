@@ -29,6 +29,7 @@ from config import (
 )
 from crawler.crawler import fetch_page
 from parser.html_parser import parse_html
+from utils.text import keyword_tokens, token_set
 
 
 # Domain institusi yang otoritasnya sering dibajak.
@@ -77,22 +78,20 @@ def is_institutional(host: str) -> bool:
     )
 
 
-def keyword_tokens(keyword: str) -> list[str]:
-    return [
-        token
-        for token in re.findall(r"[a-z0-9]+", keyword.lower())
-        if len(token) >= 3
-    ]
-
-
 def count_keyword(text: str, keyword: str) -> int:
     return text.lower().count(keyword.lower())
 
 
 def word_set(text: str, limit: int = 4000) -> set[str]:
-    return set(
-        re.findall(r"[a-z]{4,}", text.lower())[:limit]
-    )
+    """
+    Kosakata satu halaman untuk dibandingkan dengan halaman lain.
+
+    Dulu memakai [a-z]{4,}, yang menghasilkan himpunan kosong untuk
+    halaman berbahasa Thai. Dua himpunan kosong dinilai identik,
+    jadi kemiripannya selalu 1.0 dan cloaking pada halaman Thai
+    tidak pernah bisa terdeteksi.
+    """
+    return token_set(text, limit)
 
 
 def similarity(text_a: str, text_b: str) -> float:

@@ -17,6 +17,10 @@ from database.neiiu_jobs_db import (
     set_status,
     update_progress,
 )
+from database.neiiu_templates_db import (
+    TemplateError,
+    read_template_files,
+)
 from serp.providers import SerpProviderError
 from services.neiiu_pipeline import PipelineError, run_neiiu
 
@@ -60,6 +64,9 @@ def build_summary(result: dict) -> dict:
             "analyzed_pages": blueprint["analyzed_pages"],
             "failed_pages": blueprint["failed_pages"],
             "reference_domain": result["template"]["source_domain"],
+            "from_user_template": bool(
+                result["template"].get("user_template")
+            ),
             **hijack_info,
         }
 
@@ -82,6 +89,9 @@ def build_summary(result: dict) -> dict:
         "keyword_density": seo["keyword_density"],
         "problems": seo["problems"],
         "reference_domain": result["template"]["source_domain"],
+        "from_user_template": bool(
+            result["template"].get("user_template")
+        ),
         "page_url": result["page_url"],
         "amp_url": result["amp_url"],
     }
@@ -146,6 +156,18 @@ def run_job(job_id: int) -> None:
                 line=line,
             )
 
+        user_template = None
+
+        if job["template_id"]:
+            # Dibaca di sini, bukan di lapisan web, supaya berkasnya
+            # dibaca sedekat mungkin dengan waktu pemakaian. Template
+            # yang dihapus setelah job diantrekan akan ketahuan
+            # sekarang dengan pesan yang jelas.
+            user_template = read_template_files(
+                int(job["template_id"]),
+                int(job["user_id"]),
+            )
+
         result = run_neiiu(
             keyword=job["keyword"],
             brand_name=job["brand_name"],
@@ -156,6 +178,8 @@ def run_job(job_id: int) -> None:
             reference=job["reference_url"],
             use_cache=bool(job["use_cache"]),
             analyze_only=bool(job["analyze_only"]),
+            region=job["region"],
+            user_template=user_template,
             on_event=on_event,
         )
 
@@ -164,6 +188,9 @@ def run_job(job_id: int) -> None:
             output_dir=result["output_dir"],
             summary=build_summary(result),
         )
+
+    except TemplateError as error:
+        fail_job(job, f"Template: {error}")
 
     except SerpProviderError as error:
         fail_job(job, f"SERP: {error}")

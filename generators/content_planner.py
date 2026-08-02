@@ -15,6 +15,11 @@ from ai.manager import AIManager
 from ai.neiiu_prompts import (
     build_content_plan_prompt,
     build_serp_insight_prompt,
+    build_template_content_prompt,
+)
+from generators.template_filler import (
+    build_dynamic_schema,
+    fit_content_to_spec,
 )
 from ai.schemas import CONTENT_PLAN_SCHEMA, SERP_INSIGHT_SCHEMA
 from config import (
@@ -24,18 +29,32 @@ from config import (
     AI_MODEL,
     AI_PROVIDER,
 )
-from serp.serp_search import slugify
+from utils.region import get_region, slug_for_url
+from utils.text import THAI_RANGE, count_words, thai_share
 
 
 def estimate_tokens(text: str) -> int:
     """
     Perkiraan kasar jumlah token.
 
-    Bahasa Indonesia rata-rata sekitar 3.5 karakter per token pada
-    tokenizer model modern. Angka ini cuma dipakai untuk memastikan
-    prompt tidak melebihi context, bukan untuk penagihan.
+    Bahasa Indonesia rata-rata sekitar 3 karakter per token pada
+    tokenizer model modern. Aksara Thai jauh lebih boros: satu
+    hurufnya tiga byte di UTF-8, dan tokenizer BPE tingkat byte
+    memecahnya sekitar satu token per huruf.
+
+    Perbedaan ini bukan soal ketelitian. Angka ini yang menentukan
+    num_ctx, dan kalau kekecilan Ollama memotong prompt dari
+    depan tanpa error. Yang terpotong duluan justru system prompt,
+    tempat perintah bahasanya berada, sehingga halaman Thai bisa
+    terbit dalam bahasa Indonesia tanpa satu pun tanda kesalahan.
     """
-    return len(text) // 3
+    if not text:
+        return 0
+
+    thai = sum(1 for char in text if THAI_RANGE.match(char))
+    other = len(text) - thai
+
+    return thai + other // 3
 
 
 def round_up(value: int, step: int) -> int:
@@ -289,6 +308,104 @@ def generate_content_plan(
         plan,
         analysis["keyword"],
         brand.get("site_name", ""),
+        brand.get("region", "id"),
+    )
+
+
+def generate_template_content(
+    analysis: dict,
+    insight: dict,
+    spec: dict,
+    brand: dict,
+    fallbacks: dict | None = None,
+    on_progress=None,
+) -> tuple[dict, list[str]]:
+    """
+    Menghasilkan potongan teks sebanyak slot di template pengguna.
+
+    Schema-nya dibentuk dari template, bukan konstanta, supaya
+    jumlah yang diminta ke model sama persis dengan jumlah tempat
+    yang tersedia. Hasilnya tetap dicocokkan ulang sesudahnya,
+    karena dukungan minItems di llama.cpp berbeda antar versi.
+    """
+    system_prompt, user_prompt = build_template_content_prompt(
+        analysis=analysis,
+        insight=insight,
+        spec=spec,
+        brand=brand,
+    )
+
+    # Ruang jawaban dihitung dari kebutuhan template, bukan dipatok.
+    # Template kecil tidak perlu menunggu model menulis 5000 token.
+    needed_chars = sum(
+        rule["max_length"] * max(rule["count"], 1)
+        for rule in spec.values()
+    )
+
+    # Berapa karakter yang muat dalam satu token sangat berbeda antar
+    # aksara. Tokenizer byte-level memecah aksara Thai hampir satu
+    # token per karakter, sedangkan teks Latin sekitar tiga. Memakai
+    # angka Latin untuk halaman Thai memberi jatah kira-kira setengah
+    # dari yang dibutuhkan, dan jawaban model terpotong di tengah
+    # JSON - yang berarti seluruh langkah 5 gagal, bukan sekadar
+    # hasilnya pendek.
+    zona = get_region(brand.get("region", "id"))
+    per_token = 1.0 if zona["word_mode"] == "unspaced" else 2.0
+
+    max_tokens = min(
+        AI_MAX_TOKENS_PLAN,
+        max(600, int(needed_chars / per_token) + 400),
+    )
+
+    raw = ask_structured(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        schema=build_dynamic_schema(spec),
+        max_tokens=max_tokens,
+        on_progress=on_progress,
+    )
+
+    content, warnings = fit_content_to_spec(raw, spec, fallbacks or {})
+
+    content["_metadata"] = raw.get("_metadata", {})
+
+    return content, warnings
+
+
+def check_language(plan: dict, region: str) -> str:
+    """
+    Memeriksa apakah AI benar-benar menulis dalam bahasa yang diminta.
+
+    Model kecil sering ikut bahasa promptnya, bukan bahasa yang
+    diperintahkan. Kalau itu terjadi, halamannya terbit dengan
+    lang="th" tapi isinya bahasa Indonesia, dan tidak ada satu pun
+    validasi lain yang bisa melihatnya. Lebih baik diberitahukan
+    apa adanya daripada lolos diam-diam.
+    """
+    spec = get_region(region)
+
+    if spec["word_mode"] != "unspaced":
+        return ""
+
+    sample = " ".join(
+        [plan.get("title", ""), plan.get("h1", "")]
+        + list(plan.get("intro", []))
+        + [
+            section.get("heading", "")
+            for section in plan.get("sections", [])
+        ]
+    )
+
+    share = thai_share(sample)
+
+    if share >= 0.4:
+        return ""
+
+    return (
+        f"AI hanya menulis {round(share * 100)}% aksara Thai padahal "
+        f"zona {spec['label']} dipilih. Halaman kemungkinan tertulis "
+        "dalam bahasa yang salah. Coba pakai model yang lebih besar, "
+        "atau jalankan ulang."
     )
 
 
@@ -442,6 +559,7 @@ def normalize_plan(
     plan: dict,
     keyword: str,
     brand_name: str = "",
+    region: str = "id",
 ) -> dict:
     """
     Membersihkan hasil AI supaya aman dirender jadi HTML.
@@ -470,8 +588,12 @@ def normalize_plan(
         160,
     )
 
-    slug = slugify(
-        clean_text(plan.get("slug"), 80) or keyword
+    # Slug URL boleh memuat aksara Thai. Membuangnya membuat setiap
+    # halaman zona Thailand memakai URL yang sama, sehingga
+    # canonical, rel=amphtml, dan sitemap semuanya saling menimpa.
+    slug = slug_for_url(
+        clean_text(plan.get("slug"), 80) or keyword,
+        region,
     )
 
     sections = []
@@ -589,4 +711,7 @@ def count_plan_words(plan: dict) -> int:
         parts.append(item["question"])
         parts.append(item["answer"])
 
-    return sum(len(part.split()) for part in parts)
+    # Dihitung sadar aksara: memecah spasi membuat halaman Thai
+    # dilaporkan sekitar seperlima panjang aslinya, dan angka itu
+    # yang dipakai membandingkan dengan target kompetitor.
+    return sum(count_words(part) for part in parts)

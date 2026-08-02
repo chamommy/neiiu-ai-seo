@@ -1,21 +1,16 @@
-import re
 
-
-def count_keyword(text: str, keyword: str) -> int:
-    pattern = rf"\b{re.escape(keyword.lower())}\b"
-
-    return len(
-        re.findall(
-            pattern,
-            text.lower(),
-        )
-    )
+from utils.text import count_keyword, count_words
 
 
 def analyze_content(page: dict, keyword: str) -> dict:
     text = page.get("visible_text", "")
-    words = text.split()
-    word_count = len(words)
+
+    # Keduanya sadar aksara. Sebelumnya jumlah kata dipecah dari
+    # spasi dan keyword dicari dengan batas kata \b; pada teks Thai
+    # yang pertama menghasilkan seperlima jumlah aslinya dan yang
+    # kedua selalu nol, karena di antara dua huruf Thai tidak pernah
+    # ada batas kata.
+    word_count = count_words(text)
 
     reading_time = round(
         word_count / 200,

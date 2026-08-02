@@ -17,34 +17,38 @@ Aturan yang dijaga supaya lolos AMP:
 from generators.html_utils import minify_css
 
 
+from utils.region import DEFAULT_REGION, font_stack
+
 SYSTEM_FONT_STACK = (
     "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, "
     "'Helvetica Neue', Arial, sans-serif"
 )
 
 
-def build_font_stack(fonts: list[str]) -> str:
+def build_font_stack(
+    fonts: list[str],
+    region: str = DEFAULT_REGION,
+) -> str:
     """
     Menyusun font stack dari font kompetitor.
 
     Font tetap dipanggil lewat nama saja tanpa @font-face, jadi
     tidak ada request eksternal dan halaman tetap cepat.
+
+    Cadangan milik zona selalu ikut di belakang. Font Latin yang
+    ditiru dari kompetitor Indonesia tidak punya aksara Thai sama
+    sekali, dan halaman Thai yang memakainya tampil sebagai deretan
+    kotak kosong di sebagian perangkat.
     """
-    clean = [
-        f"'{font}'" if " " in font else font
-        for font in fonts[:2]
-        if font
-    ]
+    clean = [font for font in fonts[:2] if font]
 
-    if not clean:
-        return SYSTEM_FONT_STACK
-
-    return ", ".join(clean) + ", " + SYSTEM_FONT_STACK
+    return font_stack(clean, region)
 
 
 def build_css(
     design: dict,
     amp: bool = False,
+    region: str = DEFAULT_REGION,
 ) -> str:
     """
     Menghasilkan CSS lengkap untuk satu halaman.
@@ -62,7 +66,7 @@ def build_css(
     accent_2 = palette.get("accent_2", accent)
     accent_text = palette.get("accent_text", "#0b0f19")
 
-    font_stack = build_font_stack(fonts)
+    fonts_css = build_font_stack(fonts, region)
 
     css = f"""
 :root {{
@@ -84,7 +88,7 @@ body {{
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: {font_stack};
+  font-family: {fonts_css};
   font-size: 17px;
   line-height: 1.75;
   -webkit-text-size-adjust: 100%;

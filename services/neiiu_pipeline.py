@@ -15,18 +15,26 @@ from config import (
     CRAWL_TOP_N,
     OUTPUT_DIR,
     SERP_PROVIDER,
+    SERP_REGION,
     SERP_TOP_N,
     SITE_BASE_URL,
     SITE_DISCLAIMER,
-    SITE_LOCALE,
     SITE_NAME,
+)
+from utils.region import (
+    format_date,
+    get_region,
+    iso_date,
+    slug_for_url,
 )
 from generators.amp_generator import generate_amp_page
 from generators.amp_validator import validate_amp
 from generators.content_planner import (
+    check_language,
     count_plan_words,
     generate_content_plan,
     generate_serp_insight,
+    generate_template_content,
 )
 from generators.landing_generator import generate_landing_page
 from generators.seo_validator import validate_page
@@ -34,6 +42,13 @@ from generators.template_extractor import (
     extract_template_from_url,
     rank_reference_pages,
 )
+from generators.template_filler import (
+    derive_spec,
+    fill_template,
+    merge_specs,
+)
+from generators.template_scanner import scan
+from generators.template_slots import build_slot_map
 from serp.serp_search import search_keyword, slugify
 
 
@@ -60,6 +75,7 @@ class PipelineError(RuntimeError):
 def build_brand(
     brand_name: str = "",
     base_url: str = "",
+    region: str = SERP_REGION,
 ) -> dict:
     """
     Menyusun identitas situs untuk satu run.
@@ -68,6 +84,12 @@ def build_brand(
     dicari di Google, brand adalah nama situs yang muncul di
     halamannya. Satu keyword yang sama bisa dipakai untuk banyak
     brand, jadi keduanya tidak boleh dipatok bersama di .env.
+
+    Zona ikut dititipkan di sini karena dict ini sudah diterima
+    semua generator. Dengan begitu bahasa halaman, locale, arah
+    teks, dan bentuk tanggal berasal dari satu sumber yang sama
+    dengan negara tempat pencariannya dilakukan, dan keduanya tidak
+    bisa lagi berbeda tanpa disadari.
     """
     clean_name = brand_name.strip() or SITE_NAME
     clean_url = (base_url.strip() or SITE_BASE_URL).rstrip("/")
@@ -75,12 +97,24 @@ def build_brand(
     if clean_url and not clean_url.startswith(("http://", "https://")):
         clean_url = "https://" + clean_url
 
+    spec = get_region(region)
+    now = datetime.now()
+
     return {
         "site_name": clean_name,
         "base_url": clean_url,
-        "locale": SITE_LOCALE,
+        "region": spec["code"],
+        "region_label": spec["label"],
+        "language_name": spec["language_name"],
+        "html_lang": spec["html_lang"],
+        "locale": spec["og_locale"],
+        "direction": spec["direction"],
         "disclaimer": SITE_DISCLAIMER,
-        "year": str(datetime.now().year),
+        # Tahun yang tampil mengikuti kalender setempat, sedangkan
+        # tanggal untuk mesin tetap masehi.
+        "year": str(now.year + spec["year_offset"]),
+        "today": format_date(now, spec["code"]),
+        "today_iso": iso_date(now),
     }
 
 
@@ -264,22 +298,207 @@ def write_analysis_markdown(
     )
     lines.append("")
 
-    lines.append("## Template Acuan\n")
-    lines.append(f"Sumber struktur: `{template['source_url']}`\n")
-    lines.append(
-        f"Section terdeteksi: {template['section_count']} "
-        f"({', '.join(template['section_types'][:10])})\n"
-    )
-    lines.append(
-        f"Palet warna: mode {template['design']['palette']['mode']}, "
-        f"aksen `{template['design']['palette']['accent']}`\n"
-    )
-    lines.append(
-        "Catatan: yang diambil hanya struktur dan gaya visual. "
-        "Seluruh teks halaman baru ditulis ulang dari nol.\n"
-    )
+    if template.get("user_template"):
+        lines.append("## Template Yang Dipakai\n")
+        lines.append(f"Template unggahan: `{template['source_domain']}`\n")
+
+        counts = template.get("slot_counts", {})
+
+        lines.append(
+            "Bagian yang diisi ulang: "
+            + (
+                ", ".join(
+                    f"{role} {count}"
+                    for role, count in sorted(counts.items())
+                )
+                or "-"
+            )
+            + "\n"
+        )
+
+        lines.append(
+            "Catatan: struktur, tautan, dan blok iklan di dalam "
+            "template tidak disentuh sama sekali. Yang diganti hanya "
+            "teks di bagian yang disebut di atas.\n"
+        )
+    else:
+        lines.append("## Template Acuan\n")
+        lines.append(f"Sumber struktur: `{template['source_url']}`\n")
+        lines.append(
+            f"Section terdeteksi: {template['section_count']} "
+            f"({', '.join(template['section_types'][:10])})\n"
+        )
+
+        # Palet hanya ada pada template yang diambil dari halaman
+        # kompetitor. Template unggahan tidak melewati pengambilan
+        # gaya visual sama sekali, jadi kuncinya memang tidak ada.
+        palette = template.get("design", {}).get("palette")
+
+        if palette:
+            lines.append(
+                f"Palet warna: mode {palette['mode']}, "
+                f"aksen `{palette['accent']}`\n"
+            )
+
+        lines.append(
+            "Catatan: yang diambil hanya struktur dan gaya visual. "
+            "Seluruh teks halaman baru ditulis ulang dari nol.\n"
+        )
 
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def sections_from_parts(
+    headings: list,
+    paragraphs: list,
+) -> list[dict]:
+    """
+    Membagi paragraf ke bawah heading-heading template.
+
+    Bentuk plan ini dipakai kalau pengguna hanya mengunggah template
+    landing tanpa berkas AMP: versi AMP-nya dibuat generator biasa
+    dari plan ini. Kalau heading disalin tanpa paragrafnya, halaman
+    AMP terbit berisi deretan judul kosong sementara seluruh teks
+    yang sudah ditulis AI hilang - dan halaman itu yang jadi
+    pasangan resmi landing page di mata Google.
+
+    Heading yang tidak kebagian paragraf dibuang, bukan diterbitkan
+    kosong.
+    """
+    bersih = [str(item).strip() for item in headings if str(item).strip()]
+
+    if not bersih or not paragraphs:
+        return []
+
+    jatah, sisa = divmod(len(paragraphs), len(bersih))
+
+    sections: list[dict] = []
+    cursor = 0
+
+    for index, heading in enumerate(bersih):
+        ambil = jatah + (1 if index < sisa else 0)
+        bagian = paragraphs[cursor:cursor + ambil]
+        cursor += ambil
+
+        if not bagian:
+            continue
+
+        sections.append(
+            {
+                "heading": heading,
+                "type": "paragraph",
+                "paragraphs": bagian,
+                "items": [],
+            }
+        )
+
+    return sections
+
+
+def plan_from_template_content(
+    content: dict,
+    keyword: str,
+    brand: dict,
+    region: str,
+) -> dict:
+    """
+    Menyusun ringkasan rencana dari isi template yang sudah dicocokkan.
+
+    Bentuk plan dipakai di banyak tempat sesudah ini: penamaan
+    berkas, sitemap, ringkasan job, dan pemeriksaan bahasa. Jadi
+    isi template diterjemahkan ke bentuk yang sama supaya bagian
+    lain pipeline tidak perlu tahu jalur mana yang dipakai.
+    """
+    faq = [
+        {"question": question, "answer": answer}
+        for question, answer in zip(
+            content.get("faq_question", []),
+            content.get("faq_answer", []),
+        )
+    ]
+
+    keywords = [
+        item.strip()
+        for item in str(content.get("meta_keywords", "")).split(",")
+        if item.strip()
+    ]
+
+    if keyword not in keywords:
+        keywords.insert(0, keyword)
+
+    paragraphs = [
+        item for item in content.get("paragraph", []) if str(item).strip()
+    ]
+
+    return {
+        "title": content.get("title", ""),
+        "meta_description": content.get("meta_description", ""),
+        "slug": slug_for_url(content.get("h1") or keyword, region),
+        "h1": content.get("h1", ""),
+        "intro": paragraphs[:2],
+        "sections": sections_from_parts(
+            content.get("heading", []),
+            paragraphs[2:],
+        ),
+        "faq": faq,
+        "keywords": keywords[:12],
+        "reviews": [
+            {"text": text, "author": author}
+            for text, author in zip(
+                content.get("review_text", []),
+                content.get("review_author", []),
+            )
+        ],
+        "_metadata": content.get("_metadata", {}),
+    }
+
+
+def extract_reference_template(
+    candidates: list[dict],
+    emit,
+) -> dict:
+    """
+    Mengambil struktur dari halaman kompetitor yang sedang ngerank.
+
+    Kandidat dicoba berurutan. Server kompetitor sering menolak atau
+    kehabisan waktu, dan berhenti di kandidat pertama yang mati akan
+    membuang seluruh pekerjaan langkah 1 sampai 3.
+    """
+    attempts: list[str] = []
+
+    for candidate in candidates[:4]:
+        candidate_url = candidate.get("final_url", candidate["url"])
+
+        try:
+            template = extract_template_from_url(candidate_url)
+
+            emit(
+                4,
+                "done",
+                f"{template['source_domain']}, "
+                f"{template['section_count']} section",
+            )
+
+            return template
+
+        except Exception as error:
+            label = candidate.get("domain", candidate_url)
+
+            attempts.append(f"{label}: {type(error).__name__}")
+
+            emit(
+                4,
+                "info",
+                f"  {label} gagal ({type(error).__name__}), "
+                "coba kandidat berikutnya",
+            )
+
+    raise PipelineError(
+        "Semua kandidat halaman acuan gagal diambil: "
+        + "; ".join(attempts)
+        + ". Tentukan halaman acuan sendiri lewat --reference, "
+        "atau unggah template sendiri."
+    )
 
 
 def run_neiiu(
@@ -292,6 +511,8 @@ def run_neiiu(
     reference: str = "",
     use_cache: bool = True,
     analyze_only: bool = False,
+    region: str = SERP_REGION,
+    user_template: dict | None = None,
     on_event=None,
 ) -> dict:
     """
@@ -327,16 +548,27 @@ def run_neiiu(
     if not clean_keyword:
         raise PipelineError("Keyword tidak boleh kosong.")
 
-    brand = build_brand(brand_name, base_url)
+    brand = build_brand(brand_name, base_url, region)
 
     # 1. SERP
     emit(1, "start")
+
+    emit(
+        1,
+        "info",
+        f"zona {brand['region_label']} "
+        f"(gl={get_region(region)['gl']}, "
+        f"hl={get_region(region)['hl']}, "
+        f"lokasi {get_region(region)['location']}), "
+        f"halaman ditulis dalam bahasa {brand['language_name']}",
+    )
 
     serp = search_keyword(
         keyword=clean_keyword,
         limit=limit,
         provider=provider,
         use_cache=use_cache,
+        region=region,
     )
 
     emit(
@@ -474,55 +706,65 @@ def run_neiiu(
     # 4. Template acuan
     emit(4, "start")
 
-    if reference:
-        candidates = [{"url": reference, "domain": reference}]
+    if user_template:
+        # Template pengguna menggantikan pencarian halaman acuan.
+        # Strukturnya sudah ditentukan sendiri oleh pemiliknya, jadi
+        # tidak ada gunanya meniru struktur kompetitor.
+        slot_map = build_slot_map(scan(user_template["landing"]))
+
+        # Kebutuhan isi dihitung dari KEDUA berkas, bukan dari landing
+        # saja. Versi AMP hampir selalu punya jumlah slot yang berbeda,
+        # dan kalau isi hanya dipesan sebanyak slot landing, sisa slot
+        # AMP terbit dengan teks lama milik pemilik template - teks
+        # tentang keyword yang sama sekali lain.
+        specs = [derive_spec(slot_map)]
+        counts = dict(slot_map["counts"])
+
+        if user_template.get("amp"):
+            amp_map = build_slot_map(scan(user_template["amp"]))
+
+            specs.append(derive_spec(amp_map))
+
+            for role, count in amp_map["counts"].items():
+                counts[role] = max(counts.get(role, 0), count)
+
+        template_spec = merge_specs(*specs)
+
+        template = {
+            "source_url": f"template: {user_template['name']}",
+            "source_domain": user_template["name"],
+            "section_count": len(counts),
+            "section_types": sorted(counts),
+            "structure": [],
+            "design": {},
+            "user_template": True,
+            "slot_counts": counts,
+        }
+
+        emit(
+            4,
+            "done",
+            f"template '{user_template['name']}': "
+            + ", ".join(
+                f"{role} {count}"
+                for role, count in sorted(counts.items())
+            ),
+        )
+
     else:
-        candidates = rank_reference_pages(analysis["pages"])
+        template_spec = None
 
-    if not candidates:
-        raise PipelineError(
-            "Tidak ada halaman acuan yang bisa dipakai."
-        )
+        if reference:
+            candidates = [{"url": reference, "domain": reference}]
+        else:
+            candidates = rank_reference_pages(analysis["pages"])
 
-    # Kandidat dicoba berurutan. Server kompetitor sering menolak
-    # atau kehabisan waktu, dan berhenti di kandidat pertama yang
-    # mati akan membuang seluruh pekerjaan langkah 1 sampai 3.
-    template = None
-    attempts: list[str] = []
-
-    for candidate in candidates[:4]:
-        candidate_url = candidate.get("final_url", candidate["url"])
-
-        try:
-            template = extract_template_from_url(candidate_url)
-            break
-
-        except Exception as error:
-            attempts.append(
-                f"{candidate.get('domain', candidate_url)}: "
-                f"{type(error).__name__}"
+        if not candidates:
+            raise PipelineError(
+                "Tidak ada halaman acuan yang bisa dipakai."
             )
 
-            emit(
-                4,
-                "info",
-                f"  {candidate.get('domain', candidate_url)} gagal "
-                f"({type(error).__name__}), coba kandidat berikutnya",
-            )
-
-    if template is None:
-        raise PipelineError(
-            "Semua kandidat halaman acuan gagal diambil: "
-            + "; ".join(attempts)
-            + ". Tentukan halaman acuan sendiri lewat --reference."
-        )
-
-    emit(
-        4,
-        "done",
-        f"{template['source_domain']}, "
-        f"{template['section_count']} section",
-    )
+        template = extract_reference_template(candidates, emit)
 
     output_dir = prepare_output_dir(
         clean_keyword,
@@ -568,14 +810,40 @@ def run_neiiu(
     emit(5, "start")
 
     try:
-        plan = generate_content_plan(
-            analysis=analysis,
-            insight=insight,
-            template=template,
-            brand=brand,
-            verbose=False,
-            on_progress=ai_progress(5),
-        )
+        if user_template:
+            # Jumlah teks ditentukan template, jadi yang diminta ke
+            # AI adalah potongan-potongan terpisah dengan jumlah dan
+            # panjang yang persis, bukan rencana halaman bebas.
+            content, fit_notes = generate_template_content(
+                analysis=analysis,
+                insight=insight,
+                spec=template_spec,
+                brand=brand,
+                fallbacks={
+                    "faq_question": blueprint["people_also_ask"]
+                    + blueprint["competitor_questions"],
+                },
+                on_progress=ai_progress(5),
+            )
+
+            for note in fit_notes:
+                emit(5, "info", f"  {note}")
+
+            plan = plan_from_template_content(
+                content,
+                clean_keyword,
+                brand,
+                region,
+            )
+        else:
+            plan = generate_content_plan(
+                analysis=analysis,
+                insight=insight,
+                template=template,
+                brand=brand,
+                verbose=False,
+                on_progress=ai_progress(5),
+            )
     except Exception as error:
         write_analysis_markdown(
             path=output_dir / "ANALISIS.md",
@@ -592,6 +860,11 @@ def run_neiiu(
             "Analisis SERP tetap tersimpan."
         ) from error
 
+    language_warning = check_language(plan, region)
+
+    if language_warning:
+        emit(5, "info", f"PERINGATAN: {language_warning}")
+
     emit(
         5,
         "done",
@@ -606,21 +879,80 @@ def run_neiiu(
     page_url = f"{brand['base_url']}/{plan['slug']}/"
     amp_url = f"{brand['base_url']}/{plan['slug']}/amp/"
 
-    landing_html = generate_landing_page(
-        plan=plan,
-        design=template["design"],
-        brand=brand,
-        page_url=page_url,
-        amp_url=amp_url,
-    )
+    if user_template:
+        landing_result = fill_template(
+            html=user_template["landing"],
+            content=content,
+            brand=brand,
+        )
 
-    amp_html = generate_amp_page(
-        plan=plan,
-        design=template["design"],
-        brand=brand,
-        page_url=page_url,
-        amp_url=amp_url,
-    )
+        landing_html = landing_result["html"]
+
+        emit(
+            6,
+            "info",
+            f"  landing page: {landing_result['edits']} bagian diisi, "
+            f"{landing_result['skipped']} dibiarkan apa adanya",
+        )
+
+        for note in landing_result["notes"]:
+            emit(6, "info", f"  {note}")
+
+        if user_template.get("amp"):
+            amp_result = fill_template(
+                html=user_template["amp"],
+                content=content,
+                brand=brand,
+            )
+
+            amp_html = amp_result["html"]
+
+            emit(
+                6,
+                "info",
+                f"  AMP: {amp_result['edits']} bagian diisi, "
+                f"{amp_result['skipped']} dibiarkan apa adanya",
+            )
+
+            # Catatan berkas AMP ikut ditampilkan. Sebelumnya hanya
+            # catatan landing yang muncul, jadi peringatan yang cuma
+            # berlaku di berkas AMP - slot yang tidak kebagian isi,
+            # atribut tanpa kutip - hilang tanpa jejak.
+            for note in amp_result["notes"]:
+                emit(6, "info", f"  {note}")
+        else:
+            # Tanpa template AMP, versi AMP dibuat generator biasa
+            # supaya halamannya tetap punya pasangan AMP yang sah.
+            amp_html = generate_amp_page(
+                plan=plan,
+                design={},
+                brand=brand,
+                page_url=page_url,
+                amp_url=amp_url,
+            )
+
+            emit(
+                6,
+                "info",
+                "  template AMP tidak diunggah, versi AMP dibuat "
+                "NEIIU dari isi yang sama",
+            )
+    else:
+        landing_html = generate_landing_page(
+            plan=plan,
+            design=template["design"],
+            brand=brand,
+            page_url=page_url,
+            amp_url=amp_url,
+        )
+
+        amp_html = generate_amp_page(
+            plan=plan,
+            design=template["design"],
+            brand=brand,
+            page_url=page_url,
+            amp_url=amp_url,
+        )
 
     amp_dir = output_dir / "amp"
     amp_dir.mkdir(parents=True, exist_ok=True)

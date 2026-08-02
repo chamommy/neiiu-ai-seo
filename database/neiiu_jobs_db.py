@@ -70,6 +70,25 @@ def init_jobs_db() -> None:
                 "ADD COLUMN base_url TEXT NOT NULL DEFAULT ''"
             )
 
+        # Zona dan template ditambahkan belakangan. Job lama otomatis
+        # bernilai 'id' dan 0, yang memang perilaku waktu mereka
+        # dijalankan.
+        if "region" not in columns:
+            db.execute(
+                "ALTER TABLE neiiu_jobs "
+                "ADD COLUMN region TEXT NOT NULL DEFAULT 'id'"
+            )
+
+        # Tanpa FOREIGN KEY karena SQLite tidak bisa menambahkannya
+        # lewat ALTER TABLE. Kepemilikan tetap diperiksa di lapisan
+        # web, dan template yang sudah dihapus ditangani saat job
+        # membacanya, bukan dijamin oleh database.
+        if "template_id" not in columns:
+            db.execute(
+                "ALTER TABLE neiiu_jobs "
+                "ADD COLUMN template_id INTEGER NOT NULL DEFAULT 0"
+            )
+
 
 def create_job(
     user_id: int,
@@ -82,6 +101,8 @@ def create_job(
     analyze_only: bool,
     brand_name: str = "",
     base_url: str = "",
+    region: str = "id",
+    template_id: int = 0,
 ) -> int:
     now = utc_now()
 
@@ -92,9 +113,10 @@ def create_job(
                 user_id, keyword, brand_name, base_url,
                 provider, crawl_limit, serp_limit,
                 reference_url, use_cache, analyze_only,
+                region, template_id,
                 status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
             """,
             (
                 user_id,
@@ -107,6 +129,8 @@ def create_job(
                 reference_url,
                 int(use_cache),
                 int(analyze_only),
+                region,
+                int(template_id),
                 now,
                 now,
             ),
@@ -135,6 +159,7 @@ def list_jobs(user_id: int, limit: int = 50):
         return db.execute(
             """
             SELECT id, keyword, brand_name, base_url, provider,
+                   region, template_id,
                    status, step, total_steps,
                    step_label, error, output_dir, summary,
                    analyze_only, created_at, updated_at

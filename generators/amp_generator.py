@@ -49,7 +49,7 @@ def generate_amp_page(
     canonical sengaja menunjuk ke halaman biasa, bukan ke dirinya
     sendiri, sesuai syarat AMP berpasangan.
     """
-    css = build_css(design, amp=True)
+    css = build_css(design, amp=True, region=brand.get("region", "id"))
 
     schema = build_schema_graph(
         plan=plan,
@@ -61,7 +61,7 @@ def generate_amp_page(
     keywords = ", ".join(plan.get("keywords", [])[:10])
 
     return f"""<!doctype html>
-<html amp lang="id">
+<html amp lang="{escape(brand.get("html_lang", "id"))}" dir="{escape(brand.get("direction", "ltr"))}">
 <head>
   <meta charset="utf-8">
   <script async src="https://cdn.ampproject.org/v0.js"></script>

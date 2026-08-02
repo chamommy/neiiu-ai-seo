@@ -25,11 +25,11 @@ from config import (
     GOOGLE_CSE_CX,
     GOOGLE_CSE_KEY,
     REQUEST_TIMEOUT,
-    SERP_COUNTRY,
-    SERP_LANGUAGE,
     SERP_MANUAL_FILE,
+    SERP_REGION,
     SERPER_API_KEY,
 )
+from utils.region import get_region
 
 
 class SerpProviderError(RuntimeError):
@@ -90,14 +90,22 @@ def normalize_results(
 def search_serper(
     keyword: str,
     limit: int,
+    region: str = SERP_REGION,
 ) -> list[dict]:
     """
     Provider Serper.dev (butuh SERPER_API_KEY).
+
+    Selain gl dan hl, Serper juga menerima "location" yang membuat
+    hasilnya diambil seolah pencarinya berada di sana. Tanpa itu,
+    gl dan hl saja masih menyisakan hasil yang condong ke tempat
+    server Serper berjalan, bukan ke negara yang diminta.
     """
     if not SERPER_API_KEY:
         raise SerpProviderError(
             "SERPER_API_KEY belum diisi di file .env."
         )
+
+    spec = get_region(region)
 
     response = requests.post(
         "https://google.serper.dev/search",
@@ -107,8 +115,9 @@ def search_serper(
         },
         json={
             "q": keyword,
-            "gl": SERP_COUNTRY,
-            "hl": SERP_LANGUAGE,
+            "gl": spec["gl"],
+            "hl": spec["hl"],
+            "location": spec["location"],
             "num": max(limit, 10),
         },
         timeout=REQUEST_TIMEOUT,
@@ -161,16 +170,26 @@ def search_serper(
 def search_google_cse(
     keyword: str,
     limit: int,
+    region: str = SERP_REGION,
 ) -> list[dict]:
     """
     Provider Google Custom Search JSON API.
 
-    Catatan: CSE membatasi 10 hasil per request.
+    Catatan: CSE membatasi 10 hasil per request, dan yang
+    dikembalikan adalah hasil Programmable Search Engine, bukan
+    urutan google.com yang sebenarnya. Penargetan gl dan hl tetap
+    dikirim, tapi peringkat yang keluar tidak bisa dipakai untuk
+    menyimpulkan peringkat asli di negara itu.
+
+    Parameter lokasi tidak dikirim: CSE tidak punya padanan
+    "location" milik Serper, dan googlehost sudah tidak berlaku.
     """
     if not GOOGLE_CSE_KEY or not GOOGLE_CSE_CX:
         raise SerpProviderError(
             "GOOGLE_CSE_KEY / GOOGLE_CSE_CX belum diisi di file .env."
         )
+
+    spec = get_region(region)
 
     response = requests.get(
         "https://www.googleapis.com/customsearch/v1",
@@ -178,8 +197,8 @@ def search_google_cse(
             "key": GOOGLE_CSE_KEY,
             "cx": GOOGLE_CSE_CX,
             "q": keyword,
-            "gl": SERP_COUNTRY,
-            "hl": SERP_LANGUAGE,
+            "gl": spec["gl"],
+            "hl": spec["hl"],
             "num": min(limit, 10),
         },
         timeout=REQUEST_TIMEOUT,
@@ -210,6 +229,7 @@ def search_google_cse(
 def search_manual(
     keyword: str,
     limit: int,
+    region: str = SERP_REGION,
 ) -> list[dict]:
     """
     Provider manual, tanpa API.
@@ -219,7 +239,10 @@ def search_manual(
 
     Format file yang diterima:
         {"slot gacor": ["https://a.com", "https://b.com"]}
-    atau:
+    atau dengan zona di depan keyword, kalau satu keyword yang sama
+    dipakai di dua negara dengan hasil yang berbeda:
+        {"th:slot gacor": ["https://a.co.th"]}
+    atau daftar polos:
         ["https://a.com", "https://b.com"]
     """
     if not SERP_MANUAL_FILE.exists():
@@ -235,14 +258,19 @@ def search_manual(
         data = json.load(file)
 
     if isinstance(data, dict):
-        urls = data.get(keyword.strip().lower(), [])
+        clean = keyword.strip().lower()
+        code = get_region(region)["code"]
+
+        # Kunci berzona dicoba lebih dulu supaya file lama yang belum
+        # memakai awalan zona tetap bekerja seperti sebelumnya.
+        urls = data.get(f"{code}:{clean}") or data.get(clean, [])
 
         if not urls:
             available = ", ".join(data.keys()) or "kosong"
 
             raise SerpProviderError(
-                f"Keyword '{keyword}' tidak ada di {SERP_MANUAL_FILE.name}. "
-                f"Keyword tersedia: {available}"
+                f"Keyword '{keyword}' zona '{code}' tidak ada di "
+                f"{SERP_MANUAL_FILE.name}. Kunci tersedia: {available}"
             )
     else:
         urls = data
@@ -270,6 +298,7 @@ def run_provider(
     provider: str,
     keyword: str,
     limit: int,
+    region: str = SERP_REGION,
 ) -> list[dict]:
     """
     Menjalankan provider berdasarkan namanya.
@@ -284,4 +313,4 @@ def run_provider(
             f"Pilihan: {available}"
         )
 
-    return handler(keyword, limit)
+    return handler(keyword, limit, region)

@@ -100,6 +100,37 @@
                 </div>
 
                 <div class="field">
+                    <label for="region">Zona</label>
+                    <select id="region" name="region">
+                        {% for zona in regions %}
+                        <option
+                            value="{{ zona.code }}"
+                            {% if zona.code == default_region %}selected{% endif %}
+                        >{{ zona.label }}</option>
+                        {% endfor %}
+                    </select>
+                    <span class="hint">
+                        Menentukan Google negara mana yang dipakai
+                        mencari, sekaligus bahasa landing page dan
+                        AMP yang dibuat.
+                    </span>
+                </div>
+
+                <div class="field">
+                    <label for="templateId">Template</label>
+                    <select id="templateId" name="templateId">
+                        <option value="0">
+                            Tanpa template (tiru struktur kompetitor)
+                        </option>
+                    </select>
+                    <span class="hint">
+                        Kalau dipilih, NEIIU hanya mengganti isinya
+                        dan tidak menyentuh struktur, link, atau
+                        iklan di dalamnya.
+                    </span>
+                </div>
+
+                <div class="field">
                     <label for="provider">Sumber SERP</label>
                     <select id="provider" name="provider">
                         <option value="serper">Serper.dev (butuh API key)</option>
@@ -162,6 +193,66 @@
 
             <div id="formNotice" class="notice" hidden></div>
         </form>
+    </section>
+
+    <section class="card">
+        <h2>Template Milikku</h2>
+        <p class="neiiu-sub" style="margin-top:0">
+            Unggah landing page dan AMP milikmu sendiri. NEIIU hanya
+            mengganti judul, deskripsi, heading, paragraf, FAQ, dan
+            ulasan di dalamnya. Struktur, link, dan iklan yang sudah
+            ada tidak disentuh. Tandai bagian yang tidak boleh
+            berubah dengan <code>data-neiiu-skip</code>.
+            Maksimal {{ max_template_mb }} MB per berkas.
+        </p>
+
+        <form id="templateForm">
+            <div class="grid">
+                <div class="field">
+                    <label for="templateName">Nama template</label>
+                    <input
+                        type="text"
+                        id="templateName"
+                        placeholder="contoh: Tema Wayang v2"
+                        maxlength="120"
+                        autocomplete="off"
+                    >
+                </div>
+
+                <div class="field">
+                    <label for="landingFile">Berkas landing page (HTML)</label>
+                    <input
+                        type="file"
+                        id="landingFile"
+                        accept=".html,.htm,text/html"
+                        required
+                    >
+                </div>
+
+                <div class="field">
+                    <label for="ampFile">Berkas AMP (HTML, opsional)</label>
+                    <input
+                        type="file"
+                        id="ampFile"
+                        accept=".html,.htm,text/html"
+                    >
+                    <span class="hint">
+                        Kosongkan kalau belum punya. NEIIU akan
+                        membuatkan versi AMP dari isi yang sama.
+                    </span>
+                </div>
+            </div>
+
+            <button type="submit" class="primary-btn" id="uploadBtn">
+                Unggah Template
+            </button>
+
+            <div id="templateNotice" class="notice" hidden></div>
+        </form>
+
+        <div id="templateList" style="margin-top:18px">
+            <div class="empty">Memuat...</div>
+        </div>
     </section>
 
     <section class="card" id="progressCard" hidden>

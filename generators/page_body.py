@@ -8,17 +8,20 @@ kanoniknya sebagai pelanggaran, jadi keduanya wajib dirender dari
 sumber yang satu ini.
 """
 
-from generators.html_utils import escape, heading_id
+from generators.html_utils import escape, heading_id, unique_ids
+from generators.page_text import text_of
 
 
 def render_header(brand: dict) -> str:
+    words = text_of(brand)
+
     return f"""
 <header class="site-header">
   <div class="wrap">
     <a class="brand" href="/">{escape(brand["site_name"])}</a>
     <nav class="site-nav">
-      <a href="/">Beranda</a>
-      <a href="#faq">FAQ</a>
+      <a href="/">{words["home"]}</a>
+      <a href="#faq">{words["faq_nav"]}</a>
     </nav>
   </div>
 </header>
@@ -41,27 +44,49 @@ def render_hero(plan: dict) -> str:
 """.strip()
 
 
-def render_toc(plan: dict) -> str:
+def assign_anchors(plan: dict) -> None:
+    """
+    Menomori anchor seluruh section sekali di awal.
+
+    Daftar isi dan judul section menghitung anchornya masing-masing,
+    jadi penomorannya harus berasal dari satu tempat. Kalau tidak,
+    tautan daftar isi bisa menunjuk id yang tidak ada.
+    """
+    sections = plan.get("sections", [])
+
+    for section, anchor in zip(
+        sections,
+        unique_ids([section.get("heading", "") for section in sections]),
+    ):
+        section["_anchor"] = anchor
+
+
+def section_anchor(section: dict) -> str:
+    return section.get("_anchor") or heading_id(section.get("heading", ""))
+
+
+def render_toc(plan: dict, brand: dict) -> str:
     """
     Daftar isi dengan anchor ke tiap section.
 
     Selain membantu pembaca, anchor ini juga memberi Google
     kandidat jump-to link di hasil pencarian.
     """
+    words = text_of(brand)
     sections = plan.get("sections", [])
 
     if len(sections) < 3:
         return ""
 
     items = "\n        ".join(
-        f'<li><a href="#{heading_id(section["heading"])}">'
+        f'<li><a href="#{section_anchor(section)}">'
         f'{escape(section["heading"])}</a></li>'
         for section in sections
     )
 
     return f"""
-<nav class="toc" aria-label="Daftar isi">
-        <strong>Daftar Isi</strong>
+<nav class="toc" aria-label="{words["toc_label"]}">
+        <strong>{words["toc_title"]}</strong>
         <ol>
         {items}
         </ol>
@@ -75,13 +100,14 @@ def render_list_items(items: list[str]) -> str:
     )
 
 
-def render_table(items: list[str]) -> str:
+def render_table(items: list[str], brand: dict) -> str:
     """
     Merender daftar poin jadi tabel bernomor.
 
     Format "Judul: penjelasan" dipecah jadi dua kolom supaya
     tabelnya informatif, bukan cuma daftar yang dikotak-kotakkan.
     """
+    words = text_of(brand)
     rows = []
 
     for index, item in enumerate(items, start=1):
@@ -102,7 +128,7 @@ def render_table(items: list[str]) -> str:
 <div class="table-wrap">
         <table>
           <thead>
-            <tr><th>#</th><th>Poin</th><th>Keterangan</th></tr>
+            <tr><th>{words["table_number"]}</th><th>{words["table_point"]}</th><th>{words["table_detail"]}</th></tr>
           </thead>
           <tbody>
           {body}
@@ -112,9 +138,9 @@ def render_table(items: list[str]) -> str:
 """.strip()
 
 
-def render_section(section: dict) -> str:
+def render_section(section: dict, brand: dict) -> str:
     heading = section["heading"]
-    anchor = heading_id(heading)
+    anchor = section_anchor(section)
 
     paragraphs = "\n      ".join(
         f"<p>{escape(paragraph)}</p>"
@@ -139,7 +165,7 @@ def render_section(section: dict) -> str:
         )
 
     elif section["type"] == "table" and items:
-        extra = render_table(items)
+        extra = render_table(items, brand)
 
     elif section["type"] == "cta":
         extra = ""
@@ -170,7 +196,9 @@ def render_section(section: dict) -> str:
 """.strip()
 
 
-def render_faq(faq: list[dict]) -> str:
+def render_faq(faq: list[dict], brand: dict) -> str:
+    words = text_of(brand)
+
     if not faq:
         return ""
 
@@ -185,7 +213,7 @@ def render_faq(faq: list[dict]) -> str:
     return f"""
 <section class="block" id="faq">
     <div class="wrap">
-      <h2>Pertanyaan Yang Sering Diajukan</h2>
+      <h2>{words["faq_heading"]}</h2>
       {items}
     </div>
   </section>
@@ -196,6 +224,7 @@ def render_footer(
     brand: dict,
     plan: dict,
 ) -> str:
+    words = text_of(brand)
     disclaimer = brand.get("disclaimer", "")
 
     disclaimer_html = (
@@ -207,7 +236,7 @@ def render_footer(
     keywords = ", ".join(plan.get("keywords", [])[:8])
 
     keywords_html = (
-        f"<p>Topik terkait: {escape(keywords)}</p>"
+        f'<p>{words["related_topics"]}: {escape(keywords)}</p>'
         if keywords
         else ""
     )
@@ -217,7 +246,7 @@ def render_footer(
   <div class="wrap">
     {keywords_html}
     <p>&copy; {escape(brand["year"])} {escape(brand["site_name"])}.
-       Seluruh hak cipta dilindungi.</p>
+       {words["rights_reserved"]}</p>
     {disclaimer_html}
   </div>
 </footer>
@@ -231,12 +260,14 @@ def render_body(
     """
     Merakit seluruh isi halaman jadi satu blok HTML.
     """
+    assign_anchors(plan)
+
     sections_html = "\n\n  ".join(
-        render_section(section)
+        render_section(section, brand)
         for section in plan.get("sections", [])
     )
 
-    toc = render_toc(plan)
+    toc = render_toc(plan, brand)
 
     toc_block = (
         f'<section class="block">\n    <div class="wrap">\n      '
@@ -255,7 +286,7 @@ def render_body(
 
   {sections_html}
 
-  {render_faq(plan.get("faq", []))}
+  {render_faq(plan.get("faq", []), brand)}
   </main>
 
   {render_footer(brand, plan)}
