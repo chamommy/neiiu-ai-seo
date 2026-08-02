@@ -183,9 +183,6 @@ function renderJobCard(job) {
             <a href="/neiiu/jobs/${job.id}/download/amp.html">
                 amp.html
             </a>
-            <a href="/neiiu/jobs/${job.id}/download/sitemap.xml">
-                sitemap.xml
-            </a>
             <a href="/neiiu/jobs/${job.id}/download/analisis.md">
                 ANALISIS.md
             </a>
@@ -425,9 +422,13 @@ form.addEventListener("submit", async (event) => {
         use_cache: document.getElementById("useCache").checked,
         analyze_only: document.getElementById("analyzeOnly").checked,
         region: document.getElementById("region").value,
+        city: document.getElementById("city").value,
         template_id: Number(
             document.getElementById("templateId").value
         ) || 0,
+        template_brand: document
+            .getElementById("templateBrand")
+            .value.trim(),
     };
 
     try {
@@ -658,5 +659,62 @@ templateList.addEventListener("click", async (event) => {
     }
 });
 
+// ---------- Pemilih kota ----------
+
+// Daftar kota per zona dikirim bersama halamannya, bukan diambil
+// lewat permintaan terpisah. Isinya kecil dan tidak pernah berubah
+// saat halaman terbuka, jadi menaruhnya di sini membuat pemilih kota
+// langsung terisi begitu zonanya diganti.
+const REGION_CITIES = (() => {
+    const holder = document.getElementById("regionData");
+
+    if (!holder) {
+        return {};
+    }
+
+    try {
+        const rows = JSON.parse(holder.textContent) || [];
+        const map = {};
+
+        rows.forEach((row) => {
+            map[row.code] = row.cities || [];
+        });
+
+        return map;
+    } catch (error) {
+        return {};
+    }
+})();
+
+function refreshCities() {
+    const regionSelect = document.getElementById("region");
+    const citySelect = document.getElementById("city");
+
+    if (!regionSelect || !citySelect) {
+        return;
+    }
+
+    const cities = REGION_CITIES[regionSelect.value] || [];
+
+    citySelect.innerHTML =
+        '<option value="">Seluruh negara</option>' +
+        cities
+            .map(
+                (city) =>
+                    `<option value="${escapeHtml(city.value)}">` +
+                    `${escapeHtml(city.label)}</option>`
+            )
+            .join("");
+}
+
+const regionSelect = document.getElementById("region");
+
+if (regionSelect) {
+    // Kota zona lain ditolak server, jadi daftarnya harus ikut
+    // berganti begitu zonanya berganti - bukan menunggu job gagal.
+    regionSelect.addEventListener("change", refreshCities);
+}
+
+refreshCities();
 refreshJobs();
 refreshTemplates();

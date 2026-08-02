@@ -40,6 +40,83 @@ THAI_GRAM = 4
 
 LATIN_WORD = re.compile(r"[^\W\d_]{4,}", re.UNICODE)
 
+# Kategori Unicode yang tidak memakan ruang mendatar sama sekali.
+# Aksara Thai menumpuk sara dan tanda nada di atas atau di bawah
+# huruf induknya, jadi "ช่วยเหลือ" panjangnya sembilan karakter tapi
+# lebarnya cuma lima kolom.
+ZERO_WIDTH_CATEGORIES = {"Mn", "Me", "Cf"}
+
+# Aksara yang satu hurufnya selebar dua kolom: Han, Kana, Hangul.
+WIDE_CLASSES = {"W", "F"}
+
+
+def char_width(char: str) -> int:
+    if unicodedata.category(char) in ZERO_WIDTH_CATEGORIES:
+        return 0
+
+    return 2 if unicodedata.east_asian_width(char) in WIDE_CLASSES else 1
+
+
+def display_width(text: str) -> int:
+    """
+    Lebar teks kalau ditampilkan, dihitung dalam kolom.
+
+    Inilah ukuran yang benar untuk membandingkan panjang teks lama
+    dengan teks penggantinya, karena yang dijaga adalah tata letak.
+    len() salah untuk urusan itu: ia menghitung tanda vokal Thai
+    sebagai karakter penuh padahal tanda itu tidak menambah lebar
+    sedikit pun, sehingga label yang sebenarnya muat dinilai
+    kepanjangan lalu dipotong.
+    """
+    return sum(char_width(char) for char in text or "")
+
+
+def trim_to_width(text: str, limit: int) -> str:
+    """
+    Memotong teks sampai muat lebar tertentu tanpa merusak hurufnya.
+
+    Dua hal yang dijaga. Pertama, potongan tidak pernah jatuh di
+    tengah satu huruf: tanda vokal yang kehilangan huruf induknya
+    tampil sebagai tanda menggantung, dan itu yang membuat
+    "ช่วยเหลือ" terpotong jadi "ช่วยเหล็". Kedua, kalau teksnya
+    memakai spasi, potongan digeser ke batas kata terdekat.
+    """
+    body = " ".join(str(text or "").split())
+
+    if limit <= 0 or display_width(body) <= limit:
+        return body
+
+    lebar = 0
+    potong = len(body)
+
+    for index, char in enumerate(body):
+        tambah = char_width(char)
+
+        if lebar + tambah > limit:
+            potong = index
+            break
+
+        lebar += tambah
+
+    # Kalau potongannya jatuh tepat di atas tanda yang menempel,
+    # huruf induknya ikut dibuang. Menyisakan tandanya saja
+    # menghasilkan karakter menggantung yang tidak terbaca.
+    while 0 < potong < len(body) and char_width(body[potong]) == 0:
+        potong -= 1
+
+    trimmed = body[:potong]
+    spasi = trimmed.rfind(" ")
+
+    # Batas kata hampir selalu lebih baik daripada potongan di tengah
+    # kata, jadi ambangnya sengaja rendah: "Daftar Sekaran" terbaca
+    # seperti halaman rusak, "Daftar" tidak. Ambangnya tidak nol
+    # karena teks yang isinya satu kata sangat panjang - tautan, nama
+    # berkas - akan habis sama sekali kalau digeser ke spasi pertama.
+    if spasi > potong * 0.35:
+        trimmed = trimmed[:spasi]
+
+    return trimmed.rstrip(" ,.;:-")
+
 
 def thai_share(text: str) -> float:
     """

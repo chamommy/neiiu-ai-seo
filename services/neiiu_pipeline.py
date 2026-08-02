@@ -22,9 +22,11 @@ from config import (
     SITE_NAME,
 )
 from utils.region import (
+    city_label,
     format_date,
     get_region,
     iso_date,
+    resolve_location,
     slug_for_url,
 )
 from generators.amp_generator import generate_amp_page
@@ -138,33 +140,6 @@ def prepare_output_dir(
 def save_json(path: Path, payload: dict) -> None:
     with path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
-
-
-def write_sitemap(
-    path: Path,
-    page_url: str,
-    amp_url: str,
-) -> None:
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url>
-    <loc>{page_url}</loc>
-    <lastmod>{today}</lastmod>
-    <changefreq>daily</changefreq>
-    <priority>1.0</priority>
-  </url>
-  <url>
-    <loc>{amp_url}</loc>
-    <lastmod>{today}</lastmod>
-    <changefreq>daily</changefreq>
-    <priority>0.8</priority>
-  </url>
-</urlset>
-"""
-
-    path.write_text(xml, encoding="utf-8")
 
 
 def write_analysis_markdown(
@@ -405,7 +380,7 @@ def plan_from_template_content(
     Menyusun ringkasan rencana dari isi template yang sudah dicocokkan.
 
     Bentuk plan dipakai di banyak tempat sesudah ini: penamaan
-    berkas, sitemap, ringkasan job, dan pemeriksaan bahasa. Jadi
+    berkas, ringkasan job, dan pemeriksaan bahasa. Jadi
     isi template diterjemahkan ke bentuk yang sama supaya bagian
     lain pipeline tidak perlu tahu jalur mana yang dipakai.
     """
@@ -512,7 +487,9 @@ def run_neiiu(
     use_cache: bool = True,
     analyze_only: bool = False,
     region: str = SERP_REGION,
+    city: str = "",
     user_template: dict | None = None,
+    template_brand: str = "",
     on_event=None,
 ) -> dict:
     """
@@ -559,7 +536,7 @@ def run_neiiu(
         f"zona {brand['region_label']} "
         f"(gl={get_region(region)['gl']}, "
         f"hl={get_region(region)['hl']}, "
-        f"lokasi {get_region(region)['location']}), "
+        f"lokasi {resolve_location(region, city)}), "
         f"halaman ditulis dalam bahasa {brand['language_name']}",
     )
 
@@ -569,6 +546,7 @@ def run_neiiu(
         provider=provider,
         use_cache=use_cache,
         region=region,
+        city=city,
     )
 
     emit(
@@ -710,7 +688,10 @@ def run_neiiu(
         # Template pengguna menggantikan pencarian halaman acuan.
         # Strukturnya sudah ditentukan sendiri oleh pemiliknya, jadi
         # tidak ada gunanya meniru struktur kompetitor.
-        slot_map = build_slot_map(scan(user_template["landing"]))
+        slot_map = build_slot_map(
+            scan(user_template["landing"]),
+            template_brand,
+        )
 
         # Kebutuhan isi dihitung dari KEDUA berkas, bukan dari landing
         # saja. Versi AMP hampir selalu punya jumlah slot yang berbeda,
@@ -721,7 +702,10 @@ def run_neiiu(
         counts = dict(slot_map["counts"])
 
         if user_template.get("amp"):
-            amp_map = build_slot_map(scan(user_template["amp"]))
+            amp_map = build_slot_map(
+                scan(user_template["amp"]),
+                template_brand,
+            )
 
             specs.append(derive_spec(amp_map))
 
@@ -884,6 +868,7 @@ def run_neiiu(
             html=user_template["landing"],
             content=content,
             brand=brand,
+            old_brand=template_brand,
         )
 
         landing_html = landing_result["html"]
@@ -903,6 +888,7 @@ def run_neiiu(
                 html=user_template["amp"],
                 content=content,
                 brand=brand,
+                old_brand=template_brand,
             )
 
             amp_html = amp_result["html"]
@@ -967,11 +953,6 @@ def run_neiiu(
         encoding="utf-8",
     )
 
-    write_sitemap(
-        output_dir / "sitemap.xml",
-        page_url,
-        amp_url,
-    )
 
     emit(6, "done", f"{len(landing_html)} byte")
 

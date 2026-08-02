@@ -277,6 +277,13 @@ ROLE_LABELS = {
     "review_text": "isi ulasan pengguna",
     "review_author": "nama orang yang menulis ulasan",
     "caption": "keterangan gambar",
+    "nav_label": (
+        "label menu atau tombol, satu sampai tiga kata, "
+        "TANPA titik di akhir"
+    ),
+    "list_item": "satu butir daftar, satu kalimat pendek",
+    "table_cell": "isi satu sel tabel, sangat singkat",
+    "label": "satu baris keterangan pendek",
 }
 
 
@@ -302,21 +309,57 @@ def build_template_content_prompt(
     language_name = brand.get("language_name", "Indonesia")
 
     kebutuhan: list[str] = []
+    padanan: list[str] = []
 
     for role, rule in sorted(spec.items()):
         label = ROLE_LABELS.get(role, role)
         count = rule["count"]
-        limit = rule["max_length"]
+        limit = rule.get("max_length_any") or rule["max_length"]
+        jatah = rule.get("budgets") or []
 
         if role in {"title", "meta_description", "meta_keywords", "h1"}:
             kebutuhan.append(
                 f"- {role}: 1 teks, maksimal {limit} karakter ({label})"
+            )
+        elif len(set(jatah)) > 1 and len(jatah) == count:
+            # Slot dalam satu kelompok jarang sama lebarnya. Batas
+            # per teks disebutkan supaya model menakar sendiri, bukan
+            # menulis semuanya sepanjang slot terlebar lalu dipotong.
+            kebutuhan.append(
+                f"- {role}: tepat {count} teks ({label}), batas per teks: "
+                + ", ".join(
+                    f"ke-{nomor} maksimal {nilai}"
+                    for nomor, nilai in enumerate(jatah, start=1)
+                )
+                + " karakter"
             )
         else:
             kebutuhan.append(
                 f"- {role}: tepat {count} teks, "
                 f"masing-masing maksimal {limit} karakter ({label})"
             )
+
+        contoh = rule.get("samples")
+
+        if contoh:
+            padanan.append(f"\n{role} — ganti berurutan, arti tetap sama:")
+            padanan.extend(
+                f"  {nomor}. {teks}"
+                for nomor, teks in enumerate(contoh, start=1)
+            )
+
+    bagian_padanan = (
+        "\n## Teks Lama Yang Harus Diganti Berurutan\n"
+        "Nomor ke-N di daftar bawah ini diganti oleh teks ke-N yang "
+        f"kamu tulis. Tulis padanannya dalam {language_name} dengan "
+        "ARTI YANG SAMA, bukan tulisan baru yang bebas. Ini teks "
+        "menu dan tombol; kalau artinya berubah, tautannya jadi "
+        "menyesatkan meskipun alamatnya tidak berubah.\n"
+        + "\n".join(padanan)
+        + "\n"
+        if padanan
+        else ""
+    )
 
     user_prompt = f"""
 # MENGISI TEMPLATE HALAMAN
@@ -353,10 +396,14 @@ Halamannya memakai template yang sudah jadi, jadi jumlah teksnya
 tidak boleh dikira-kira. Tulis persis sebanyak ini:
 
 {chr(10).join(kebutuhan)}
-
+{bagian_padanan}
 Aturan:
 - Batas karakter itu keras. Teks yang lebih panjang akan merusak
   tata letak halaman, karena kolom dan kartunya sudah dipatok.
+- nav_label, table_cell, dan label mengisi menu, tombol, dan sel
+  tabel. Tulis sesingkat mungkin, tanpa titik di akhir, dan jangan
+  berupa kalimat. Menu yang isinya kalimat akan memecah header
+  halaman ke dua baris.
 - Jangan menomori atau memberi awalan seperti "1." di setiap teks.
 - Setiap teks berdiri sendiri dan langsung berisi, tanpa pembuka.
 - Sebut "{brand_name}" secukupnya saja, tidak di setiap teks.

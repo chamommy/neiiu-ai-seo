@@ -179,7 +179,9 @@ def run_job(job_id: int) -> None:
             use_cache=bool(job["use_cache"]),
             analyze_only=bool(job["analyze_only"]),
             region=job["region"],
+            city=job["city"],
             user_template=user_template,
+            template_brand=job["template_brand"],
             on_event=on_event,
         )
 

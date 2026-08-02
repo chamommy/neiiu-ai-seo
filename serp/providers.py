@@ -29,7 +29,7 @@ from config import (
     SERP_REGION,
     SERPER_API_KEY,
 )
-from utils.region import get_region
+from utils.region import get_region, resolve_location
 
 
 class SerpProviderError(RuntimeError):
@@ -49,16 +49,22 @@ def normalize_results(
     limit: int,
 ) -> list[dict]:
     """
-    Menyeragamkan hasil provider dan membuang duplikat domain.
+    Menyeragamkan hasil provider tanpa mengubah peringkatnya.
 
-    Satu domain hanya diambil sekali karena sitelink dan halaman
-    turunan dari domain yang sama tidak menambah informasi baru
-    untuk analisis struktur SERP.
+    Peringkat diambil apa adanya dari Google, BUKAN dinomori ulang.
+    Sebelumnya hasil kedua dari domain yang sama dibuang lalu sisanya
+    dinomori ulang dari 1, sehingga setiap hasil sesudah domain
+    kembar pertama naik satu tingkat. Halaman yang sebenarnya nomor 7
+    dilaporkan nomor 6, dan angka itu yang dipakai menyusun strategi.
+
+    Domain kembar tetap ditandai supaya tahap crawl tidak mengambil
+    dua halaman dari situs yang sama, tapi tandanya tidak lagi
+    menggeser nomor siapa pun.
     """
     results: list[dict] = []
     seen_domains: set[str] = set()
 
-    for item in raw_items:
+    for index, item in enumerate(raw_items, start=1):
         url = str(item.get("url", "")).strip()
 
         if not url.startswith(("http://", "https://")):
@@ -66,18 +72,25 @@ def normalize_results(
 
         domain = get_domain(url)
 
-        if not domain or domain in seen_domains:
+        if not domain:
             continue
 
+        duplicate = domain in seen_domains
         seen_domains.add(domain)
+
+        try:
+            position = int(item.get("position") or index)
+        except (TypeError, ValueError):
+            position = index
 
         results.append(
             {
-                "position": len(results) + 1,
+                "position": position,
                 "url": url,
                 "title": str(item.get("title", "")).strip(),
                 "snippet": str(item.get("snippet", "")).strip(),
                 "domain": domain,
+                "duplicate_domain": duplicate,
             }
         )
 
@@ -91,6 +104,7 @@ def search_serper(
     keyword: str,
     limit: int,
     region: str = SERP_REGION,
+    city: str = "",
 ) -> list[dict]:
     """
     Provider Serper.dev (butuh SERPER_API_KEY).
@@ -99,6 +113,12 @@ def search_serper(
     hasilnya diambil seolah pencarinya berada di sana. Tanpa itu,
     gl dan hl saja masih menyisakan hasil yang condong ke tempat
     server Serper berjalan, bukan ke negara yang diminta.
+
+    Kalau kota diisi, itu yang dipakai sebagai lokasi. Google memberi
+    urutan yang berbeda antar kota di negara yang sama - sudah diuji,
+    hasil "Bangkok, Bangkok, Thailand" tidak sama dengan "Thailand" -
+    jadi mencocokkan kota membuat peringkatnya lebih dekat dengan
+    yang dilihat sendiri dari tempat itu.
     """
     if not SERPER_API_KEY:
         raise SerpProviderError(
@@ -117,8 +137,13 @@ def search_serper(
             "q": keyword,
             "gl": spec["gl"],
             "hl": spec["hl"],
-            "location": spec["location"],
+            "location": resolve_location(region, city),
             "num": max(limit, 10),
+            # Google membetulkan ejaan yang dikiranya salah dan
+            # mengembalikan hasil untuk kata lain. Untuk keyword Thai
+            # dan untuk nama brand, "pembetulan" itu justru mengganti
+            # pencariannya jadi sesuatu yang tidak pernah diminta.
+            "autocorrect": False,
         },
         timeout=REQUEST_TIMEOUT,
     )
@@ -142,6 +167,8 @@ def search_serper(
             "url": item.get("link", ""),
             "title": item.get("title", ""),
             "snippet": item.get("snippet", ""),
+            # Nomor peringkat asli dari Google dibawa apa adanya.
+            "position": item.get("position"),
         }
         for item in payload.get("organic", [])
     ]
@@ -171,6 +198,7 @@ def search_google_cse(
     keyword: str,
     limit: int,
     region: str = SERP_REGION,
+    city: str = "",
 ) -> list[dict]:
     """
     Provider Google Custom Search JSON API.
@@ -230,6 +258,7 @@ def search_manual(
     keyword: str,
     limit: int,
     region: str = SERP_REGION,
+    city: str = "",
 ) -> list[dict]:
     """
     Provider manual, tanpa API.
@@ -299,6 +328,7 @@ def run_provider(
     keyword: str,
     limit: int,
     region: str = SERP_REGION,
+    city: str = "",
 ) -> list[dict]:
     """
     Menjalankan provider berdasarkan namanya.
@@ -313,4 +343,4 @@ def run_provider(
             f"Pilihan: {available}"
         )
 
-    return handler(keyword, limit, region)
+    return handler(keyword, limit, region, city)

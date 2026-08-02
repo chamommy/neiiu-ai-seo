@@ -20,6 +20,7 @@ from ai.neiiu_prompts import (
 from generators.template_filler import (
     build_dynamic_schema,
     fit_content_to_spec,
+    scale_spec,
 )
 from ai.schemas import CONTENT_PLAN_SCHEMA, SERP_INSIGHT_SCHEMA
 from config import (
@@ -328,6 +329,17 @@ def generate_template_content(
     yang tersedia. Hasilnya tetap dicocokkan ulang sesudahnya,
     karena dukungan minItems di llama.cpp berbeda antar versi.
     """
+    # Jatah panjang di spec bersatuan kolom tampilan, karena itu yang
+    # menentukan apakah teksnya masih muat di tata letak template.
+    # Model dan JSON Schema menghitung karakter, dan untuk aksara
+    # bertumpuk seperti Thai satu kolom butuh lebih dari satu
+    # karakter. Tanpa penyetaraan ini, batas yang diterima model
+    # kira-kira dua pertiga dari ruang yang sebenarnya ada, dan
+    # grammar memutus kata di tengah begitu batasnya kena.
+    zona = get_region(brand.get("region", "id"))
+
+    spec = scale_spec(spec, zona.get("chars_per_column", 1.0))
+
     system_prompt, user_prompt = build_template_content_prompt(
         analysis=analysis,
         insight=insight,
@@ -338,7 +350,8 @@ def generate_template_content(
     # Ruang jawaban dihitung dari kebutuhan template, bukan dipatok.
     # Template kecil tidak perlu menunggu model menulis 5000 token.
     needed_chars = sum(
-        rule["max_length"] * max(rule["count"], 1)
+        (rule.get("max_length_any") or rule["max_length"])
+        * max(rule["count"], 1)
         for rule in spec.values()
     )
 
@@ -349,7 +362,6 @@ def generate_template_content(
     # dari yang dibutuhkan, dan jawaban model terpotong di tengah
     # JSON - yang berarti seluruh langkah 5 gagal, bukan sekadar
     # hasilnya pendek.
-    zona = get_region(brand.get("region", "id"))
     per_token = 1.0 if zona["word_mode"] == "unspaced" else 2.0
 
     max_tokens = min(

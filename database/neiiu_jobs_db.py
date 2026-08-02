@@ -89,6 +89,21 @@ def init_jobs_db() -> None:
                 "ADD COLUMN template_id INTEGER NOT NULL DEFAULT 0"
             )
 
+        # Kota pencarian dan nama brand lama di template ditambahkan
+        # belakangan. Kosong berarti tingkat negara dan tanpa
+        # penggantian brand, sama seperti perilaku job lama.
+        if "city" not in columns:
+            db.execute(
+                "ALTER TABLE neiiu_jobs "
+                "ADD COLUMN city TEXT NOT NULL DEFAULT ''"
+            )
+
+        if "template_brand" not in columns:
+            db.execute(
+                "ALTER TABLE neiiu_jobs "
+                "ADD COLUMN template_brand TEXT NOT NULL DEFAULT ''"
+            )
+
 
 def create_job(
     user_id: int,
@@ -102,7 +117,9 @@ def create_job(
     brand_name: str = "",
     base_url: str = "",
     region: str = "id",
+    city: str = "",
     template_id: int = 0,
+    template_brand: str = "",
 ) -> int:
     now = utc_now()
 
@@ -113,10 +130,13 @@ def create_job(
                 user_id, keyword, brand_name, base_url,
                 provider, crawl_limit, serp_limit,
                 reference_url, use_cache, analyze_only,
-                region, template_id,
+                region, city, template_id, template_brand,
                 status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                'queued', ?, ?
+            )
             """,
             (
                 user_id,
@@ -130,7 +150,9 @@ def create_job(
                 int(use_cache),
                 int(analyze_only),
                 region,
+                city,
                 int(template_id),
+                template_brand,
                 now,
                 now,
             ),
@@ -159,7 +181,7 @@ def list_jobs(user_id: int, limit: int = 50):
         return db.execute(
             """
             SELECT id, keyword, brand_name, base_url, provider,
-                   region, template_id,
+                   region, city, template_id, template_brand,
                    status, step, total_steps,
                    step_label, error, output_dir, summary,
                    analyze_only, created_at, updated_at

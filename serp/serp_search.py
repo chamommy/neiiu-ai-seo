@@ -20,7 +20,12 @@ from config import (
     SERP_TOP_N,
 )
 from serp.providers import SerpProviderError, run_provider
-from utils.region import get_region, slug_for_filename
+from utils.region import (
+    city_label,
+    get_region,
+    resolve_location,
+    slug_for_filename,
+)
 
 
 def slugify(value: str) -> str:
@@ -39,19 +44,21 @@ def cache_path(
     keyword: str,
     provider: str,
     region: str = SERP_REGION,
+    city: str = "",
 ) -> str:
     """
     Menentukan nama file cache untuk satu pencarian.
 
-    Zona wajib ikut jadi bahan sidik jari. Kalau tidak, hasil
-    pencarian Indonesia dan Thailand untuk keyword yang sama akan
-    saling menimpa di file yang sama, dan job kedua akan menerima
-    SERP negara lain tanpa tanda apa pun bahwa itu keliru.
+    Zona dan kota wajib ikut jadi bahan sidik jari. Kalau tidak,
+    hasil pencarian Indonesia dan Thailand - atau Jakarta dan
+    Surabaya - untuk keyword yang sama akan saling menimpa di file
+    yang sama, dan job kedua akan menerima SERP tempat lain tanpa
+    tanda apa pun bahwa itu keliru.
     """
     code = get_region(region)["code"]
 
     fingerprint = hashlib.sha1(
-        f"{provider}|{code}|{keyword}".encode("utf-8")
+        f"{provider}|{code}|{city}|{keyword}".encode("utf-8")
     ).hexdigest()[:10]
 
     filename = f"{code}-{slugify(keyword)}-{fingerprint}.json"
@@ -117,6 +124,7 @@ def search_keyword(
     provider: str = SERP_PROVIDER,
     use_cache: bool = True,
     region: str = SERP_REGION,
+    city: str = "",
 ) -> dict:
     """
     Mengambil hasil pencarian Google untuk satu keyword.
@@ -139,7 +147,9 @@ def search_keyword(
 
     spec = get_region(region)
 
-    path = cache_path(clean_keyword, provider, region)
+    lokasi = resolve_location(region, city)
+
+    path = cache_path(clean_keyword, provider, region, city)
 
     if use_cache:
         cached = read_cache(path, SERP_CACHE_TTL_HOURS)
@@ -154,6 +164,7 @@ def search_keyword(
         keyword=clean_keyword,
         limit=limit,
         region=region,
+        city=city,
     )
 
     if not results:
@@ -171,7 +182,9 @@ def search_keyword(
         "region_label": spec["label"],
         "country": spec["gl"],
         "language": spec["hl"],
-        "location": spec["location"],
+        "location": lokasi,
+        "city": city,
+        "city_label": city_label(region, city),
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
         "from_cache": False,
         "results": results,

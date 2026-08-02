@@ -108,7 +108,16 @@ def crawl_serp_pages(
 
     analyzed: list[dict] = []
 
-    for item in serp_results[:limit]:
+    # Hasil kedua dari domain yang sama dilewati di sini, bukan
+    # dibuang dari daftar SERP. Halaman turunan situs yang sama tidak
+    # menambah informasi baru untuk analisis struktur, tapi membuang
+    # barisnya dari daftar akan menggeser nomor peringkat semua hasil
+    # sesudahnya - dan nomor itulah yang dipakai menilai persaingan.
+    kandidat = [
+        item for item in serp_results if not item.get("duplicate_domain")
+    ]
+
+    for item in kandidat[:limit]:
         position = item["position"]
         url = item["url"]
 
@@ -229,7 +238,7 @@ def crawl_serp_pages(
         analyzed.append(entry)
 
         if on_page is not None:
-            on_page(entry, len(analyzed), min(limit, len(serp_results)))
+            on_page(entry, len(analyzed), min(limit, len(kandidat)))
 
         if delay > 0:
             time.sleep(delay)

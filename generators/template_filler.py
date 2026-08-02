@@ -16,10 +16,19 @@ dicocokkan ulang secara deterministik sesudahnya.
 from datetime import datetime, timedelta
 
 from generators.schema_generator import json_for_html
+from generators.brand_swap import brand_edits, echo_edits, normalize
 from generators.template_guard import verify
 from generators.template_scanner import apply_edits, scan
 from generators.template_slots import build_slot_map
-from utils.region import format_date, iso_date
+from utils.region import format_date, get_region, iso_date
+from utils.text import trim_to_width
+
+
+def region_cities(region: str) -> list[str]:
+    """
+    Nama kota yang pantas ditulis di halaman zona itu.
+    """
+    return get_region(region)["city_names"]
 
 
 # Nilai rating yang dipasang di schema. Ditetapkan di sini, bukan
@@ -37,6 +46,10 @@ LIST_ROLES = (
     "review_text",
     "review_author",
     "caption",
+    "nav_label",
+    "list_item",
+    "table_cell",
+    "label",
 )
 
 # Peran yang isi satu slotnya hanya masuk akal kalau slot pasangannya
@@ -53,7 +66,13 @@ PAIRED_ROLES = {
 # Peran yang isinya dihitung sendiri di Python, tidak diminta ke AI.
 # Tanggal yang dikarang model sering tidak masuk akal (bulan ke-13,
 # tahun di masa depan) dan bentuk kalendernya tidak bisa dijamin.
-GENERATED_ROLES = ("date", "review_date", "lang")
+GENERATED_ROLES = ("date", "review_date", "lang", "city", "brand")
+
+# Peran yang teks barunya harus berarti sama dengan teks lamanya,
+# bukan tulisan baru yang bebas. Menu, tombol, dan sel tabel menunjuk
+# ke sesuatu yang nyata di situs itu; menggantinya dengan kata lain
+# membuat tautannya menyesatkan meskipun alamatnya tidak berubah.
+KEEP_MEANING_ROLES = ("nav_label", "table_cell", "label")
 
 
 def derive_spec(slot_map: dict) -> dict:
@@ -75,11 +94,32 @@ def derive_spec(slot_map: dict) -> dict:
 
         spec[role] = {
             "count": len(slots),
-            # Batas terkecil yang dipakai, supaya satu teks tidak
-            # kepanjangan untuk slot tersempit di kelompoknya.
+            # Batas terkecil di kelompoknya. Hanya untuk dilaporkan;
+            # BUKAN batas yang dikirim ke model. Memakai yang
+            # terkecil untuk seluruh kelompok membuat satu slot
+            # sempit mencekik semuanya: tombol "Daftar Sekarang" yang
+            # sebenarnya punya ruang 20 kolom ikut dipotong jadi 8
+            # cuma karena ada tautan "Promo" di menu yang sama.
             "max_length": min(budgets),
+            # Batas yang dipakai sebagai plafon ke model. Tiap slot
+            # tetap dirapikan ke jatahnya sendiri di build_edits.
             "max_length_any": max(budgets),
+            # Jatah tiap slot, urut dokumen, supaya model bisa
+            # menakar panjang per teks alih-alih menulis semuanya
+            # sepanjang slot terlebar.
+            "budgets": budgets,
         }
+
+        if role in KEEP_MEANING_ROLES:
+            # Teks lamanya ikut dikirim ke AI supaya artinya
+            # dipertahankan. Tanpa ini, label ditulis sebagai daftar
+            # bebas lalu dibagikan urut dokumen, dan tautan menuju
+            # /syarat bisa berakhir bertuliskan "Kota" - menunya
+            # jadi berbohong soal tujuannya sendiri.
+            spec[role]["samples"] = [
+                " ".join(slot["current"].split())[:80]
+                for slot in slots
+            ]
 
     return spec
 
@@ -118,7 +158,47 @@ def merge_specs(*specs: dict) -> dict:
                 rule["max_length_any"],
             )
 
+            # Contoh teks lama dan jatah per slot diambil dari berkas
+            # yang slotnya paling banyak, supaya jumlahnya selalu
+            # cukup untuk dipasangkan dengan jumlah yang diminta.
+            for kunci in ("samples", "budgets"):
+                if len(rule.get(kunci, [])) > len(current.get(kunci, [])):
+                    current[kunci] = rule[kunci]
+
     return merged
+
+
+def scale_spec(spec: dict, chars_per_column: float) -> dict:
+    """
+    Mengubah jatah panjang dari kolom tampilan jadi jumlah karakter.
+
+    Semua jatah dihitung dalam kolom, karena kolomlah yang
+    menentukan apakah sebuah label masih muat di tata letaknya. Tapi
+    yang bisa dihitung model dan dipaksakan JSON Schema adalah
+    karakter, dan untuk aksara bertumpuk seperti Thai dua satuan itu
+    berbeda jauh. Mengirim angka kolom apa adanya berarti menyuruh
+    model menulis dalam separuh ruang yang sebenarnya tersedia.
+    """
+    if chars_per_column <= 1:
+        return spec
+
+    diperbesar: dict[str, dict] = {}
+
+    for role, rule in spec.items():
+        salinan = dict(rule)
+
+        for kunci in ("max_length", "max_length_any"):
+            if kunci in salinan:
+                salinan[kunci] = int(salinan[kunci] * chars_per_column)
+
+        if salinan.get("budgets"):
+            salinan["budgets"] = [
+                int(nilai * chars_per_column) for nilai in salinan["budgets"]
+            ]
+
+        diperbesar[role] = salinan
+
+    return diperbesar
 
 
 def build_dynamic_schema(spec: dict) -> dict:
@@ -129,9 +209,15 @@ def build_dynamic_schema(spec: dict) -> dict:
     required: list[str] = []
 
     def text_field(role: str) -> dict:
+        # Plafon diambil dari slot TERLEBAR di kelompoknya, bukan
+        # tersempit. maxLength di schema dipaksakan grammar llama.cpp
+        # dengan cara memutus string begitu batasnya kena, jadi angka
+        # yang terlalu kecil bukan sekadar membuat teksnya pendek -
+        # ia memotong kata di tengah, dan di aksara Thai potongannya
+        # jatuh di antara huruf dan tanda vokalnya.
         return {
             "type": "string",
-            "maxLength": spec[role]["max_length"],
+            "maxLength": spec[role]["max_length_any"],
         }
 
     def list_field(role: str) -> dict:
@@ -162,18 +248,15 @@ def build_dynamic_schema(spec: dict) -> dict:
 
 
 def clean_line(value, limit: int) -> str:
-    text = " ".join(str(value or "").split())
+    """
+    Merapikan satu teks dan memastikan panjangnya masuk akal.
 
-    if len(text) <= limit:
-        return text
-
-    trimmed = text[:limit]
-    cut = trimmed.rfind(" ")
-
-    if cut > limit * 0.6:
-        trimmed = trimmed[:cut]
-
-    return trimmed.rstrip(" ,.;:-")
+    Pemotongannya diserahkan ke trim_to_width supaya potongan tidak
+    pernah jatuh di tengah huruf. Memotong dengan iris biasa
+    menyisakan tanda vokal tanpa huruf induknya, dan itu tampil
+    sebagai karakter menggantung yang tidak terbaca.
+    """
+    return trim_to_width(value, limit)
 
 
 def fit_content_to_spec(
@@ -194,7 +277,12 @@ def fit_content_to_spec(
     spare = fallbacks or {}
 
     for role, rule in spec.items():
-        limit = rule["max_length"]
+        # Plafon terlebar, bukan tersempit. Penyesuaian ke jatah tiap
+        # slot dikerjakan belakangan di build_edits, di mana slot yang
+        # dimaksud sudah diketahui - dan di situ pula setiap berkas
+        # dirapikan menurut tata letaknya sendiri, bukan menurut
+        # berkas paling sempit di antara landing dan AMP.
+        limit = rule.get("max_length_any") or rule["max_length"]
 
         if role not in LIST_ROLES:
             nilai = content.get(role, "")
@@ -299,7 +387,46 @@ def fit_content_to_spec(
         filled[kiri] = a[:cukup]
         filled[kanan] = b[:cukup]
 
+    filled["_by_old"] = pair_by_old_text(spec, filled)
+
     return filled, warnings
+
+
+def pair_by_old_text(spec: dict, filled: dict) -> dict:
+    """
+    Memetakan teks lama ke penggantinya untuk peran yang berarti.
+
+    Label menu dibagikan urut dokumen, dan itu benar selama slotnya
+    berasal dari berkas yang sama dengan contoh yang dikirim ke AI.
+    Landing page dan AMP tidak begitu: AMP biasanya cuma punya satu
+    tautan di footer, sementara contohnya diambil dari landing yang
+    punya enam. Slot pertama AMP lalu kebagian teks pertama landing,
+    sehingga tautan menuju /syarat terbit bertuliskan "Promo" -
+    alamatnya benar, tulisannya berbohong.
+
+    Dengan peta ini pencocokannya lewat teks lamanya sendiri, jadi
+    setiap berkas mendapat padanan yang memang untuk teks itu, tidak
+    peduli urutan atau jumlah slotnya.
+    """
+    peta: dict[str, dict[str, str]] = {}
+
+    for role, rule in spec.items():
+        contoh = rule.get("samples") or []
+        baru = filled.get(role) or []
+
+        if not contoh or not baru:
+            continue
+
+        pasangan = {
+            normalize(lama): teks
+            for lama, teks in zip(contoh, baru)
+            if normalize(lama) and teks
+        }
+
+        if pasangan:
+            peta[role] = pasangan
+
+    return peta
 
 
 def generated_dates(count: int, brand: dict) -> list[dict]:
@@ -345,6 +472,33 @@ def build_edits(
 
             continue
 
+        if role == "brand":
+            # Tulisan logo dan nama situs: diisi nama brand baru apa
+            # adanya, tidak diminta ke AI dan tidak dipotong batas
+            # panjang. Nama brand yang terpotong lebih buruk daripada
+            # header yang sedikit lebih lebar.
+            nama = str(brand.get("site_name", "")).strip()
+
+            if nama:
+                for slot in slots:
+                    edits.append({**slot, "text": nama})
+
+            continue
+
+        if role == "city":
+            # Nama kota diambil dari daftar zona, bukan dari AI.
+            # Model kecil rutin mengarang kota yang tidak ada, dan
+            # kota palsu di halaman yang menargetkan satu negara
+            # justru merusak sinyal lokalnya.
+            kota = region_cities(brand.get("region", "id"))
+
+            for index, slot in enumerate(slots):
+                edits.append(
+                    {**slot, "text": kota[index % len(kota)]}
+                )
+
+            continue
+
         if role in GENERATED_ROLES:
             # Dikelompokkan per elemen, bukan per urutan slot. Satu
             # <time> punya dua slot sekaligus: nilai atribut datetime
@@ -377,7 +531,7 @@ def build_edits(
             continue
 
         if role in LIST_ROLES:
-            items = content.get(role, [])
+            items = list(content.get(role, []))
 
             # Peran berpasangan dipotong sampai sejumlah slot
             # pasangannya. Kalau template punya 4 tempat pertanyaan
@@ -399,8 +553,26 @@ def build_edits(
 
                 slots = slots[:muat]
 
-            for slot, text in zip(slots, items):
-                edits.append({**slot, "text": text})
+            # Peran yang artinya harus dipertahankan dicocokkan lewat
+            # teks lamanya sendiri. Sisanya - dan slot yang teks
+            # lamanya tidak ada di peta - tetap dibagikan urut
+            # dokumen seperti biasa.
+            peta = (content.get("_by_old") or {}).get(role, {})
+            terpakai = set(peta.values())
+            antre = [teks for teks in items if teks not in terpakai]
+
+            for slot in slots:
+                text = peta.get(normalize(slot["current"]))
+
+                if text is None:
+                    if not antre:
+                        continue
+
+                    text = antre.pop(0)
+
+                edits.append(
+                    {**slot, "text": clean_line(text, slot["budget"])}
+                )
 
             continue
 
@@ -410,7 +582,9 @@ def build_edits(
             continue
 
         for slot in slots:
-            edits.append({**slot, "text": text})
+            edits.append(
+                {**slot, "text": clean_line(text, slot["budget"])}
+            )
 
     used = len(edits)
     total = sum(len(items) for items in roles.values())
@@ -516,6 +690,7 @@ def fill_template(
     content: dict,
     brand: dict,
     add_review_schema: bool = True,
+    old_brand: str = "",
 ) -> dict:
     """
     Mengisi satu berkas template dan membuktikan strukturnya utuh.
@@ -523,11 +698,61 @@ def fill_template(
     Melempar ValueError kalau hasilnya melanggar struktur. Template
     itu milik pengguna; menerbitkan versi yang rusak jauh lebih
     merugikan daripada gagal dengan pesan yang jelas.
+
+    Tiga lapis, berurutan:
+      1. Slot diisi teks baru dari AI.
+      2. Slot yang tertinggal dibersihkan dari nama brand lama.
+      3. Teks lama yang kembar disamakan dengan teks barunya.
+
+    Lapis 2 dan 3 tidak pernah menyentuh slot yang sudah terisi di
+    lapis sebelumnya, jadi tidak ada rentang yang ditulis dua kali.
     """
     scanned = scan(html)
-    slot_map = build_slot_map(scanned)
+    slot_map = build_slot_map(scanned, old_brand)
 
     edits, notes = build_edits(slot_map, content, brand)
+
+    # Slot yang sudah kebagian teks baru, dikenali dari letaknya.
+    sudah = {(item["start"], item["end"]): item for item in edits}
+
+    diganti = {
+        normalize(item["current"]): str(item["text"])
+        for item in edits
+        if item.get("kind") != "attribute" and str(item.get("text", "")).strip()
+    }
+
+    # Teks kembar didahulukan atas penggantian nama. Kalimat lama
+    # yang muncul dua kali - judul yang diulang di footer, misalnya -
+    # harus memakai KALIMAT BARU yang sama, bukan sekadar kalimat
+    # lama dengan nama brand yang ditukar. Kalau urutannya dibalik,
+    # footer terbit berbunyi "DEEFGE Situs Slot Terpercaya" padahal
+    # judul barunya "DEEFGE Situs Slot Resmi".
+    gema, jumlah_gema = echo_edits(slot_map, sudah, diganti)
+
+    if gema:
+        edits.extend(gema)
+        sudah.update({(x["start"], x["end"]): x for x in gema})
+
+        notes.append(
+            f"{jumlah_gema} teks lama yang kembar disamakan dengan "
+            "teks barunya."
+        )
+
+    tambahan, jumlah_brand = brand_edits(
+        slot_map,
+        sudah,
+        old_brand,
+        brand.get("site_name", ""),
+    )
+
+    if tambahan:
+        edits.extend(tambahan)
+        sudah.update({(x["start"], x["end"]): x for x in tambahan})
+
+        notes.append(
+            f"Nama brand lama '{old_brand}' diganti di "
+            f"{jumlah_brand} tempat yang tidak kebagian teks baru."
+        )
 
     if slot_map["unquoted"]:
         notes.append(

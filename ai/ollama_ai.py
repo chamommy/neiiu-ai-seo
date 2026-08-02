@@ -10,6 +10,40 @@ from config import (
     AI_CONNECT_TIMEOUT_SECONDS,
     AI_STALL_TIMEOUT_SECONDS,
 )
+from utils.text import THAI_RANGE
+
+
+# Berapa karakter yang muat dalam satu token, per jenis aksara.
+# Tokenizer byte-level memecah aksara Thai hampir satu token per
+# karakter, sementara teks Latin sekitar tiga.
+LATIN_CHARS_PER_TOKEN = 3.0
+THAI_CHARS_PER_TOKEN = 1.0
+
+# Kecepatan pemrosesan prompt yang dipakai menghitung jatah waktu.
+# Diukur di mesin ini: 1389 token dalam 242 detik, yaitu 5,7 token
+# per detik saat Ollama sepi. Angka di bawah sengaja separuhnya,
+# karena begitu ada job lain yang ikut memakai Ollama kecepatannya
+# turun dan batas yang pas-pasan akan lewat tepat sebelum token
+# pertama keluar - membunuh job yang sebenarnya sehat.
+PREFILL_TOKENS_PER_SECOND = 2.5
+
+
+def estimate_tokens(text: str) -> int:
+    """
+    Memperkirakan jumlah token satu potongan teks.
+
+    Dihitung per jenis aksara, bukan dengan satu angka pembagi.
+    Prompt berbahasa Thai yang diperkirakan memakai angka Latin
+    keluar tiga kali lebih kecil dari sebenarnya.
+    """
+    body = text or ""
+
+    thai = sum(1 for char in body if THAI_RANGE.match(char))
+    lain = len(body) - thai
+
+    return int(
+        thai / THAI_CHARS_PER_TOKEN + lain / LATIN_CHARS_PER_TOKEN
+    ) + 1
 
 
 class OllamaAI(BaseAI):
@@ -120,32 +154,43 @@ class OllamaAI(BaseAI):
         if response_schema is not None:
             payload["format"] = response_schema
 
-        prompt_chars = sum(len(m["content"]) for m in messages)
-
         return self._stream_request(
             payload=payload,
             on_progress=on_progress,
             expect_json=response_schema is not None,
-            read_timeout=self._read_timeout(prompt_chars),
+            read_timeout=self._read_timeout(messages),
         )
 
-    def _read_timeout(self, prompt_chars: int) -> int:
+    def _read_timeout(self, messages: list[dict]) -> int:
         """
         Menghitung jeda maksimal menunggu data dari Ollama.
 
         Sebelum token pertama keluar, Ollama memproses seluruh
         prompt lebih dulu, dan selama itu tidak ada satu byte pun
-        yang dikirim. Di CPU tahap ini berjalan sekitar 5 token per
-        detik, jadi prompt analisis SERP dengan 10 kompetitor bisa
-        diam lebih dari lima menit sebelum mengeluarkan apa pun.
+        yang dikirim. Kalau batasnya dipatok pada jeda antar token
+        saja, prompt panjang akan divonis macet padahal sedang
+        bekerja normal.
 
-        Kalau batasnya dipatok pada jeda antar token saja, prompt
-        panjang akan divonis macet padahal sedang bekerja normal.
-        Karena itu batasnya ikut memperhitungkan perkiraan waktu
-        pemrosesan prompt.
+        Dua hal yang dulu salah di sini, dan keduanya membunuh job
+        yang sebenarnya sehat:
+
+        1. Jumlah token diperkirakan dari panjang teks dibagi tiga.
+           Angka tiga itu berlaku untuk huruf Latin. Aksara Thai
+           dipecah tokenizer hampir satu token per karakter, jadi
+           prompt berbahasa Thai diperkirakan tiga kali lebih kecil
+           dari sebenarnya dan jatah waktunya ikut tiga kali kurang.
+
+        2. Kecepatan pemrosesan dipatok 5 token per detik tanpa
+           kelonggaran. Diukur di mesin ini hasilnya 5,7 token per
+           detik saat sepi - tapi begitu ada job lain yang juga
+           memakai Ollama, angkanya turun jauh di bawah 5 dan
+           batasnya lewat tepat sebelum token pertama keluar.
         """
-        estimated_tokens = prompt_chars // 3
-        prefill_seconds = estimated_tokens / 5
+        prompt_tokens = sum(
+            estimate_tokens(message["content"]) for message in messages
+        )
+
+        prefill_seconds = prompt_tokens / PREFILL_TOKENS_PER_SECOND
 
         return int(
             max(
@@ -230,9 +275,12 @@ class OllamaAI(BaseAI):
             return TimeoutError(
                 f"Ollama tidak mengirim data selama {wait_limit} detik "
                 f"(total berjalan {elapsed} detik). "
-                "Model kemungkinan macet atau kehabisan memori. "
-                "Coba kecilkan AI_CONTEXT_LENGTH, kurangi jumlah "
-                "halaman yang di-crawl, atau pakai model lebih kecil."
+                "Dua sebab yang paling sering: ada job lain yang juga "
+                "memakai Ollama sehingga giliran job ini menunggu di "
+                "antrean, atau promptnya terlalu panjang untuk mesin "
+                "ini. Coba jalankan satu job saja dalam satu waktu, "
+                "kurangi jumlah halaman yang di-crawl, atau pakai "
+                "model yang lebih kecil."
             )
 
         return ConnectionError(

@@ -7,13 +7,32 @@ Keputusan mana yang boleh disentuh ada di sini, terpisah, karena
 inilah bagian yang paling mungkin salah dan paling perlu dibaca
 ulang orang.
 
-Aturan dasarnya satu: kalau tidak jelas sebuah teks adalah isi
-artikel, biarkan. Slot yang tidak terisi hanya membuat halaman
-memakai teks lama template, sedangkan slot yang salah terisi
-menimpa sesuatu yang mungkin penting.
+Aturan dasarnya: setiap teks yang terbaca pembaca adalah isi, dan
+isi diganti. Yang tidak boleh berubah cuma tiga hal, dan ketiganya
+bukan teks: susunan tag, alamat tautan, dan blok iklan.
+
+Teks tautan dan teks menu IKUT diganti - tulisannya saja, alamatnya
+tidak - karena halaman yang isinya sudah berbahasa Thai tapi
+menunya masih berbahasa lama terbaca seperti pekerjaan setengah
+jadi. Teks sependek itu diminta ke AI sebagai label pendek supaya
+lebarnya tetap muat di tata letak yang sudah ada.
 """
 
 import re
+
+from generators.brand_swap import variants as brand_variants
+from utils.region import REGIONS
+from utils.text import display_width
+
+
+# Semua nama kota dari semua zona, untuk mengenali kota mana pun yang
+# ada di template - termasuk kota zona lain, yang justru paling perlu
+# diganti saat halamannya dipindah ke zona baru.
+ALL_CITY_NAMES = {
+    nama.casefold()
+    for spec in REGIONS.values()
+    for nama in spec["city_names"]
+}
 
 
 # Peran yang dikenali. Urutan tidak penting, tapi namanya dipakai
@@ -33,17 +52,36 @@ ROLES = (
     "caption",
     "date",
     "lang",
+    # Peran berikut lahir dari permintaan "ubah semua aspek".
+    "nav_label",
+    "list_item",
+    "table_cell",
+    "label",
+    "city",
+    "brand",
 )
 
-# Bagian halaman yang isinya bukan artikel. Menu, logo, dan teks
-# hukum di footer dipilih sendiri oleh pemilik template, dan
-# menimpanya membuat situsnya terlihat rusak.
+# Bagian halaman yang isinya menu, bukan artikel. Teksnya tetap
+# diganti, tapi lewat peran nav_label supaya yang diminta ke AI
+# berupa label sependek aslinya, bukan kalimat.
 CHROME_TAGS = {"nav", "header", "footer", "aside", "menu"}
 
-# Teks di dalam tag ini tidak pernah diganti. <a> ada di sini karena
-# teks tautan adalah sinyal internal link yang dipilih sengaja, dan
-# banyak di antaranya sebenarnya tombol yang lebarnya dipatok CSS.
-NEVER_TAGS = {"a", "button", "label", "option", "th", "abbr"}
+# Tag yang teksnya selalu berupa label pendek, di mana pun letaknya.
+LABEL_TAGS = {"a", "button", "label", "option", "th", "abbr", "summary"}
+
+# Teks di dalam tag ini tidak pernah diganti sama sekali. Isinya
+# bukan kalimat untuk pembaca melainkan nilai yang dibaca mesin.
+NEVER_TAGS = {"script", "style", "code", "pre", "textarea"}
+
+# Teks yang bentuknya memang bukan kalimat: angka, harga, jam,
+# persentase, mata uang, satu huruf. Menggantinya dengan tulisan
+# tidak membuat halaman lebih baik dan justru merusak tabel harga.
+NOT_PROSE = re.compile(
+    r"^[\s\d\W]*$"
+    r"|^(?:rp|idr|usd|thb|฿|\$)\s*[\d.,]+$"
+    r"|^[\d.,]+\s*(?:%|k|jt|m|rb|bath|baht)?$",
+    re.IGNORECASE,
+)
 
 # Meta yang boleh ditulis ulang, beserta perannya.
 META_ROLES = {
@@ -60,6 +98,7 @@ REVIEW_HINT = re.compile(r"review|testimoni|ulasan|rating|comment|รีวิ�
 AUTHOR_HINT = re.compile(r"author|name|user|nama|reviewer|by\b|ผู้", re.I)
 DATE_HINT = re.compile(r"date|time|tanggal|waktu|posted|วันที่", re.I)
 CAPTION_HINT = re.compile(r"caption|figcaption|keterangan", re.I)
+BRAND_HINT = re.compile(r"\bbrand\b|\blogo\b|site-?name|sitename", re.I)
 
 # Paragraf yang sangat pendek biasanya label, harga, atau potongan
 # angka, bukan kalimat artikel.
@@ -68,6 +107,11 @@ MIN_PARAGRAPH_CHARS = 40
 # Teks baru dibatasi sekitar panjang teks lamanya karena CSS
 # template dirancang di sekitar ukuran itu. Kartu yang tadinya rapi
 # jadi tidak sama tinggi kalau isinya tiba-tiba dua kali lipat.
+#
+# Semua angka jatah di berkas ini bersatuan KOLOM TAMPILAN, bukan
+# karakter. Dua satuan itu tidak sama untuk aksara yang bertumpuk,
+# dan memakai karakter membuat setiap label Thai dinilai hampir dua
+# kali lebih panjang dari yang sebenarnya terlihat.
 LENGTH_TOLERANCE = 1.35
 MIN_LENGTH_BUDGET = 40
 MAX_LENGTH_BUDGET = 1200
@@ -110,17 +154,46 @@ def in_never(slot: dict) -> bool:
     """
     Memeriksa tag terlarang di seluruh leluhur, bukan induk langsung.
 
-    <a href="/panduan"><h2>Panduan memilih laptop</h2></a> adalah
-    bentuk yang lazim di kartu artikel. Induk langsung teksnya h2,
-    jadi pemeriksaan yang hanya melihat induk akan menganggapnya
-    heading biasa dan menimpanya. Teks tautannya hilang, padahal
-    itu justru sinyal internal link yang dipilih sengaja oleh
-    pemilik template.
+    Isi <script> dan <style> bukan teks untuk pembaca, dan
+    menggantinya merusak perilaku halaman, bukan mengubah isinya.
     """
     if slot.get("tag", "") in NEVER_TAGS:
         return True
 
     return any(tag in NEVER_TAGS for tag in slot.get("path", []))
+
+
+def in_label(slot: dict) -> bool:
+    """
+    Memeriksa tag berlabel pendek di seluruh leluhur.
+
+    <a href="/panduan"><h2>Panduan memilih laptop</h2></a> adalah
+    bentuk yang lazim di kartu artikel. Induk langsung teksnya h2,
+    jadi pemeriksaan yang hanya melihat induk akan mengiranya
+    heading biasa lalu memberinya kalimat panjang, padahal itu teks
+    tautan yang lebarnya dipatok CSS.
+    """
+    if slot.get("tag", "") in LABEL_TAGS:
+        return True
+
+    return any(tag in LABEL_TAGS for tag in slot.get("path", []))
+
+
+def is_city_name(text: str) -> bool:
+    """
+    Memeriksa apakah satu potongan teks memang nama kota.
+
+    Yang dicocokkan seluruh teksnya, bukan sebagiannya. Nama kota di
+    tengah kalimat sudah ikut tertulis ulang saat kalimatnya diganti;
+    yang perlu ditangani di sini hanya kota yang berdiri sendiri,
+    seperti di daftar cabang atau di kolom tabel.
+    """
+    clean = " ".join((text or "").split()).strip(" .,-|").casefold()
+
+    if not clean or len(clean) > 40:
+        return False
+
+    return clean in ALL_CITY_NAMES
 
 
 def hint_text(attrs: dict) -> str:
@@ -212,14 +285,40 @@ def classify(slot: dict) -> str:
     if tag == "h1":
         return "h1"
 
-    if in_chrome(slot):
+    # Angka, harga, jam, dan persentase dibiarkan. Bentuknya memang
+    # bukan kalimat, dan menimpanya dengan tulisan merusak tabel
+    # harga atau daftar jam operasional tanpa menambah apa pun.
+    if not current or NOT_PROSE.match(current):
         return ""
 
     if tag == "time":
         return "review_date" if nearest_hint(slot, REVIEW_HINT) else "date"
 
-    if tag == "summary":
-        return "faq_question"
+    # Nama kota diganti dengan kota di zona tujuan, bukan diminta ke
+    # AI. Model kecil sering mengarang nama kota yang tidak ada, dan
+    # daftar kota per zona sudah tersedia di registry.
+    if is_city_name(current):
+        return "city"
+
+    # Menu, tombol, dan teks tautan: tulisannya diganti, alamatnya
+    # tidak. Dipisah sebagai peran sendiri supaya yang diminta ke AI
+    # berupa label sependek aslinya - kalimat panjang di dalam menu
+    # akan memecah header ke dua baris.
+    # Teks logo. Ini nama brand, bukan label menu: kalau ikut
+    # antrean nav_label ia akan terisi "Promo" dan nama situsnya
+    # hilang dari kepala halaman.
+    if own_hint(slot, BRAND_HINT):
+        return "brand"
+
+    if in_label(slot):
+        return "nav_label"
+
+    if in_chrome(slot):
+        # Di header dan footer, yang bukan tautan atau tombol
+        # biasanya satu baris keterangan: hak cipta, alamat, jam
+        # buka. Diberi jatah lebih lega daripada label menu supaya
+        # kalimatnya tidak terpotong di tengah.
+        return "label"
 
     if tag == "figcaption" or nearest_hint(slot, CAPTION_HINT):
         return "caption"
@@ -248,7 +347,7 @@ def classify(slot: dict) -> str:
         if tag in {"p", "blockquote", "q"} or len(current) >= MIN_PARAGRAPH_CHARS:
             return "review_text"
 
-        return ""
+        return "label"
 
     if nearest_hint(slot, FAQ_HINT):
         if tag in {"h2", "h3", "h4", "h5", "dt", "strong", "b"}:
@@ -257,13 +356,29 @@ def classify(slot: dict) -> str:
         if tag in {"p", "div", "dd", "span"}:
             return "faq_answer"
 
-    if tag in {"h2", "h3", "h4"}:
+    if tag in {"h2", "h3", "h4", "h5", "h6"}:
         return "heading"
 
-    if tag in {"p", "li"} and len(current) >= MIN_PARAGRAPH_CHARS:
-        return "paragraph"
+    if tag == "li":
+        return "list_item"
 
-    return ""
+    if tag == "td":
+        return "table_cell"
+
+    if tag in {"p", "blockquote", "q"}:
+        # Paragraf pendek tetap diisi, tapi sebagai label. Yang
+        # membedakan bukan penting atau tidaknya, melainkan berapa
+        # panjang teks yang pantas menggantikannya.
+        return (
+            "paragraph"
+            if len(current) >= MIN_PARAGRAPH_CHARS
+            else "label"
+        )
+
+    # Sisanya - span, div, dd, figcaption tanpa penanda, dan
+    # sebagainya. Panjang teks lamanya yang menentukan diperlakukan
+    # sebagai kalimat atau sebagai label.
+    return "paragraph" if len(current) >= MIN_PARAGRAPH_CHARS else "label"
 
 
 # Slot yang ada di <head> tidak memengaruhi tata letak sama sekali,
@@ -276,21 +391,58 @@ HEAD_BUDGET = {
 }
 
 
+# Peran yang isinya memang pendek. Batas bawah 40 karakter milik
+# MIN_LENGTH_BUDGET tidak berlaku di sini: tombol "Daftar" yang
+# diganti kalimat 40 karakter akan melebar keluar dari kotaknya.
+SHORT_BUDGET = {
+    "nav_label": 24,
+    "label": 80,
+    "table_cell": 40,
+    "list_item": 90,
+    "review_author": 28,
+}
+
+# Lantai jatah untuk label pendek, dalam kolom.
+#
+# Toleransi 35% cukup untuk teks yang cuma ditulis ulang dalam
+# bahasa yang sama, tapi jauh terlalu ketat untuk teks yang
+# diterjemahkan: satu kata bisa berlipat panjangnya di bahasa lain.
+# "Privasi" lebarnya 7 kolom, jadi toleransinya memberi 9 - padahal
+# padanan Thai-nya "ความเป็นส่วนตัว" butuh 12, dan hasilnya terpotong
+# jadi "ความเป็น" yang tidak berarti apa-apa.
+#
+# Angka di bawah kira-kira selebar "Privacy Policy": muat dua kata
+# di bahasa mana pun, tapi masih jelas sebuah label dan bukan
+# kalimat.
+MIN_SHORT_BUDGET = 16
+
+
 def length_budget(current: str, role: str = "") -> int:
     """
-    Menghitung panjang maksimal teks pengganti untuk satu slot.
+    Menghitung lebar maksimal teks pengganti untuk satu slot.
     """
     if role in HEAD_BUDGET:
         return HEAD_BUDGET[role]
 
-    room = int(len(current.strip()) * LENGTH_TOLERANCE)
+    panjang = display_width(current.strip())
+    room = int(panjang * LENGTH_TOLERANCE)
+
+    if role in SHORT_BUDGET:
+        # Sedikit lebih longgar dari aslinya, tapi tetap dipatok di
+        # atas supaya label pendek tidak berubah jadi kalimat.
+        return max(MIN_SHORT_BUDGET, min(room, SHORT_BUDGET[role]))
 
     return max(MIN_LENGTH_BUDGET, min(room, MAX_LENGTH_BUDGET))
 
 
-def build_slot_map(scanned: dict) -> dict:
+def build_slot_map(scanned: dict, old_brand: str = "") -> dict:
     """
     Mengelompokkan slot menurut perannya.
+
+    Kalau nama brand lama diberitahukan, setiap teks yang isinya
+    persis nama itu langsung diperlakukan sebagai brand, apa pun
+    tagnya. Ini yang membedakan tulisan logo dari label menu di
+    template yang tidak memberi penanda class apa pun.
 
     Mengembalikan {"roles": {peran: [slot,...]}, "skipped": [...]}.
     """
@@ -298,8 +450,21 @@ def build_slot_map(scanned: dict) -> dict:
     skipped: list[dict] = []
     unquoted: list[str] = []
 
+    nama_lama = {
+        " ".join(bentuk.split()).casefold()
+        for bentuk in brand_variants(old_brand)
+    }
+
     for slot in scanned["slots"]:
         role = classify(slot)
+
+        if (
+            role
+            and slot["kind"] == "text"
+            and nama_lama
+            and " ".join(slot["current"].split()).casefold() in nama_lama
+        ):
+            role = "brand"
 
         if not role:
             skipped.append(slot)

@@ -79,7 +79,7 @@ from database.neiiu_templates_db import (
 from generators.template_scanner import TemplateTooDeep, scan
 from generators.template_slots import build_slot_map
 from serp.serp_search import slugify
-from utils.region import REGIONS
+from utils.region import REGIONS, UnknownCityError, resolve_location
 from services.neiiu_runner import (
     active_job_id,
     submit_job,
@@ -308,9 +308,17 @@ class NeiiuJobRequest(BaseModel):
     region: Literal["id", "th"] = (
         SERP_REGION if SERP_REGION in {"id", "th"} else "id"
     )
+    # Kota dibiarkan bebas di sini lalu diperiksa terhadap daftar
+    # zonanya di utils.region. Memasangkan kota dengan zona lewat
+    # Literal tidak bisa dilakukan Pydantic, dan kota zona lain harus
+    # ditolak - bukan diam-diam dipakai.
+    city: str = Field(default="", max_length=80)
     # 0 berarti tidak memakai template unggahan, jadi jalur lama
     # yang meniru struktur kompetitor tetap dipakai.
     template_id: int = Field(default=0, ge=0)
+    # Nama brand yang sudah tertulis di dalam template, supaya bisa
+    # dicari dan diganti dengan brand baru sampai ke sudut halaman.
+    template_brand: str = Field(default="", max_length=60)
 
 
 @app.on_event("startup")
@@ -949,7 +957,6 @@ def admin_reset_password(
 DOWNLOADABLE = {
     "index.html": ("index.html", "text/html"),
     "amp.html": ("amp/index.html", "text/html"),
-    "sitemap.xml": ("sitemap.xml", "application/xml"),
     "analisis.md": ("ANALISIS.md", "text/markdown"),
     "report.json": ("report.json", "application/json"),
     "analysis.json": ("analysis.json", "application/json"),
@@ -1024,7 +1031,17 @@ def neiiu_page(request: Request):
             "default_crawl": CRAWL_TOP_N,
             "default_region": SERP_REGION,
             "regions": [
-                {"code": spec["code"], "label": spec["label"]}
+                {
+                    "code": spec["code"],
+                    "label": spec["label"],
+                    # Daftar kota ikut dikirim ke halaman supaya
+                    # pemilih kota bisa berganti isi begitu zonanya
+                    # diganti, tanpa permintaan tambahan ke server.
+                    "cities": [
+                        {"value": nama, "label": label}
+                        for nama, label in spec["cities"]
+                    ],
+                }
                 for spec in REGIONS.values()
             ],
             "max_template_mb": MAX_TEMPLATE_BYTES // (1024 * 1024),
@@ -1047,6 +1064,17 @@ def api_neiiu_create_job(
             status_code=400,
             detail="Keyword tidak boleh kosong.",
         )
+
+    # Kota diperiksa terhadap zonanya sekarang, bukan nanti saat job
+    # jalan. Kota zona lain akan ditolak provider tanpa memberi tahu
+    # siapa pun, dan hasilnya diam-diam turun ke tingkat negara.
+    try:
+        resolve_location(payload.region, payload.city.strip())
+    except UnknownCityError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
 
     # Kepemilikan template diperiksa sebelum job dibuat. Tanpa ini,
     # siapa pun bisa memakai template pengguna lain hanya dengan
@@ -1089,7 +1117,9 @@ def api_neiiu_create_job(
         use_cache=payload.use_cache,
         analyze_only=payload.analyze_only,
         region=payload.region,
+        city=payload.city.strip(),
         template_id=payload.template_id,
+        template_brand=payload.template_brand.strip(),
     )
 
     submit_job(job_id)

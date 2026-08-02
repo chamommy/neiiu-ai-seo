@@ -281,12 +281,11 @@ def print_result(result: dict) -> None:
     print("Isi folder:")
     print("  index.html      — landing page kanonik")
     print("  amp/index.html  — versi AMP")
-    print("  sitemap.xml     — sitemap dua URL di atas")
     print("  ANALISIS.md     — kenapa rank 1-10 bisa naik")
     print("  report.json     — seluruh data mentah")
     print(
         "\nSebelum diunggah, ganti SITE_BASE_URL di .env supaya "
-        "canonical dan sitemap memakai domain asli."
+        "canonical memakai domain asli."
     )
 
 
@@ -320,7 +319,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help=(
             "Domain brand ini, contoh: https://abece.com. "
-            "Dipakai untuk canonical, sitemap, dan structured data. "
+            "Dipakai untuk canonical dan structured data. "
             "Kalau kosong, dipakai SITE_BASE_URL dari .env"
         ),
     )

@@ -93,7 +93,7 @@
                         autocomplete="off"
                     >
                     <span class="hint">
-                        Dipakai untuk canonical, sitemap, dan
+                        Dipakai untuk canonical dan
                         structured data. Kosongkan untuk memakai
                         SITE_BASE_URL dari .env
                     </span>
@@ -117,6 +117,16 @@
                 </div>
 
                 <div class="field">
+                    <label for="city">Kota pencarian</label>
+                    <select id="city" name="city"></select>
+                    <span class="hint">
+                        Google memberi urutan yang berbeda antar kota
+                        di negara yang sama. Pilih kota tempat kamu
+                        biasa mengecek supaya peringkatnya cocok.
+                    </span>
+                </div>
+
+                <div class="field">
                     <label for="templateId">Template</label>
                     <select id="templateId" name="templateId">
                         <option value="0">
@@ -127,6 +137,25 @@
                         Kalau dipilih, NEIIU hanya mengganti isinya
                         dan tidak menyentuh struktur, link, atau
                         iklan di dalamnya.
+                    </span>
+                </div>
+
+                <div class="field">
+                    <label for="templateBrand">
+                        Brand lama di dalam template
+                    </label>
+                    <input
+                        type="text"
+                        id="templateBrand"
+                        name="templateBrand"
+                        placeholder="ABECEDE"
+                        maxlength="60"
+                    >
+                    <span class="hint">
+                        Nama brand yang sudah tertulis di template.
+                        Semua kemunculannya diganti dengan Nama brand
+                        di atas, termasuk di logo, alt gambar, dan
+                        teks footer.
                     </span>
                 </div>
 
@@ -274,6 +303,7 @@
 
 </main>
 
-<script src="{{ url_for('static', path='/neiiu.js') }}?v=1"></script>
+<script id="regionData" type="application/json">{{ regions | tojson }}</script>
+<script src="{{ url_for('static', path='/neiiu.js') }}?v=2"></script>
 </body>
 </html>

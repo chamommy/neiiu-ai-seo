@@ -83,6 +83,13 @@ REGIONS: dict[str, dict] = {
         "direction": "ltr",
         # Bahasa Indonesia memakai spasi antar kata.
         "word_mode": "spaced",
+        # Berapa karakter yang dipakai bahasa ini untuk mengisi satu
+        # kolom lebar. Jatah panjang teks dihitung dalam kolom karena
+        # itu yang menentukan tata letak, sedangkan yang dihitung
+        # model dan JSON Schema adalah karakter. Tanpa angka
+        # penyetaraan ini, batas yang dikirim ke model terlalu ketat
+        # untuk aksara yang bertumpuk dan labelnya terpotong.
+        "chars_per_column": 1.0,
         # Font yang pasti punya huruf Latin di Windows dan Android.
         "font_fallback": [
             "system-ui",
@@ -94,6 +101,27 @@ REGIONS: dict[str, dict] = {
         ],
         # Selisih tahun yang ditulis di halaman terhadap tahun masehi.
         "year_offset": 0,
+        # Kota yang bisa dipilih sebagai titik pencarian. Nilainya
+        # harus persis nama kanonik milik Serper; nama karangan
+        # diabaikan diam-diam dan hasilnya balik ke tingkat negara
+        # tanpa tanda apa pun.
+        "cities": [
+            ("Jakarta, Jakarta, Indonesia", "Jakarta"),
+            ("Surabaya, East Java, Indonesia", "Surabaya"),
+            ("Bandung, West Java, Indonesia", "Bandung"),
+            ("Medan, North Sumatra, Indonesia", "Medan"),
+            ("Semarang, Central Java, Indonesia", "Semarang"),
+            ("Makassar, South Sulawesi, Indonesia", "Makassar"),
+            ("Denpasar, Bali, Indonesia", "Denpasar"),
+            ("Palembang, South Sumatra, Indonesia", "Palembang"),
+        ],
+        # Nama kota untuk ditulis DI DALAM halaman, bukan untuk
+        # penargetan pencarian.
+        "city_names": [
+            "Jakarta", "Surabaya", "Bandung", "Medan", "Semarang",
+            "Makassar", "Denpasar", "Palembang", "Yogyakarta",
+            "Tangerang", "Bekasi", "Depok", "Batam", "Pekanbaru",
+        ],
     },
     "th": {
         "code": "th",
@@ -107,6 +135,11 @@ REGIONS: dict[str, dict] = {
         "og_locale": "th_TH",
         "direction": "ltr",
         "word_mode": "unspaced",
+        # Sekitar sepertiga karakter Thai berupa sara dan tanda nada
+        # yang menumpuk pada huruf induknya dan tidak menambah lebar
+        # sama sekali. "ความเป็นส่วนตัว" panjangnya 15 karakter tapi
+        # lebarnya 12 kolom.
+        "chars_per_column": 1.6,
         # Font Latin biasa tidak punya aksara Thai sama sekali. Tanpa
         # font berikut, halaman Thai tampil sebagai kotak kosong di
         # sebagian perangkat.
@@ -123,6 +156,21 @@ REGIONS: dict[str, dict] = {
         # dibaca manusia; atribut datetime pada <time> tetap masehi
         # ISO supaya mesin pencari membacanya benar.
         "year_offset": 543,
+        "cities": [
+            ("Bangkok, Bangkok, Thailand", "Bangkok (กรุงเทพฯ)"),
+            ("Chiang Mai, Chiang Mai, Thailand", "Chiang Mai (เชียงใหม่)"),
+            ("Nonthaburi, Nonthaburi, Thailand", "Nonthaburi (นนทบุรี)"),
+            ("Pattaya, Chon Buri, Thailand", "Pattaya (พัทยา)"),
+            ("Phuket, Phuket, Thailand", "Phuket (ภูเก็ต)"),
+            ("Khon Kaen, Khon Kaen, Thailand", "Khon Kaen (ขอนแก่น)"),
+            ("Hat Yai, Songkhla, Thailand", "Hat Yai (หาดใหญ่)"),
+            ("Udon Thani, Udon Thani, Thailand", "Udon Thani (อุดรธานี)"),
+        ],
+        "city_names": [
+            "กรุงเทพฯ", "เชียงใหม่", "นนทบุรี", "พัทยา", "ภูเก็ต",
+            "ขอนแก่น", "หาดใหญ่", "อุดรธานี", "นครราชสีมา", "ชลบุรี",
+            "สุราษฎร์ธานี", "เชียงราย",
+        ],
     },
 }
 
@@ -136,8 +184,61 @@ class UnknownRegionError(ValueError):
     """
 
 
+class UnknownCityError(ValueError):
+    """
+    Kota yang diminta tidak ada di daftar zona itu.
+    """
+
+
 def region_codes() -> list[str]:
     return list(REGIONS)
+
+
+def city_codes(region: str = DEFAULT_REGION) -> list[str]:
+    """
+    Nama kanonik kota yang sah untuk satu zona.
+    """
+    return [nama for nama, _ in get_region(region)["cities"]]
+
+
+def resolve_location(region: str, city: str = "") -> str:
+    """
+    Menentukan nilai "location" yang dikirim ke provider SERP.
+
+    Kota yang tidak ada di daftar zona ini ditolak, bukan diteruskan
+    apa adanya. Provider mengabaikan nama lokasi yang tidak dikenal
+    tanpa memberi tahu, jadi kesalahan ketik akan berakhir sebagai
+    hasil tingkat negara yang disangka hasil tingkat kota.
+    """
+    spec = get_region(region)
+
+    clean = (city or "").strip()
+
+    if not clean:
+        return spec["location"]
+
+    if clean not in city_codes(region):
+        raise UnknownCityError(
+            f"Kota '{clean}' tidak ada di daftar zona "
+            f"{spec['label']}. Pilihan: "
+            + ", ".join(city_codes(region))
+        )
+
+    return clean
+
+
+def city_label(region: str, city: str = "") -> str:
+    """
+    Nama kota yang enak dibaca, untuk ditampilkan di log dan laporan.
+    """
+    if not city:
+        return get_region(region)["label"]
+
+    for nama, label in get_region(region)["cities"]:
+        if nama == city:
+            return label
+
+    return city
 
 
 def get_region(code: str = "") -> dict:
