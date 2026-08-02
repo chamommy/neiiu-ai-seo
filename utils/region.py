@@ -135,11 +135,17 @@ REGIONS: dict[str, dict] = {
         "og_locale": "th_TH",
         "direction": "ltr",
         "word_mode": "unspaced",
-        # Sekitar sepertiga karakter Thai berupa sara dan tanda nada
-        # yang menumpuk pada huruf induknya dan tidak menambah lebar
-        # sama sekali. "ความเป็นส่วนตัว" panjangnya 15 karakter tapi
-        # lebarnya 12 kolom.
-        "chars_per_column": 1.6,
+        # Sara dan tanda nada Thai menumpuk pada huruf induknya dan
+        # tidak menambah lebar sama sekali. "ความเป็นส่วนตัว"
+        # panjangnya 15 karakter tapi lebarnya 12 kolom.
+        #
+        # Angkanya diukur dari halaman Thai yang sudah jadi, bukan
+        # ditebak: 2166 karakter untuk 1880 kolom. Tebakan yang
+        # terlalu longgar justru merugikan, karena model lalu menulis
+        # pas menurut batas karakter yang diberikan tapi kelebihan
+        # menurut lebar yang sebenarnya tersedia, dan teksnya kena
+        # potong di tahap berikutnya.
+        "chars_per_column": 1.15,
         # Font Latin biasa tidak punya aksara Thai sama sekali. Tanpa
         # font berikut, halaman Thai tampil sebagai kotak kosong di
         # sebagian perangkat.

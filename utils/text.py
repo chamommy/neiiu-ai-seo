@@ -71,15 +71,21 @@ def display_width(text: str) -> int:
     return sum(char_width(char) for char in text or "")
 
 
-def trim_to_width(text: str, limit: int) -> str:
+def trim_to_width(text: str, limit: int, tolerance: float = 1.0) -> str:
     """
     Memotong teks sampai muat lebar tertentu tanpa merusak hurufnya.
 
-    Dua hal yang dijaga. Pertama, potongan tidak pernah jatuh di
+    Tiga hal yang dijaga. Pertama, potongan tidak pernah jatuh di
     tengah satu huruf: tanda vokal yang kehilangan huruf induknya
     tampil sebagai tanda menggantung, dan itu yang membuat
     "ช่วยเหลือ" terpotong jadi "ช่วยเหล็". Kedua, kalau teksnya
     memakai spasi, potongan digeser ke batas kata terdekat.
+
+    Ketiga, kalau tidak ada batas kata sama sekali - keadaan biasa di
+    aksara Thai, yang memang ditulis tanpa spasi antar kata - maka
+    memotong berarti pasti memenggal kata. Di situ kelebihan sebesar
+    tolerance dibiarkan lewat, karena label yang sedikit lebih lebar
+    dari jatahnya jauh lebih mudah dimaafkan daripada kata terpenggal.
     """
     body = " ".join(str(text or "").split())
 
@@ -113,7 +119,10 @@ def trim_to_width(text: str, limit: int) -> str:
     # karena teks yang isinya satu kata sangat panjang - tautan, nama
     # berkas - akan habis sama sekali kalau digeser ke spasi pertama.
     if spasi > potong * 0.35:
-        trimmed = trimmed[:spasi]
+        return trimmed[:spasi].rstrip(" ,.;:-")
+
+    if display_width(body) <= limit * tolerance:
+        return body
 
     return trimmed.rstrip(" ,.;:-")
 

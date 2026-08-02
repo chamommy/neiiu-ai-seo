@@ -201,6 +201,12 @@ def scale_spec(spec: dict, chars_per_column: float) -> dict:
     return diperbesar
 
 
+# Kelonggaran plafon schema terhadap batas yang diminta di prompt.
+# Grammar harus jadi jaring pengaman, bukan yang pertama kena:
+# potongannya mentah dan tidak bisa diperbaiki lagi.
+SCHEMA_HEADROOM = 1.3
+
+
 def build_dynamic_schema(spec: dict) -> dict:
     """
     Menyusun JSON Schema yang jumlahnya persis mengikuti template.
@@ -210,14 +216,18 @@ def build_dynamic_schema(spec: dict) -> dict:
 
     def text_field(role: str) -> dict:
         # Plafon diambil dari slot TERLEBAR di kelompoknya, bukan
-        # tersempit. maxLength di schema dipaksakan grammar llama.cpp
-        # dengan cara memutus string begitu batasnya kena, jadi angka
-        # yang terlalu kecil bukan sekadar membuat teksnya pendek -
-        # ia memotong kata di tengah, dan di aksara Thai potongannya
-        # jatuh di antara huruf dan tanda vokalnya.
+        # tersempit, lalu dilonggarkan lagi.
+        #
+        # maxLength di schema dipaksakan grammar llama.cpp dengan cara
+        # memutus string begitu batasnya kena. Pemutusan itu tidak tahu
+        # apa-apa soal kata maupun tanda yang menempel, jadi kalau
+        # grammar yang lebih dulu kena, hasilnya potongan mentah yang
+        # tidak bisa diperbaiki lagi di tahap mana pun. Batas yang
+        # sungguhan ditegakkan belakangan per slot, di tempat yang
+        # tahu cara memotong tanpa merusak huruf.
         return {
             "type": "string",
-            "maxLength": spec[role]["max_length_any"],
+            "maxLength": int(spec[role]["max_length_any"] * SCHEMA_HEADROOM),
         }
 
     def list_field(role: str) -> dict:
@@ -247,6 +257,13 @@ def build_dynamic_schema(spec: dict) -> dict:
     }
 
 
+# Kelebihan lebar yang dibiarkan lewat kalau teksnya tidak punya
+# batas kata untuk dipotong. Jatah tiap slot sudah memuat toleransi
+# 35% terhadap teks aslinya, jadi tambahan ini hanya menyangkut teks
+# yang sedikit melewati jatah itu - bukan jawaban yang kepanjangan.
+OVERFLOW_TOLERANCE = 1.3
+
+
 def clean_line(value, limit: int) -> str:
     """
     Merapikan satu teks dan memastikan panjangnya masuk akal.
@@ -256,7 +273,7 @@ def clean_line(value, limit: int) -> str:
     menyisakan tanda vokal tanpa huruf induknya, dan itu tampil
     sebagai karakter menggantung yang tidak terbaca.
     """
-    return trim_to_width(value, limit)
+    return trim_to_width(value, limit, OVERFLOW_TOLERANCE)
 
 
 def fit_content_to_spec(
