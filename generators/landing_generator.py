@@ -47,9 +47,13 @@ def generate_landing_page(
     brand: dict,
     page_url: str,
     amp_url: str,
+    kit: dict | None = None,
 ) -> str:
     """
     Merender halaman HTML lengkap yang siap diunggah.
+
+    `kit` menentukan blok tambahan yang ikut dipasang. Lihat
+    generators/blocks.py.
     """
     css = build_css(design, amp=False, region=brand.get("region", "id"))
 
@@ -78,7 +82,7 @@ def generate_landing_page(
 </head>
 <body>
 
-  {render_body(plan, brand)}
+  {render_body(plan, brand, kit=kit, amp=False)}
 
 </body>
 </html>

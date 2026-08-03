@@ -42,6 +42,7 @@ def generate_amp_page(
     brand: dict,
     page_url: str,
     amp_url: str,
+    kit: dict | None = None,
 ) -> str:
     """
     Merender halaman AMP yang siap diunggah.
@@ -92,7 +93,7 @@ def generate_amp_page(
 </head>
 <body>
 
-  {render_body(plan, brand)}
+  {render_body(plan, brand, kit=kit, amp=True)}
 
 </body>
 </html>

@@ -104,6 +104,23 @@ def init_jobs_db() -> None:
                 "ADD COLUMN template_brand TEXT NOT NULL DEFAULT ''"
             )
 
+        # Acuan gaya dan tujuan tombol ajakan, dipakai saat halaman
+        # dibuat tanpa template unggahan. Disimpan sebagai satu teks
+        # dipisah baris baru, bukan tabel sendiri: isinya beberapa
+        # URL yang selalu dibaca sekaligus dan tidak pernah dicari
+        # satu-satu.
+        if "design_refs" not in columns:
+            db.execute(
+                "ALTER TABLE neiiu_jobs "
+                "ADD COLUMN design_refs TEXT NOT NULL DEFAULT ''"
+            )
+
+        if "cta_url" not in columns:
+            db.execute(
+                "ALTER TABLE neiiu_jobs "
+                "ADD COLUMN cta_url TEXT NOT NULL DEFAULT ''"
+            )
+
 
 def create_job(
     user_id: int,
@@ -120,6 +137,8 @@ def create_job(
     city: str = "",
     template_id: int = 0,
     template_brand: str = "",
+    design_refs: str = "",
+    cta_url: str = "",
 ) -> int:
     now = utc_now()
 
@@ -131,10 +150,11 @@ def create_job(
                 provider, crawl_limit, serp_limit,
                 reference_url, use_cache, analyze_only,
                 region, city, template_id, template_brand,
+                design_refs, cta_url,
                 status, created_at, updated_at
             )
             VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 'queued', ?, ?
             )
             """,
@@ -153,6 +173,8 @@ def create_job(
                 city,
                 int(template_id),
                 template_brand,
+                design_refs,
+                cta_url,
                 now,
                 now,
             ),

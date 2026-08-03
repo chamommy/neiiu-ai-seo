@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -240,3 +241,24 @@ SITE_DISCLAIMER = os.getenv(
     "SITE_DISCLAIMER",
     "",
 ).strip()
+
+# Tujuan seluruh tombol ajakan di halaman hasil: login, daftar,
+# bilah mengambang, dan popup. Kalau dikosongkan, tombolnya
+# menunjuk ke beranda situs itu sendiri.
+SITE_CTA_URL = os.getenv(
+    "SITE_CTA_URL",
+    "",
+).strip()
+
+# URL halaman yang dipakai sebagai acuan gaya saat NEIIU membuat
+# halaman tanpa template. Dipisah koma atau baris baru. Yang
+# diambil hanya warna, font, radius, dan komponen yang dipakai —
+# teks dan HTML-nya tidak pernah ikut tersalin.
+DESIGN_REFERENCES = [
+    url.strip()
+    for url in re.split(
+        r"[,\n]",
+        os.getenv("DESIGN_REFERENCES", ""),
+    )
+    if url.strip()
+]

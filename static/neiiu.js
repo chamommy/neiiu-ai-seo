@@ -429,6 +429,10 @@ form.addEventListener("submit", async (event) => {
         template_brand: document
             .getElementById("templateBrand")
             .value.trim(),
+        design_refs: document
+            .getElementById("designRefs")
+            .value.trim(),
+        cta_url: document.getElementById("ctaUrl").value.trim(),
     };
 
     try {

@@ -131,6 +131,84 @@ def build_article_schema(
     }
 
 
+def build_product_schema(
+    brand: dict,
+    plan: dict,
+    page_url: str,
+) -> dict | None:
+    """
+    Schema Product beserta ulasan dan nilai rata-ratanya.
+
+    Dua aturan dipegang di sini, dan keduanya bukan soal selera:
+
+    1. Ulasan yang masuk ke schema adalah ulasan yang sama persis
+       dengan yang dirender ke halaman. Structured data yang memuat
+       ulasan yang tidak terlihat pembaca melanggar pedoman Google
+       dan bisa membuat seluruh rich result situs dicabut.
+    2. `reviewCount` dan `ratingValue` dihitung dari ulasan itu,
+       bukan diisi angka besar yang enak dipandang. Empat ulasan di
+       halaman tidak bisa dilaporkan sebagai ribuan.
+    """
+    # Hanya ulasan yang lengkap yang dipakai. Jalur template
+    # menghasilkan ulasan berbentuk lain - hanya teks dan penulisnya,
+    # tanpa nilai maupun tanggal - dan ulasan seperti itu tidak bisa
+    # jadi Review yang sah. Menyaringnya di sini, bukan mengandalkan
+    # pemanggilnya, supaya penambahan sumber ulasan baru nanti tidak
+    # bisa diam-diam membuat halaman gagal dirender.
+    reviews = [
+        item
+        for item in plan.get("reviews", [])
+        if isinstance(item, dict)
+        and item.get("name")
+        and item.get("text")
+        and item.get("date_iso")
+        and isinstance(item.get("rating"), (int, float))
+    ]
+
+    if not reviews:
+        return None
+
+    values = [float(item["rating"]) for item in reviews]
+    average = round(sum(values) / len(values), 1)
+
+    return {
+        "@type": "Product",
+        "@id": page_url + "#product",
+        "name": brand["site_name"],
+        "description": plan["meta_description"],
+        "url": page_url,
+        "brand": {
+            "@type": "Brand",
+            "name": brand["site_name"],
+        },
+        "aggregateRating": {
+            "@type": "AggregateRating",
+            "ratingValue": average,
+            "reviewCount": len(reviews),
+            "bestRating": 5,
+            "worstRating": 1,
+        },
+        "review": [
+            {
+                "@type": "Review",
+                "author": {
+                    "@type": "Person",
+                    "name": item["name"],
+                },
+                "datePublished": item["date_iso"],
+                "reviewBody": item["text"],
+                "reviewRating": {
+                    "@type": "Rating",
+                    "ratingValue": item["rating"],
+                    "bestRating": 5,
+                    "worstRating": 1,
+                },
+            }
+            for item in reviews
+        ],
+    }
+
+
 def build_schema_graph(
     plan: dict,
     brand: dict,
@@ -161,6 +239,14 @@ def build_schema_graph(
 
     if faq_schema is not None:
         graph.append(faq_schema)
+
+    # Product hanya ikut kalau halamannya benar-benar menampilkan
+    # ulasan. Tanpa syarat itu, halaman yang sama sekali tidak punya
+    # blok ulasan tetap mengaku punya rata-rata penilaian.
+    product_schema = build_product_schema(brand, plan, page_url)
+
+    if product_schema is not None:
+        graph.append(product_schema)
 
     payload = {
         "@context": "https://schema.org",

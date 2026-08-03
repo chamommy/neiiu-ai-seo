@@ -319,6 +319,11 @@ class NeiiuJobRequest(BaseModel):
     # Nama brand yang sudah tertulis di dalam template, supaya bisa
     # dicari dan diganti dengan brand baru sampai ke sudut halaman.
     template_brand: str = Field(default="", max_length=60)
+    # Dipakai hanya saat template_id = 0. URL halaman yang gaya
+    # visualnya dijadikan acuan, dipisah baris baru atau koma.
+    design_refs: str = Field(default="", max_length=1000)
+    # Tujuan seluruh tombol login, daftar, dan bilah mengambang.
+    cta_url: str = Field(default="", max_length=300)
 
 
 @app.on_event("startup")
@@ -1120,6 +1125,8 @@ def api_neiiu_create_job(
         city=payload.city.strip(),
         template_id=payload.template_id,
         template_brand=payload.template_brand.strip(),
+        design_refs=payload.design_refs.strip(),
+        cta_url=payload.cta_url.strip(),
     )
 
     submit_job(job_id)

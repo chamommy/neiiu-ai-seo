@@ -13,11 +13,13 @@ from pathlib import Path
 from analyzer.serp_analyzer import analyze_serp
 from config import (
     CRAWL_TOP_N,
+    DESIGN_REFERENCES,
     OUTPUT_DIR,
     SERP_PROVIDER,
     SERP_REGION,
     SERP_TOP_N,
     SITE_BASE_URL,
+    SITE_CTA_URL,
     SITE_DISCLAIMER,
     SITE_NAME,
 )
@@ -49,8 +51,10 @@ from generators.template_filler import (
     fill_template,
     merge_specs,
 )
+from generators.inspiration import build_design_dna
 from generators.template_scanner import scan
 from generators.template_slots import build_slot_map
+from generators.theme import build_theme
 from serp.serp_search import search_keyword, slugify
 
 
@@ -120,6 +124,7 @@ def build_brand(
     brand_name: str = "",
     base_url: str = "",
     region: str = SERP_REGION,
+    cta_url: str = "",
 ) -> dict:
     """
     Menyusun identitas situs untuk satu run.
@@ -144,9 +149,15 @@ def build_brand(
     spec = get_region(region)
     now = datetime.now()
 
+    clean_cta = (cta_url.strip() or SITE_CTA_URL).rstrip()
+
+    if clean_cta and not clean_cta.startswith(("http://", "https://")):
+        clean_cta = "https://" + clean_cta
+
     return {
         "site_name": clean_name,
         "base_url": clean_url,
+        "cta_url": clean_cta,
         "region": spec["code"],
         "region_label": spec["label"],
         "language_name": spec["language_name"],
@@ -532,6 +543,11 @@ def run_neiiu(
     city: str = "",
     user_template: dict | None = None,
     template_brand: str = "",
+    design_refs: list[str] | None = None,
+    cta_url: str = "",
+    color_variant: int | None = None,
+    plain: bool = False,
+    kit_from_ref: bool = False,
     on_event=None,
 ) -> dict:
     """
@@ -567,7 +583,7 @@ def run_neiiu(
     if not clean_keyword:
         raise PipelineError("Keyword tidak boleh kosong.")
 
-    brand = build_brand(brand_name, base_url, region)
+    brand = build_brand(brand_name, base_url, region, cta_url)
 
     # 1. SERP
     emit(1, "start")
@@ -978,20 +994,134 @@ def run_neiiu(
                 "NEIIU dari isi yang sama",
             )
     else:
+        design = template["design"]
+        kit = None
+
+        if not plain:
+            # Halaman baru dirakit dari pustaka blok. Gayanya
+            # diturunkan dari halaman acuan yang ditunjuk pengguna;
+            # kalau tidak ada, dari halaman acuan template; kalau
+            # itu pun tidak ada, dari palet bawaan.
+            ref_urls = [
+                url
+                for url in (design_refs or DESIGN_REFERENCES)
+                if url.strip()
+            ]
+
+            if not ref_urls and reference:
+                ref_urls = [reference]
+
+            if not ref_urls and str(
+                template.get("source_url", "")
+            ).startswith("http"):
+                ref_urls = [template["source_url"]]
+
+            def on_source(entry: dict) -> None:
+                if entry["ok"]:
+                    dipakai = ", ".join(
+                        name
+                        for name, present in entry["components"].items()
+                        if present
+                    )
+
+                    emit(
+                        6,
+                        "info",
+                        f"  acuan gaya {entry['domain']}: "
+                        f"radius {entry['radius']}px"
+                        + (f", komponen {dipakai}" if dipakai else ""),
+                    )
+                else:
+                    emit(
+                        6,
+                        "info",
+                        f"  acuan gaya {entry['domain']} tidak terbaca "
+                        f"({entry['error']}), dilewati",
+                    )
+
+            dna = build_design_dna(ref_urls, on_source=on_source)
+
+            # Benih warna memuat nama folder hasil, dan nama itu
+            # memuat waktu run. Dua halaman brand dan keyword yang
+            # sama karena itu tetap keluar dengan warna berbeda,
+            # tapi satu run yang diulang persis tetap bisa
+            # menghasilkan warna yang sama.
+            theme = build_theme(
+                dna,
+                seed_text=(
+                    f"{brand['site_name']}|{clean_keyword}|"
+                    f"{output_dir.name}"
+                ),
+                variant=color_variant,
+            )
+
+            design = {
+                "palette": theme["palette"],
+                "fonts": theme["fonts"],
+                "radius": theme["radius"],
+            }
+
+            if kit_from_ref:
+                kit = dna["components"]
+            else:
+                # Bawaannya seluruh blok dipasang, dan acuan hanya
+                # menentukan warna, font, serta sudut lengkung.
+                # Alasannya: halaman acuan yang kebetulan tidak punya
+                # popup akan menghasilkan halaman baru tanpa popup,
+                # padahal yang diminta dari acuan itu gayanya, bukan
+                # daftar komponennya. Yang ingin komponennya ikut
+                # menyesuaikan acuan bisa menyalakan kit_from_ref.
+                kit = {name: True for name in dna["components"]}
+
+            template["design_dna"] = {
+                "sources": [
+                    {
+                        "url": entry["url"],
+                        "domain": entry["domain"],
+                        "ok": entry["ok"],
+                        "error": entry["error"],
+                    }
+                    for entry in dna["sources"]
+                ],
+                "components": kit,
+                "components_detected": dna["components"],
+                "kit_from_ref": kit_from_ref,
+                "theme": {
+                    key: value
+                    for key, value in theme.items()
+                    if key != "palette"
+                },
+                "palette": theme["palette"],
+            }
+
+            emit(
+                6,
+                "info",
+                f"  tema warna {theme['variant'] + 1}"
+                f"/{theme['variant_total']} "
+                f"(rona {theme['hue']}, {theme['mode']}), "
+                f"blok: "
+                + ", ".join(
+                    name for name, present in kit.items() if present
+                ),
+            )
+
         landing_html = generate_landing_page(
             plan=plan,
-            design=template["design"],
+            design=design,
             brand=brand,
             page_url=page_url,
             amp_url=amp_url,
+            kit=kit,
         )
 
         amp_html = generate_amp_page(
             plan=plan,
-            design=template["design"],
+            design=design,
             brand=brand,
             page_url=page_url,
             amp_url=amp_url,
+            kit=kit,
         )
 
     amp_dir = output_dir / "amp"

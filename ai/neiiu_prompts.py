@@ -610,6 +610,16 @@ Susun isi landing page lengkap:
    Kalau tipenya list atau steps, isi minimal 4 item.
 7. faq — 6 sampai 8 pertanyaan beserta jawabannya.
 8. keywords — variasi keyword turunan yang dipakai di halaman.
+9. reviews — 4 ulasan pemakai. Tiap ulasan punya:
+   - name: satu nama depan yang lazim di zona ini
+   - rating: angka 4.0 sampai 5.0, jangan semuanya 5.0
+   - text: 2 sampai 3 kalimat tentang pengalaman memakai
+     halaman atau layanannya
+   Jangan menulis tanggal. NEIIU yang memasangnya.
+10. ratings — 3 aspek layanan yang dinilai. Tiap aspek punya:
+   - label: nama aspeknya, misalnya kecepatan akses atau
+     kelengkapan pilihan
+   - value: angka 4.0 sampai 5.0
 
 Aturan tambahan:
 - Total seluruh teks harus mendekati {word_target} kata.
@@ -629,6 +639,16 @@ Aturan brand:
 - Jangan mengarang klaim tentang "{brand_name}" seperti jumlah
   member, lisensi, penghargaan, atau tahun berdiri. Tidak ada
   datanya, dan mengarang hal itu bisa menyesatkan pembaca.
+
+Aturan ulasan:
+- Tulis ulasan yang membahas hal yang bisa dilihat sendiri oleh
+  pembaca: kecepatan halaman, kemudahan mencari sesuatu,
+  kelengkapan informasi, tampilan di ponsel.
+- Jangan menulis ulasan yang menjanjikan hasil, keuntungan, atau
+  kemenangan. Ulasan semacam itu tidak bisa dibuktikan dan
+  melanggar aturan sebagian besar platform iklan.
+- Setiap ulasan menyoroti hal yang berbeda. Empat ulasan yang
+  isinya sama terbaca sebagai ulasan yang dibuat satu orang.
 """.strip()
 
     return (

@@ -7,6 +7,7 @@ dua pipeline sekaligus justru membuat keduanya berebut CPU dan
 jadi lebih lambat daripada dijalankan berurutan.
 """
 
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -33,6 +34,22 @@ _executor = ThreadPoolExecutor(
 
 _lock = threading.Lock()
 _active_job_id: int | None = None
+
+
+def split_refs(value) -> list[str]:
+    """
+    Memecah daftar URL acuan yang tersimpan sebagai satu teks.
+
+    Formulirnya menerima satu URL per baris, tapi orang terbiasa
+    memisahkannya dengan koma atau spasi juga. Ketiganya diterima
+    supaya isian yang wajar tidak ditolak hanya karena pemisahnya
+    beda.
+    """
+    return [
+        part.strip()
+        for part in re.split(r"[\s,]+", str(value or ""))
+        if part.strip()
+    ]
 
 
 def active_job_id() -> int | None:
@@ -182,6 +199,8 @@ def run_job(job_id: int) -> None:
             city=job["city"],
             user_template=user_template,
             template_brand=job["template_brand"],
+            design_refs=split_refs(job["design_refs"]),
+            cta_url=job["cta_url"],
             on_event=on_event,
         )
 

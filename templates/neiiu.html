@@ -130,13 +130,16 @@
                     <label for="templateId">Template</label>
                     <select id="templateId" name="templateId">
                         <option value="0">
-                            Tanpa template (tiru struktur kompetitor)
+                            Tanpa template (NEIIU rakit halaman baru)
                         </option>
                     </select>
                     <span class="hint">
-                        Kalau dipilih, NEIIU hanya mengganti isinya
-                        dan tidak menyentuh struktur, link, atau
-                        iklan di dalamnya.
+                        Kalau template dipilih, NEIIU hanya mengganti
+                        isinya dan tidak menyentuh struktur, link,
+                        atau iklan di dalamnya. Kalau dikosongkan,
+                        NEIIU merakit halaman sendiri lengkap dengan
+                        tombol daftar, bilah mengambang, popup,
+                        testimoni, dan rating.
                     </span>
                 </div>
 
@@ -201,6 +204,48 @@
                         Yang diambil dari halaman ini hanya struktur
                         section dan gaya visualnya, bukan teks atau
                         kodenya.
+                    </span>
+                </div>
+
+                <div class="field" style="grid-column: 1 / -1">
+                    <label for="designRefs">
+                        URL acuan gaya (opsional, satu per baris)
+                    </label>
+                    <textarea
+                        id="designRefs"
+                        name="designRefs"
+                        rows="3"
+                        maxlength="1000"
+                        placeholder="https://situs-yang-desainnya-saya-suka.com/"
+                        autocomplete="off"
+                    ></textarea>
+                    <span class="hint">
+                        Dipakai saat Template dikosongkan. NEIIU
+                        membaca warna, font, sudut lengkung, dan
+                        komponen yang dipakai halaman ini, lalu
+                        merakit halaman barunya sendiri. Teks dan
+                        kode halaman acuan tidak ikut tersalin.
+                    </span>
+                </div>
+
+                <div class="field" style="grid-column: 1 / -1">
+                    <label for="ctaUrl">
+                        Tujuan tombol LOGIN dan DAFTAR (opsional)
+                    </label>
+                    <input
+                        type="text"
+                        id="ctaUrl"
+                        name="ctaUrl"
+                        placeholder="https://link-tujuan.example/"
+                        maxlength="300"
+                        autocomplete="off"
+                    >
+                    <span class="hint">
+                        Dipakai seluruh tombol ajakan: sepasang tombol
+                        di hero, bilah mengambang di bawah, popup
+                        pembuka, dan tombol di footer. Kalau
+                        dikosongkan, tombolnya menunjuk ke beranda
+                        brand ini sendiri.
                     </span>
                 </div>
             </div>

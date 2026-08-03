@@ -10,6 +10,7 @@ dirender jadi HTML tanpa parsing teks bebas.
 """
 
 import re
+from datetime import datetime, timedelta
 
 from ai.manager import AIManager
 from ai.neiiu_prompts import (
@@ -36,7 +37,7 @@ from config import (
     AI_MODEL,
     AI_PROVIDER,
 )
-from utils.region import get_region, slug_for_url
+from utils.region import format_date, get_region, iso_date, slug_for_url
 from utils.text import (
     THAI_RANGE,
     count_words,
@@ -673,6 +674,96 @@ def ensure_identity(
     return f"{prefix}{separator}{trimmed.rstrip(' ,.;:-')}"
 
 
+def normalize_reviews(
+    raw_reviews,
+    region: str = "id",
+    limit: int = 6,
+) -> list[dict]:
+    """
+    Merapikan ulasan dari AI dan menanggalinya sendiri.
+
+    Tanggalnya tidak pernah diminta ke model. Model kecil rutin
+    menulis tanggal yang tidak ada di kalender, salah tahun, atau
+    ada di masa depan, dan tanggal semacam itu langsung membuat
+    structured data-nya ditolak. Di sini tanggal dipasang mundur
+    dari hari ini, satu ulasan tiap beberapa hari, lalu dituliskan
+    dalam dua bentuk: bentuk baca yang mengikuti kalender zona, dan
+    bentuk ISO masehi untuk mesin.
+    """
+    now = datetime.now()
+    result: list[dict] = []
+
+    for index, raw in enumerate(raw_reviews or []):
+        if not isinstance(raw, dict):
+            continue
+
+        name = re.sub(r"\s+", " ", str(raw.get("name") or "")).strip()[:40]
+        text = re.sub(r"\s+", " ", str(raw.get("text") or "")).strip()[:600]
+
+        if not name or not text:
+            continue
+
+        try:
+            rating = float(raw.get("rating", 5))
+        except (TypeError, ValueError):
+            rating = 5.0
+
+        # Dijepit di 4.0-5.0. Ulasan bintang satu di halaman yang
+        # dipasang sendiri oleh pemilik situs tidak masuk akal, dan
+        # nilai di luar 1-5 membuat schema-nya tidak valid.
+        rating = round(max(4.0, min(5.0, rating)), 1)
+
+        moment = now - timedelta(days=3 + index * 4)
+
+        result.append(
+            {
+                "name": name,
+                "rating": rating,
+                "text": text,
+                "date": format_date(moment, region),
+                "date_iso": iso_date(moment),
+            }
+        )
+
+        if len(result) >= limit:
+            break
+
+    return result
+
+
+def normalize_ratings(raw_ratings, limit: int = 3) -> list[dict]:
+    """
+    Merapikan penilaian layanan yang tampil di blok rating.
+    """
+    result: list[dict] = []
+
+    for raw in raw_ratings or []:
+        if not isinstance(raw, dict):
+            continue
+
+        label = re.sub(r"\s+", " ", str(raw.get("label") or "")).strip()[:40]
+
+        if not label:
+            continue
+
+        try:
+            value = float(raw.get("value", 5))
+        except (TypeError, ValueError):
+            value = 5.0
+
+        result.append(
+            {
+                "label": label,
+                "value": round(max(4.0, min(5.0, value)), 1),
+            }
+        )
+
+        if len(result) >= limit:
+            break
+
+    return result
+
+
 def normalize_plan(
     plan: dict,
     keyword: str,
@@ -810,6 +901,8 @@ def normalize_plan(
         "sections": sections,
         "faq": faq,
         "keywords": keywords[:12],
+        "reviews": normalize_reviews(plan.get("reviews"), region),
+        "ratings": normalize_ratings(plan.get("ratings")),
         "_metadata": plan.get("_metadata", {}),
     }
 

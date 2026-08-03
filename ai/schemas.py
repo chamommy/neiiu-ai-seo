@@ -233,6 +233,58 @@ CONTENT_PLAN_SCHEMA = {
                 "maxLength": 60,
             },
         },
+        # Tanggal ulasan sengaja tidak diminta ke model. NEIIU yang
+        # memasangnya, supaya selalu berupa tanggal yang benar-benar
+        # ada dan tidak pernah jatuh di masa depan.
+        "reviews": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "maxLength": 40,
+                    },
+                    "rating": {
+                        "type": "number",
+                        "minimum": 4,
+                        "maximum": 5,
+                    },
+                    "text": {
+                        "type": "string",
+                        "maxLength": 600,
+                    },
+                },
+                "required": [
+                    "name",
+                    "rating",
+                    "text",
+                ],
+            },
+        },
+        "ratings": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "maxLength": 40,
+                    },
+                    "value": {
+                        "type": "number",
+                        "minimum": 4,
+                        "maximum": 5,
+                    },
+                },
+                "required": [
+                    "label",
+                    "value",
+                ],
+            },
+        },
     },
     "required": [
         "title",
@@ -243,5 +295,7 @@ CONTENT_PLAN_SCHEMA = {
         "sections",
         "faq",
         "keywords",
+        "reviews",
+        "ratings",
     ],
 }

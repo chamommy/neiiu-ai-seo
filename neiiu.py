@@ -363,6 +363,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="Berhenti setelah analisis, tanpa membuat halaman",
     )
 
+    parser.add_argument(
+        "--design-ref",
+        action="append",
+        default=[],
+        metavar="URL",
+        help=(
+            "URL halaman yang gaya visualnya mau ditiru. Boleh "
+            "diulang. Yang diambil hanya warna, font, radius, dan "
+            "komponen yang dipakai"
+        ),
+    )
+
+    parser.add_argument(
+        "--cta-url",
+        default="",
+        help=(
+            "Tujuan seluruh tombol login, daftar, dan bilah "
+            "mengambang di halaman hasil"
+        ),
+    )
+
+    parser.add_argument(
+        "--color",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Pilih sendiri nomor varian warna. Kalau dikosongkan, "
+            "warnanya berganti tiap run"
+        ),
+    )
+
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        help=(
+            "Halaman artikel polos tanpa pustaka blok, seperti "
+            "perilaku lama"
+        ),
+    )
+
+    parser.add_argument(
+        "--kit-from-ref",
+        action="store_true",
+        help=(
+            "Pasang hanya blok yang terdeteksi di halaman acuan. "
+            "Bawaannya seluruh blok dipasang dan acuan hanya "
+            "menentukan warna dan font"
+        ),
+    )
+
     return parser
 
 
@@ -388,6 +439,11 @@ def main() -> int:
             reference=args.reference,
             use_cache=not args.no_cache,
             analyze_only=args.analyze_only,
+            design_refs=args.design_ref,
+            cta_url=args.cta_url,
+            color_variant=args.color,
+            plain=args.plain,
+            kit_from_ref=args.kit_from_ref,
             on_event=on_event,
         )
 

@@ -8,6 +8,7 @@ kanoniknya sebagai pelanggaran, jadi keduanya wajib dirender dari
 sumber yang satu ini.
 """
 
+from generators import blocks
 from generators.html_utils import escape, heading_id, unique_ids
 from generators.page_text import text_of
 
@@ -28,7 +29,7 @@ def render_header(brand: dict) -> str:
 """.strip()
 
 
-def render_hero(plan: dict) -> str:
+def render_hero(plan: dict, extra: str = "") -> str:
     intro_html = "\n      ".join(
         f"<p>{escape(paragraph)}</p>"
         for paragraph in plan.get("intro", [])
@@ -39,6 +40,7 @@ def render_hero(plan: dict) -> str:
     <div class="wrap">
       <h1>{escape(plan["h1"])}</h1>
       {intro_html}
+      {extra}
     </div>
   </div>
 """.strip()
@@ -256,10 +258,25 @@ def render_footer(
 def render_body(
     plan: dict,
     brand: dict,
+    kit: dict | None = None,
+    amp: bool = False,
 ) -> str:
     """
     Merakit seluruh isi halaman jadi satu blok HTML.
+
+    `kit` menentukan blok tambahan mana yang ikut dipasang, dan
+    isinya berasal dari DNA desain halaman acuan. Kalau dikosongkan,
+    yang keluar adalah halaman artikel polos seperti sebelumnya —
+    itu yang masih dipakai jalur lama, jadi perilakunya tidak boleh
+    berubah.
+
+    Urutan bloknya tetap, tidak diacak. Yang berganti tiap halaman
+    adalah warna dan teksnya, sesuai keputusan produk: susunan yang
+    berubah-ubah membuat hasilnya sulit diperiksa dan sulit
+    diperbaiki kalau ada yang salah.
     """
+    kit = kit or {}
+
     assign_anchors(plan)
 
     sections_html = "\n\n  ".join(
@@ -276,18 +293,72 @@ def render_body(
         else ""
     )
 
-    return f"""
-{render_header(brand)}
+    head = (
+        blocks.render_navbar(plan, brand)
+        if kit.get("navbar")
+        else render_header(brand)
+    )
 
-  {render_hero(plan)}
+    popup = (
+        blocks.render_popup(plan, brand, amp)
+        if kit.get("popup")
+        else ""
+    )
+
+    hero_extra = (
+        blocks.render_cta_duo(brand)
+        if kit.get("cta_duo")
+        else ""
+    )
+
+    ratings = (
+        blocks.render_ratings(plan, brand)
+        if kit.get("ratings")
+        else ""
+    )
+
+    testimoni = (
+        blocks.render_testimoni(plan, brand)
+        if kit.get("testimoni")
+        else ""
+    )
+
+    tags = blocks.render_tags(plan, brand) if kit.get("tags") else ""
+
+    foot = (
+        blocks.render_footer_sitemap(plan, brand)
+        if kit.get("footer_sitemap")
+        else render_footer(brand, plan)
+    )
+
+    floatbar = (
+        blocks.render_floatbar(brand, amp)
+        if kit.get("floatbar")
+        else ""
+    )
+
+    return f"""
+{popup}
+
+  {head}
+
+  {render_hero(plan, hero_extra)}
 
   <main>
   {toc_block}
 
   {sections_html}
 
+  {ratings}
+
+  {testimoni}
+
   {render_faq(plan.get("faq", []), brand)}
+
+  {tags}
   </main>
 
-  {render_footer(brand, plan)}
+  {foot}
+
+  {floatbar}
 """.strip()

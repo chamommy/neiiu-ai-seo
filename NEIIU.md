@@ -42,6 +42,8 @@ Lalu isi `.env`. Yang paling penting:
 | `SERP_PROVIDER` | `serper`, `google_cse`, atau `manual` |
 | `SERPER_API_KEY` | Kalau memakai Serper.dev |
 | `SITE_BASE_URL` | Domain asli. **Wajib diganti** sebelum halaman diunggah, karena dipakai untuk canonical, sitemap, dan structured data |
+| `SITE_CTA_URL` | Tujuan semua tombol login, daftar, bilah mengambang, dan popup. Kosong berarti menunjuk beranda sendiri |
+| `DESIGN_REFERENCES` | URL acuan gaya bawaan, dipisah koma. Bisa ditimpa per run lewat `--design-ref` |
 | `AI_MODEL` | Model Ollama yang dipakai |
 | `AI_CONTEXT_LENGTH` | Ukuran context. Jangan diturunkan di bawah 16384 kalau meng-crawl 10 kompetitor |
 
@@ -150,7 +152,111 @@ python neiiu.py "slot online" --no-cache
 
 # batasi jumlah halaman yang di-crawl biar cepat
 python neiiu.py "slot gacor" --crawl 5
+
+# halaman baru dengan gaya ditiru dari situs pilihan sendiri
+python neiiu.py "slot gacor" `
+  --brand WAYANGPLAY --base-url https://wayangplay.id `
+  --design-ref https://situs-yang-saya-suka.com/ `
+  --cta-url https://link-daftar.example/
 ```
+
+---
+
+## Halaman Baru Tanpa Template
+
+Kalau `--template` tidak dipakai, NEIIU tidak lagi menghasilkan
+halaman artikel polos. Ia merakit halaman sendiri dari pustaka blok
+di `generators/blocks.py`:
+
+| Blok | Isinya |
+| --- | --- |
+| `navbar` | Nama brand, menu ke tiap section, tombol daftar |
+| `popup` | Popup pembuka berisi tombol login dan daftar |
+| `cta_duo` | Sepasang tombol besar di bawah hero |
+| `ratings` | Tiga aspek layanan beserta bintangnya |
+| `testimoni` | Kartu ulasan member |
+| `tags` | Deretan pil topik |
+| `footer_sitemap` | Footer bertingkat berisi kolom tautan |
+| `floatbar` | Bilah mengambang di bawah layar |
+
+Susunannya tetap. Yang berganti tiap halaman adalah **warna dan
+teksnya** — itu keputusan yang disengaja, karena susunan yang
+berubah-ubah membuat hasilnya sulit diperiksa dan sulit diperbaiki
+kalau ada yang salah.
+
+### Dari mana gayanya
+
+`--design-ref` menerima URL halaman yang gayanya mau ditiru, dan
+boleh diulang beberapa kali. Yang dibaca dari halaman itu hanya:
+
+- palet warna, nama font, dan besar radius, dari CSS-nya
+- komponen apa saja yang dipakai, dari markupnya
+
+Teks, HTML, dan CSS halaman acuan **tidak pernah ikut tersalin**.
+Halaman baru selalu dirakit ulang dari pustaka blok sendiri.
+
+Kalau `--design-ref` dikosongkan, urutan cadangannya: `--reference`,
+lalu halaman acuan yang dipilih dari SERP, lalu palet bawaan.
+Halaman acuan yang mati atau menolak request cukup dicatat lalu
+dilewati — satu acuan yang gagal tidak menggagalkan seluruh run.
+
+### Warna
+
+Titik berangkatnya warna aksen halaman acuan, lalu ronanya diputar
+sejauh salah satu dari sembilan jarak tetap. Memutar rona menjaga
+kekontrasan tetap utuh, sehingga teksnya selalu terbaca — hal yang
+tidak dijamin kalau ketiga kanal RGB diacak bebas.
+
+Nomor variasinya diambil dari nama folder hasil, dan nama itu memuat
+waktu run. Dua halaman dengan brand dan keyword yang sama karena itu
+tetap keluar dengan warna berbeda. Pakai `--color N` kalau ingin
+memilih sendiri.
+
+### Pilihan lain
+
+| Perintah | Gunanya |
+| --- | --- |
+| `--cta-url` | Tujuan semua tombol login, daftar, bilah, dan popup |
+| `--color N` | Kunci varian warna ke nomor tertentu |
+| `--kit-from-ref` | Pasang hanya blok yang terdeteksi di acuan |
+| `--plain` | Kembali ke halaman artikel polos seperti dulu |
+
+Bawaannya seluruh blok dipasang, dan acuan hanya menentukan warna
+serta font. Alasannya: halaman acuan yang kebetulan tidak punya
+popup akan menghasilkan halaman baru tanpa popup, padahal yang
+diminta dari acuan itu gayanya, bukan daftar komponennya.
+
+### Ulasan dan penilaian
+
+Blok testimoni dan rating diisi dari rencana konten, dan angka yang
+sama itu juga yang masuk ke `Product` + `AggregateRating` + `Review`
+di JSON-LD. `reviewCount` dan `ratingValue` dihitung dari ulasan
+yang benar-benar terbit di halaman, bukan diisi angka besar:
+structured data yang melaporkan ribuan ulasan sementara halamannya
+menampilkan empat adalah pelanggaran pedoman Google yang bisa
+membuat seluruh rich result situs dicabut.
+
+Tanggal ulasan tidak pernah diminta ke model, karena model kecil
+rutin menulis tanggal yang tidak ada di kalender atau jatuh di masa
+depan. NEIIU memasangnya sendiri, mundur dari hari ini, dalam dua
+bentuk: bentuk baca yang mengikuti kalender zona (tahun Buddha untuk
+zona Thailand) dan bentuk ISO masehi untuk mesin.
+
+### Versi AMP
+
+Dua blok berbeda di AMP, dan bedanya bukan kosmetik:
+
+- **Popup tidak dipasang.** Ia memakai kotak centang tersembunyi
+  supaya bisa ditutup tanpa JavaScript, dan AMP melarang `<input>`
+  di luar amp-form.
+- **Bilah mengambang duduk di akhir halaman.** AMP hanya
+  mengizinkan `position: fixed` untuk segelintir elemen bawaannya,
+  jadi aturan itu tidak ikut ditulis sama sekali ke
+  `<style amp-custom>` — bukan sekadar tidak terpakai.
+
+Besar bintang penilaian ditentukan kelas `st-NN`, bukan atribut
+`style`, karena gaya sebaris melanggar AMP. CSS akhirnya sekitar
+7–8KB, jauh di bawah batas 75KB.
 
 Tambahkan `-u` di depan (`python -u neiiu.py ...`) kalau outputnya
 mau di-pipe ke file dan tetap ingin melihat progres.

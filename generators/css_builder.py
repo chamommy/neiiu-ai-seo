@@ -45,6 +45,318 @@ def build_font_stack(
     return font_stack(clean, region)
 
 
+def star_width_rules() -> str:
+    """
+    Lebar isian bintang untuk tiap nilai penilaian.
+
+    Lebarnya dipasang lewat kelas, bukan lewat atribut `style`,
+    karena AMP melarang gaya sebaris. Rentangnya 3.0 sampai 5.0
+    dengan langkah 0.1 — nilai di bawah itu tidak pernah dipakai
+    untuk penilaian yang ditampilkan.
+    """
+    rules = []
+
+    for tenth in range(30, 51):
+        rules.append(
+            f".stars.st-{tenth}:after {{ width: {tenth / 50 * 100:.1f}%; }}"
+        )
+
+    return "\n".join(rules)
+
+
+def build_block_css(amp: bool, radius: int) -> str:
+    """
+    CSS untuk pustaka blok di generators/blocks.py.
+
+    Dipisah dari CSS dasar supaya bagian yang tidak boleh ada di AMP
+    benar-benar tidak ikut tertulis, bukan sekadar tidak terpakai.
+    Validator AMP membaca isi <style amp-custom> apa adanya: satu
+    aturan `position: fixed` di sana membuat halaman gagal validasi
+    walau elemennya tidak pernah dipasang.
+    """
+    # Bintang digambar dari karakter yang ditulis sebagai escape CSS,
+    # jadi berkas CSS-nya murni ASCII. Menempelkan karakter bintang
+    # apa adanya membuat hasilnya bergantung pada encoding berkas,
+    # dan salah encoding sekali saja mengubah seluruh bintang jadi
+    # deretan tanda tanya.
+    star = "\\2605\\2605\\2605\\2605\\2605"
+
+    css = f"""
+.nav-cta {{
+  padding: 9px 18px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--brand), var(--brand-dark));
+  color: var(--on-brand);
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.4px;
+}}
+
+.nav-cta:hover {{ text-decoration: none; filter: brightness(1.1); }}
+
+.cta-duo {{
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 22px 0;
+}}
+
+.cta-btn {{
+  flex: 1 1 200px;
+  text-align: center;
+  padding: 15px 24px;
+  border-radius: {radius}px;
+  border: 1px solid var(--border);
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: var(--on-brand);
+  background: linear-gradient(180deg, var(--brand), var(--brand-dark));
+}}
+
+.cta-btn:hover {{ text-decoration: none; filter: brightness(1.12); }}
+
+.cta-reg {{
+  background: linear-gradient(180deg, var(--brand-mid), var(--brand-dark));
+}}
+
+.floatbar {{
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: center;
+  padding: 12px 16px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}}
+
+.fb-item {{
+  flex: 1 1 150px;
+  text-align: center;
+  padding: 11px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--on-brand);
+  background: linear-gradient(135deg, var(--brand), var(--brand-dark));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+
+.fb-item:hover {{ text-decoration: none; filter: brightness(1.12); }}
+
+.stars {{
+  position: relative;
+  display: inline-block;
+  font-size: 15px;
+  line-height: 1;
+  letter-spacing: 2px;
+  white-space: nowrap;
+}}
+
+.stars:before {{
+  content: "{star}";
+  color: var(--border);
+}}
+
+.stars:after {{
+  content: "{star}";
+  color: var(--star);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+}}
+
+{star_width_rules()}
+
+.rate-grid, .rev-grid {{
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}}
+
+.rate-card {{
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: {radius}px;
+  padding: 18px 20px;
+  text-align: center;
+}}
+
+.rate-name {{
+  font-weight: 700;
+  font-size: 15px;
+  margin-bottom: 10px;
+}}
+
+.rate-value {{
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 14px;
+}}
+
+.rev-card {{
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--brand);
+  border-radius: {radius}px;
+  padding: 16px 20px;
+}}
+
+.rev-head {{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}}
+
+.rev-name {{ font-weight: 700; }}
+.rev-date {{ color: var(--muted); font-size: 13px; }}
+.rev-head .stars {{ margin-left: auto; }}
+.rev-text {{ margin: 0; color: var(--muted); font-size: 15px; }}
+
+.pill-row {{ display: flex; flex-wrap: wrap; gap: 9px; }}
+
+.pill {{
+  display: inline-block;
+  padding: 7px 15px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+}}
+
+.pill:hover {{
+  text-decoration: none;
+  border-color: var(--brand);
+  color: var(--brand);
+}}
+
+.foot-grid {{
+  display: grid;
+  gap: 22px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  margin-bottom: 22px;
+}}
+
+.foot-col h3 {{
+  margin: 0 0 10px;
+  font-size: 15px;
+  color: var(--text);
+}}
+
+.foot-links {{ display: flex; flex-direction: column; gap: 7px; }}
+.foot-links a {{ color: var(--muted); font-size: 14px; }}
+.foot-links a:hover {{ color: var(--brand); }}
+.foot-brand {{ display: flex; flex-direction: column; gap: 12px; }}
+.foot-brand .cta-btn {{ flex: 0 0 auto; }}
+.foot-legal {{ margin: 0 0 8px; }}
+""".strip()
+
+    if not amp:
+        # Bilah mengambang dan popup hanya hidup di halaman kanonik.
+        # AMP melarang `position: fixed` untuk elemen biasa, dan
+        # melarang `<input>` di luar amp-form.
+        css += f"""
+body {{ padding-bottom: 84px; }}
+
+.floatbar {{
+  position: fixed;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  z-index: 40;
+  width: calc(100% - 28px);
+  max-width: var(--max-width);
+  border: 1px solid var(--border);
+  border-radius: {radius + 8}px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}}
+
+.pop-switch {{ position: absolute; opacity: 0; pointer-events: none; }}
+
+.pop-overlay {{
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(0, 0, 0, 0.6);
+}}
+
+.pop-switch:checked ~ .pop-overlay {{ display: flex; }}
+
+.pop-card {{
+  position: relative;
+  width: 100%;
+  max-width: 420px;
+  border-radius: {radius + 8}px;
+  border: 1px solid var(--border);
+  padding: 30px 24px 22px;
+  text-align: center;
+  background: linear-gradient(160deg, var(--surface), var(--brand-dark));
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+}}
+
+.pop-close {{
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  cursor: pointer;
+}}
+
+.pop-close:before, .pop-close:after {{
+  content: "";
+  position: absolute;
+  top: 14px;
+  left: 7px;
+  width: 15px;
+  height: 2px;
+  background: var(--text);
+}}
+
+.pop-close:before {{ transform: rotate(45deg); }}
+.pop-close:after {{ transform: rotate(-45deg); }}
+
+.pop-title {{
+  margin: 0 0 18px;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.4;
+}}
+
+.pop-actions {{ display: flex; flex-direction: column; gap: 11px; }}
+
+.pop-foot {{
+  margin: 18px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}}
+"""
+
+    css += """
+@media (max-width: 720px) {
+  .floatbar { gap: 7px; padding: 9px 10px; }
+  .fb-item { flex: 1 1 100px; font-size: 12px; padding: 9px 8px; }
+  .rev-head .stars { margin-left: 0; width: 100%; }
+}
+"""
+
+    return css
+
+
 def build_css(
     design: dict,
     amp: bool = False,
@@ -66,6 +378,15 @@ def build_css(
     accent_2 = palette.get("accent_2", accent)
     accent_text = palette.get("accent_text", "#0b0f19")
 
+    # Warna blok baru. Kalau paletnya berasal dari jalur lama yang
+    # belum lewat theme.py, ketiganya jatuh balik ke aksen supaya
+    # halaman tetap terbentuk, hanya tanpa gradasi.
+    brand_color = palette.get("brand", accent)
+    brand_mid = palette.get("brand_mid", accent_2)
+    brand_dark = palette.get("brand_dark", accent_2)
+    on_brand = palette.get("on_brand", accent_text)
+    star = palette.get("star", accent)
+
     fonts_css = build_font_stack(fonts, region)
 
     css = f"""
@@ -78,6 +399,11 @@ def build_css(
   --accent: {accent};
   --accent-2: {accent_2};
   --accent-text: {accent_text};
+  --brand: {brand_color};
+  --brand-mid: {brand_mid};
+  --brand-dark: {brand_dark};
+  --on-brand: {on_brand};
+  --star: {star};
   --radius: {radius}px;
   --max-width: 1080px;
 }}
@@ -287,6 +613,8 @@ td:first-child {{ color: var(--accent); font-weight: 600; width: 64px; }}
   .site-nav a {{ margin-left: 12px; font-size: 14px; }}
 }}
 """.strip()
+
+    css += "\n" + build_block_css(amp, radius)
 
     if amp:
         # amp-img butuh latar supaya tidak berkedip saat layout.
