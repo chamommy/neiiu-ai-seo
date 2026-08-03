@@ -17,6 +17,8 @@ from datetime import datetime, timedelta
 
 from generators.schema_generator import json_for_html
 from generators.brand_swap import brand_edits, echo_edits, normalize
+from generators.jsonld_filler import has_reviews, jsonld_edits
+from generators.script_text import script_edits
 from generators.template_guard import verify
 from generators.template_scanner import apply_edits, scan
 from generators.template_slots import build_slot_map
@@ -793,6 +795,55 @@ def fill_template(
             f"{jumlah_brand} tempat yang tidak kebagian teks baru."
         )
 
+    # Data terstruktur ditulis ulang dari isi yang sama dengan yang
+    # terbit di halaman. Tanpa ini, rich result di Google menampilkan
+    # pertanyaan, ulasan, dan nama brand milik template lama meskipun
+    # seluruh teks yang tampak sudah berganti.
+    tanggal = generated_dates(
+        max(len(content.get("review_text", [])), 8),
+        brand,
+    )
+
+    schema, jumlah_schema = jsonld_edits(
+        scanned,
+        html,
+        content,
+        brand,
+        tanggal,
+    )
+
+    if schema:
+        edits.extend(schema)
+        sudah.update({(x["start"], x["end"]): x for x in schema})
+
+        notes.append(
+            f"Data terstruktur diperbarui: {jumlah_schema} nilai di "
+            "JSON-LD ikut memakai isi baru."
+        )
+
+    # Teks yang tertanam di dalam skrip. Blok konfigurasi milik
+    # template menimpakan judulnya sendiri ke halaman saat dibuka,
+    # jadi judul yang sudah diganti akan kembali ke judul lama di
+    # layar pengunjung kalau blok itu dibiarkan.
+    tertanam, jumlah_tertanam = script_edits(
+        scanned,
+        html,
+        diganti,
+        old_brand,
+        brand.get("site_name", ""),
+        content,
+    )
+
+    if tertanam:
+        edits.extend(tertanam)
+        sudah.update({(x["start"], x["end"]): x for x in tertanam})
+
+        notes.append(
+            f"{jumlah_tertanam} teks yang tertanam di dalam skrip ikut "
+            "diperbarui, termasuk judul yang ditimpakan saat halaman "
+            "dibuka."
+        )
+
     if slot_map["unquoted"]:
         notes.append(
             f"{len(slot_map['unquoted'])} atribut ditulis tanpa tanda "
@@ -822,7 +873,21 @@ def fill_template(
 
     allowance: dict[str, int] = {}
 
-    if add_review_schema and content.get("review_text"):
+    # Blok ulasan sendiri hanya ditambahkan kalau template belum punya.
+    # Template yang sudah membawa Product beserta aggregateRating akan
+    # berakhir dengan DUA klaim rating yang berbeda di satu halaman,
+    # dan mesin pencari melihatnya sebagai data yang bertentangan -
+    # lebih buruk daripada tidak menambahkan apa pun. Yang sudah ada
+    # tetap terisi ulasan baru lewat jsonld_edits di atas.
+    sudah_punya = has_reviews(scanned, html)
+
+    if sudah_punya:
+        notes.append(
+            "Template sudah punya data ulasan sendiri, jadi isinya "
+            "diperbarui di tempat - bukan ditambah blok kedua."
+        )
+
+    if add_review_schema and content.get("review_text") and not sudah_punya:
         block = build_review_block(
             content,
             brand,

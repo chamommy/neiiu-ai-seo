@@ -230,6 +230,10 @@ class SlotScanner(HTMLParser):
         # pemindaian berjalan di dalam permintaan HTTP, yang membeku
         # bukan cuma permintaan itu, tapi seluruh server.
         self.opaque_depth = 0
+
+        # Rentang isi tiap blok <script>/<style> teratas.
+        self.opaque_blocks: list[dict] = []
+        self.opaque_open: dict | None = None
         self.ad_depth = 0
 
     # ---------- posisi ----------
@@ -458,6 +462,22 @@ class SlotScanner(HTMLParser):
             )
 
             if tag in OPAQUE_TAGS:
+                # Letak isi blok dicatat, bukan isinya diganti di sini.
+                # Isi <script> memang bukan teks untuk pembaca, tapi
+                # sebagian di antaranya DATA yang dibaca mesin pencari
+                # dan browser: JSON-LD berisi FAQ dan ulasan, dan blok
+                # konfigurasi berisi judul yang ditimpakan ke halaman
+                # saat dibuka. Selama rentangnya tidak dikenali, dua
+                # hal itu terbit dengan isi template lama meskipun
+                # seluruh teks yang tampak sudah berganti.
+                if self.opaque_depth == 0:
+                    self.opaque_open = {
+                        "tag": tag,
+                        "attrs": attr_map,
+                        "body_start": start
+                        + len(self.get_starttag_text() or ""),
+                    }
+
                 self.opaque_depth += 1
 
             if is_ad:
@@ -501,6 +521,11 @@ class SlotScanner(HTMLParser):
             if item["tag"] in OPAQUE_TAGS:
                 self.opaque_depth -= 1
 
+                if self.opaque_depth == 0 and self.opaque_open:
+                    self.opaque_open["body_end"] = offset
+                    self.opaque_blocks.append(self.opaque_open)
+                    self.opaque_open = None
+
             if item["is_ad"]:
                 self.ad_depth -= 1
 
@@ -533,6 +558,7 @@ def scan(html: str) -> dict:
         "slots": scanner.slots,
         "elements": scanner.elements,
         "end_tags": scanner.end_tags,
+        "opaque": scanner.opaque_blocks,
     }
 
 
