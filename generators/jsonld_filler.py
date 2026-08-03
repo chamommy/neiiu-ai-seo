@@ -27,6 +27,7 @@ ulang tiap kali generate.
 
 import json
 
+from generators.brand_swap import build_pattern, match_case
 from generators.schema_generator import json_for_html
 
 
@@ -38,6 +39,32 @@ BRAND_TYPES = {"Organization", "WebSite", "Brand"}
 
 # Kunci yang isinya kalimat deskripsi halaman.
 DESCRIPTION_KEYS = ("description", "abstract")
+
+# Kunci yang isinya tulisan untuk dibaca orang, bukan alamat. Nama
+# brand lama di sini harus ikut berganti; nama brand di "url",
+# "image", "@id", atau "sameAs" justru tidak boleh disentuh karena
+# di situ ia bagian dari alamat berkas.
+#
+# Yang menyelinap lewat tanpa daftar ini: BreadcrumbList. Remah
+# navigasinya terbit sebagai ListItem.name, muncul di hasil
+# pencarian tepat di bawah judul, dan tipenya bukan Organization
+# maupun WebPage sehingga tidak tersentuh aturan mana pun di atas.
+# Terukur pada halaman jadi: satu ListItem masih bernama "OSB99"
+# padahal seluruh halaman sudah berganti ke TIMAH33.
+TEXT_KEYS = {
+    "name",
+    "alternateName",
+    "legalName",
+    "headline",
+    "description",
+    "abstract",
+    "text",
+    "reviewBody",
+    "caption",
+    "slogan",
+    "articleSection",
+    "keywords",
+}
 
 
 def as_list(value) -> list:
@@ -120,11 +147,40 @@ def rewrite_reviews(
     return diganti
 
 
+def swap_brand_text(node: dict, pola, new_brand: str) -> int:
+    """
+    Mengganti nama brand lama di nilai yang dibaca orang.
+
+    Cuma menyentuh kunci di TEXT_KEYS, jadi nama brand yang jadi
+    bagian dari alamat gambar tetap utuh dan gambarnya tetap termuat.
+    """
+    if pola is None or not new_brand:
+        return 0
+
+    diganti = 0
+
+    for kunci, nilai in node.items():
+        if kunci not in TEXT_KEYS or not isinstance(nilai, str) or not nilai:
+            continue
+
+        baru = pola.sub(
+            lambda cocok: match_case(cocok.group(0), new_brand),
+            nilai,
+        )
+
+        if baru != nilai:
+            node[kunci] = baru
+            diganti += 1
+
+    return diganti
+
+
 def rewrite_node(
     node: dict,
     content: dict,
     brand: dict,
     dates: list[dict],
+    pola=None,
 ) -> int:
     """
     Menulis ulang satu simpul beserta seluruh cabangnya.
@@ -170,13 +226,18 @@ def rewrite_node(
             dates,
         )
 
+    # Terakhir, supaya nama brand lama yang masih tersisa di nilai
+    # mana pun ikut berganti - termasuk yang tipenya tidak dikenali
+    # aturan di atas.
+    diganti += swap_brand_text(node, pola, nama_situs)
+
     for nilai in node.values():
         if isinstance(nilai, dict):
-            diganti += rewrite_node(nilai, content, brand, dates)
+            diganti += rewrite_node(nilai, content, brand, dates, pola)
         elif isinstance(nilai, list):
             for anak in nilai:
                 if isinstance(anak, dict):
-                    diganti += rewrite_node(anak, content, brand, dates)
+                    diganti += rewrite_node(anak, content, brand, dates, pola)
 
     return diganti
 
@@ -260,6 +321,7 @@ def jsonld_edits(
     content: dict,
     brand: dict,
     dates: list[dict],
+    old_brand: str = "",
 ) -> tuple[list[dict], int]:
     """
     Menyusun penggantian untuk seluruh blok JSON-LD di halaman.
@@ -270,11 +332,13 @@ def jsonld_edits(
     edits: list[dict] = []
     total = 0
 
+    pola = build_pattern(old_brand) if old_brand else None
+
     for blok in jsonld_blocks(scanned, html):
         if blok["data"] is None:
             continue
 
-        diganti = rewrite_node(blok["data"], content, brand, dates)
+        diganti = rewrite_node(blok["data"], content, brand, dates, pola)
 
         if not diganti:
             continue

@@ -296,6 +296,7 @@ def build_template_content_prompt(
     insight: dict,
     spec: dict,
     brand: dict,
+    sudah: dict | None = None,
 ) -> tuple[str, str]:
     """
     Menyusun prompt untuk mengisi template milik pengguna.
@@ -359,6 +360,39 @@ def build_template_content_prompt(
             padanan.extend(
                 f"  {nomor}. {teks}"
                 for nomor, teks in enumerate(contoh, start=1)
+            )
+
+    # Pertanyaan yang sudah ditulis di giliran sebelumnya, supaya
+    # jawabannya benar-benar menjawab.
+    #
+    # Tanpa ini, pertanyaan dan jawaban jatuh di giliran berbeda dan
+    # jawabannya ditulis tanpa pernah melihat pertanyaannya. Terukur
+    # pada halaman jadi: "Apakah perlu verifikasi?" dijawab
+    # "Permainan berjalan secara real-time tanpa gangguan", sementara
+    # kalimat yang menjawabnya justru terpasang di kartu lain.
+    # Strukturnya sempurna, isinya tidak nyambung - dan pembaca
+    # melihatnya lebih dulu daripada mesin pencari mana pun.
+    bagian_tanya = ""
+    aturan_faq = spec.get("faq_answer")
+
+    if aturan_faq and sudah:
+        mulai = int(aturan_faq.get("offset", 0))
+        tanya = list(sudah.get("faq_question") or [])[
+            mulai : mulai + aturan_faq["count"]
+        ]
+
+        if tanya:
+            bagian_tanya = (
+                "\n## Pertanyaan Yang Harus Dijawab Berurutan\n"
+                "Ini pertanyaan yang sudah tertulis di halaman. "
+                "faq_answer ke-N adalah jawaban untuk pertanyaan ke-N "
+                "di daftar ini, jadi jawab yang ditanyakan - bukan "
+                "menulis kalimat lain tentang topik yang sama.\n"
+                + "\n".join(
+                    f"  {nomor}. {teks}"
+                    for nomor, teks in enumerate(tanya, start=1)
+                )
+                + "\n"
             )
 
     bagian_padanan = (
@@ -425,6 +459,9 @@ Pertanyaan yang dicari orang:
   tabel. Tulis sesingkat mungkin, tanpa titik di akhir, dan jangan
   berupa kalimat. Menu yang isinya kalimat akan memecah header
   halaman ke dua baris.
+- faq_answer ke-N adalah jawaban untuk faq_question ke-N. Jawab
+  yang ditanyakan, jangan menulis kalimat lain yang kebetulan
+  sama topiknya.
 - Jangan menomori atau memberi awalan seperti "1." di setiap teks.
 - Setiap teks berdiri sendiri dan langsung berisi, tanpa pembuka.
 - Sebut "{brand_name}" secukupnya saja, tidak di setiap teks.
@@ -443,7 +480,7 @@ Halamannya memakai template yang sudah jadi, jadi jumlah teksnya
 tidak boleh dikira-kira. Tulis persis sebanyak ini:
 
 {chr(10).join(kebutuhan)}
-{bagian_padanan}""".rstrip()
+{bagian_tanya}{bagian_padanan}""".rstrip()
 
     return (
         content_planner_system_prompt(language_code),

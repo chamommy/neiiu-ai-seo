@@ -71,8 +71,6 @@ class TemplateTooDeep(ValueError):
 # jadi termasuk yang boleh diisi ulang.
 TEXT_ATTRIBUTES = {
     ("meta", "content"),
-    ("img", "alt"),
-    ("amp-img", "alt"),
     ("time", "datetime"),
     ("html", "lang"),
     ("meta", "charset"),
@@ -89,6 +87,14 @@ TEXT_ATTRIBUTES_ANY_TAG = {
     "placeholder",
     "aria-label",
     "title",
+    # alt dulu didaftar per tag - ("img", "alt") dan ("amp-img",
+    # "alt"). Daftar per tag itu selalu ketinggalan satu: template
+    # AMP sungguhan memakai <amp-anim> untuk logonya, dan alt="Logo
+    # OSB99" di situ terbit apa adanya meski seluruh halaman sudah
+    # berganti nama. alt cuma sah di tag gambar, dan di tag mana pun
+    # isinya keterangan untuk dibaca - jadi lebih tepat dikenali dari
+    # nama atributnya, bukan dari nama tagnya.
+    "alt",
 }
 
 
@@ -235,6 +241,14 @@ class SlotScanner(HTMLParser):
         self.opaque_blocks: list[dict] = []
         self.opaque_open: dict | None = None
         self.ad_depth = 0
+
+        # Letak blok iklan, dipakai untuk memberi tahu kalau nama
+        # brand lama tertinggal di dalamnya. Isinya sengaja tidak
+        # pernah disentuh, jadi satu-satunya yang bisa dilakukan
+        # adalah menyebutkannya - bukan mendiamkannya seolah seluruh
+        # halaman sudah bersih.
+        self.ad_blocks: list[tuple[int, int]] = []
+        self.ad_open: int | None = None
 
     # ---------- posisi ----------
 
@@ -481,6 +495,9 @@ class SlotScanner(HTMLParser):
                 self.opaque_depth += 1
 
             if is_ad:
+                if self.ad_depth == 0:
+                    self.ad_open = start
+
                 self.ad_depth += 1
 
     def handle_startendtag(self, tag, attrs) -> None:
@@ -529,6 +546,10 @@ class SlotScanner(HTMLParser):
             if item["is_ad"]:
                 self.ad_depth -= 1
 
+                if self.ad_depth == 0 and self.ad_open is not None:
+                    self.ad_blocks.append((self.ad_open, offset))
+                    self.ad_open = None
+
             if item["tag"] == tag:
                 break
 
@@ -559,6 +580,7 @@ def scan(html: str) -> dict:
         "elements": scanner.elements,
         "end_tags": scanner.end_tags,
         "opaque": scanner.opaque_blocks,
+        "ads": scanner.ad_blocks,
     }
 
 

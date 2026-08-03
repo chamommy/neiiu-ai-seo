@@ -13,10 +13,17 @@ llama.cpp berbeda-beda antar versi, jadi hasilnya selalu
 dicocokkan ulang secara deterministik sesudahnya.
 """
 
+import re
+
 from datetime import datetime, timedelta
 
 from generators.schema_generator import json_for_html
-from generators.brand_swap import brand_edits, echo_edits, normalize
+from generators.brand_swap import (
+    brand_edits,
+    build_pattern,
+    echo_edits,
+    normalize,
+)
 from generators.jsonld_filler import has_reviews, jsonld_edits
 from generators.script_text import script_edits
 from generators.template_guard import verify
@@ -638,6 +645,83 @@ def build_edits(
     return edits, notes
 
 
+def brand_left_in_ads(scanned: dict, html: str, old_brand: str) -> int:
+    """
+    Berapa kali nama brand lama muncul di dalam blok iklan.
+
+    Yang di dalam alamat tidak dihitung, karena di situ namanya
+    bagian dari URL dan memang harus tetap - mengubahnya mematikan
+    tautan iklannya.
+    """
+    nama = str(old_brand or "").strip()
+
+    if not nama:
+        return 0
+
+    pola = build_pattern(nama)
+    jumlah = 0
+
+    for awal, akhir in scanned.get("ads", []):
+        badan = re.sub(
+            r'(?i)(href|src|srcset|content|action)\s*=\s*'
+            r'(["\'])[^"\']*\2',
+            "",
+            html[awal:akhir],
+        )
+
+        jumlah += len(pola.findall(badan))
+
+    return jumlah
+
+
+def published_content(edits: list[dict], content: dict) -> dict:
+    """
+    Isi seperti yang BENAR-BENAR terbit, bukan seperti yang diminta.
+
+    Teks dari AI dipotong menyesuaikan lebar slotnya, jadi kalimat
+    yang tampak di halaman bisa lebih pendek daripada kalimat yang
+    dikirim. Data terstruktur harus memakai versi yang tampak itu.
+
+    Terukur pada halaman jadi: JSON-LD memuat jawaban FAQ "...tidak
+    memerlukan verifikasi tambahan untuk dimainkan." sementara yang
+    terbaca di halaman berhenti di "...verifikasi tambahan". Google
+    mensyaratkan teks FAQ di schema sama persis dengan teks di
+    halaman; yang tidak sama diabaikan, atau lebih buruk, dianggap
+    schema yang menjanjikan sesuatu yang tidak ada.
+
+    Urutan dokumen dipakai apa adanya. Untuk peran berdaftar itu
+    sama dengan urutan isi aslinya, karena slot dibagikan berurutan
+    dari antrean yang sama.
+    """
+    urut = sorted(
+        (
+            item
+            for item in edits
+            if item.get("role") and str(item.get("text", "")).strip()
+        ),
+        key=lambda item: item["start"],
+    )
+
+    per_peran: dict[str, list[str]] = {}
+
+    for item in urut:
+        per_peran.setdefault(item["role"], []).append(str(item["text"]))
+
+    hasil = dict(content)
+
+    for peran, daftar in per_peran.items():
+        if peran in LIST_ROLES:
+            hasil[peran] = daftar
+        else:
+            # Satu kalimat bisa terbit di beberapa tempat dengan
+            # lebar berbeda - judul di <title> utuh, di og:title
+            # terpotong. Yang terpanjang tetap ada di halaman, jadi
+            # itu yang paling aman dipakai.
+            hasil[peran] = max(daftar, key=len)
+
+    return hasil
+
+
 def build_review_block(
     content: dict,
     brand: dict,
@@ -753,6 +837,13 @@ def fill_template(
 
     edits, notes = build_edits(slot_map, content, brand)
 
+    # Disalin sebelum lapis berikutnya menambah apa pun. Edit gema
+    # dan edit nama brand ikut membawa "role" karena disusun dari
+    # slot yang sama, dan kalau ikut terhitung, satu kalimat yang
+    # kebetulan muncul dua kali di halaman akan tercatat dua kali -
+    # menggeser pasangan tanya-jawab di data terstruktur satu langkah.
+    edits_isi = list(edits)
+
     # Slot yang sudah kebagian teks baru, dikenali dari letaknya.
     sudah = {(item["start"], item["end"]): item for item in edits}
 
@@ -804,12 +895,15 @@ def fill_template(
         brand,
     )
 
+    terbit = published_content(edits_isi, content)
+
     schema, jumlah_schema = jsonld_edits(
         scanned,
         html,
-        content,
+        terbit,
         brand,
         tanggal,
+        old_brand,
     )
 
     if schema:
@@ -842,6 +936,21 @@ def fill_template(
             f"{jumlah_tertanam} teks yang tertanam di dalam skrip ikut "
             "diperbarui, termasuk judul yang ditimpakan saat halaman "
             "dibuka."
+        )
+
+    # Nama brand lama yang tertinggal di dalam blok iklan. Isi iklan
+    # sengaja tidak pernah disentuh, jadi ini bukan sesuatu yang bisa
+    # diperbaiki sendiri - tapi mendiamkannya membuat halaman terbit
+    # dengan alt="Banner OSB99" di tengah halaman yang seluruhnya
+    # sudah bernama lain, tanpa ada yang tahu.
+    sisa_iklan = brand_left_in_ads(scanned, html, old_brand)
+
+    if sisa_iklan:
+        notes.append(
+            f"Nama '{old_brand}' masih ada di {sisa_iklan} tempat di "
+            "dalam blok iklan. Isi iklan tidak pernah diubah, jadi "
+            "kalau itu bukan iklan pihak lain, gantilah sendiri di "
+            "templatenya."
         )
 
     if slot_map["unquoted"]:
@@ -887,9 +996,32 @@ def fill_template(
             "diperbarui di tempat - bukan ditambah blok kedua."
         )
 
-    if add_review_schema and content.get("review_text") and not sudah_punya:
+    # Ulasan hanya boleh diklaim di schema kalau ulasannya memang
+    # terbaca di halaman. Terukur pada AMP milik pengguna: berkasnya
+    # tidak punya satu pun tempat ulasan - tidak ada kata "ulasan",
+    # "review", atau "testimoni" di seluruh teksnya - tapi tetap
+    # kebagian blok schema berisi lima ulasan. Itu persis yang
+    # dilarang Google: rich result bintang untuk ulasan yang tidak
+    # ada di halaman, dan hukumannya tindakan manual untuk seluruh
+    # situs, bukan cuma halaman itu.
+    tampil_ulasan = bool(slot_map["roles"].get("review_text"))
+
+    boleh_tambah = (
+        add_review_schema
+        and bool(content.get("review_text"))
+        and not sudah_punya
+    )
+
+    if boleh_tambah and not tampil_ulasan:
+        notes.append(
+            "Blok schema Review tidak ditambahkan: halaman ini tidak "
+            "menampilkan ulasan, dan schema ulasan untuk teks yang "
+            "tidak terlihat melanggar aturan Google."
+        )
+
+    if boleh_tambah and tampil_ulasan:
         block = build_review_block(
-            content,
+            terbit,
             brand,
             generated_dates(len(content["review_text"]), brand),
         )
@@ -911,7 +1043,8 @@ def fill_template(
             allowance["script"] = 1
             notes.append(
                 f"Blok schema Review ditambahkan untuk "
-                f"{len(content['review_text'])} ulasan."
+                f"{len(terbit.get('review_text', []))} ulasan yang "
+                "terbaca di halaman."
             )
 
     filled = apply_edits(html, edits)

@@ -412,12 +412,19 @@ def generate_template_content(
             "teksnya tidak muat diminta sekaligus."
         )
 
+    # Apa yang sudah tertulis di giliran sebelumnya, supaya giliran
+    # berikutnya bisa menyambungnya. Yang dipakai sekarang cuma
+    # pertanyaan FAQ, karena jawabannya hampir selalu jatuh di
+    # giliran lain dan tanpa ini ditulis tanpa melihat pertanyaannya.
+    terkumpul: dict[str, list[str]] = {}
+
     for nomor, bagian in enumerate(batches, start=1):
         system_prompt, user_prompt = build_template_content_prompt(
             analysis=analysis,
             insight=insight,
             spec=bagian,
             brand=brand,
+            sudah=terkumpul,
         )
 
         needed_chars = answer_chars(bagian)
@@ -447,6 +454,12 @@ def generate_template_content(
         )
 
         isi, peringatan = fit_content_to_spec(raw, bagian, fallbacks or {})
+
+        for peran, teks in isi.items():
+            if isinstance(teks, list):
+                terkumpul.setdefault(peran, []).extend(
+                    str(x) for x in teks
+                )
 
         hasil.append(isi)
         warnings.extend(peringatan)
