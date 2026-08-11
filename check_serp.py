@@ -18,13 +18,13 @@ import sys
 from config import (
     GOOGLE_CSE_CX,
     GOOGLE_CSE_KEY,
-    SERP_COUNTRY,
-    SERP_LANGUAGE,
     SERP_MANUAL_FILE,
     SERP_PROVIDER,
+    SERP_REGION,
     SERPER_API_KEY,
 )
 from serp.providers import SerpProviderError, run_provider
+from utils.region import get_region
 
 
 LINE = "=" * 62
@@ -48,9 +48,12 @@ def print_config(provider: str) -> None:
     print("KONFIGURASI SERP")
     print(LINE)
 
+    zona = get_region(SERP_REGION)
+
     print(f"Provider aktif   : {provider}")
-    print(f"Negara (gl)      : {SERP_COUNTRY}")
-    print(f"Bahasa (hl)      : {SERP_LANGUAGE}")
+    print(f"Zona             : {SERP_REGION}")
+    print(f"Negara (gl)      : {zona['gl']}")
+    print(f"Bahasa (hl)      : {zona['hl']}")
     print(f"SERPER_API_KEY   : {mask(SERPER_API_KEY)}")
     print(f"GOOGLE_CSE_KEY   : {mask(GOOGLE_CSE_KEY)}")
     print(f"GOOGLE_CSE_CX    : {mask(GOOGLE_CSE_CX)}")
