@@ -35,12 +35,19 @@ ROLE_PRIORITY = (
     "meta_description",
     "meta_keywords",
     "h1",
+    # Isi halaman didahulukan atas perkakas situsnya. Kalau prosesnya
+    # berhenti di tengah, yang sudah jadi harus artikel dan ulasannya,
+    # bukan label menunya.
     "heading",
     "paragraph",
     "faq_question",
     "faq_answer",
     "review_text",
     "review_author",
+    # Keduanya menerangkan teks yang ditulis di atasnya, jadi
+    # gilirannya berdiri sesudah giliran yang menulis teks itu.
+    "review_tag",
+    "card_title",
     "caption",
     "list_item",
     "table_cell",
@@ -64,6 +71,70 @@ JSON_OVERHEAD_PER_TEXT = 8
 # ringan jawabannya tapi berat promptnya, dan itulah yang terjadi
 # pada peran yang teks lamanya ikut dikirim sebagai contoh.
 PROMPT_OVERHEAD_PER_TEXT = 12
+
+# Berapa banyak teks yang boleh diminta dalam satu giliran.
+#
+# Jatah karakter saja tidak cukup menjaga giliran tetap sanggup
+# dijawab. Label menu panjangnya 16 karakter, jadi 243 di antaranya
+# masih muat di jatah 7000 karakter - dan giliran seperti itulah yang
+# terukur gagal: model menutup daftarnya di teks ke-169, lalu dua kali
+# diminta ulang tanpa menambah satu pun.
+#
+# Yang membuatnya berat bukan panjang jawabannya melainkan banyaknya
+# butir yang harus dihitung model sampai tuntas. Giliran 86 butir di
+# run yang sama selesai hampir penuh, giliran 243 butir tidak pernah.
+# Batasnya dipasang di antara keduanya.
+MAX_ITEMS_PER_BATCH = 80
+
+# Peran yang daftarnya dipasangkan menurut nomor urut, jadi tidak
+# boleh terbelah dua giliran. Jawaban FAQ ke-N adalah jawaban untuk
+# pertanyaan ke-N, dan pasangan itu putus begitu daftarnya dipotong.
+UNSPLIT_ROLES = ("faq_question", "faq_answer")
+
+
+# Peran yang WAJIB ditulis di giliran terpisah, sesudah pasangannya.
+#
+# Ini perbaikan untuk cacat yang paling kelihatan di halaman jadi:
+# "ditanya A dijawab B". Terukur pada halaman terbit - pertanyaan
+# "Bagaimana proses deposit di TIMAH33?" dijawab "Proses login di
+# TIMAH33 dilakukan secara otomatis melalui browser", sementara
+# kalimat yang menjawabnya justru terpasang di kartu lain.
+#
+# Sebabnya bukan model yang bodoh, melainkan cara memintanya. Selama
+# faq_question dan faq_answer muat di satu giliran, keduanya diminta
+# dalam SATU objek JSON: model menulis tujuh pertanyaan berturut-turut,
+# lalu tujuh jawaban berturut-turut, dan harus mengingat sendiri
+# jawaban keempat itu milik pertanyaan yang mana. Model 4B tidak
+# sanggup, dan urutannya melenceng di tengah daftar.
+#
+# Dipisah, soalnya hilang sama sekali. Pertanyaannya selesai lebih
+# dulu, lalu giliran berikutnya menerima daftar bernomor lewat bagian
+# "Pertanyaan Yang Harus Dijawab Berurutan" di prompt - jawaban ke-N
+# ditulis sambil melihat pertanyaan ke-N.
+#
+# Harganya satu giliran tambahan. Awalan promptnya sama persis, jadi
+# yang dibayar cuma jawabannya sendiri.
+AFTER_ROLES = {
+    "faq_answer": "faq_question",
+    # Deskripsi ikut dengan alasan yang sama, dan gejalanya sama
+    # kelihatannya: pengguna menemukan title dan meta description
+    # berbunyi hal yang sama.
+    #
+    # Selama keduanya diminta dalam satu objek JSON, model menulis
+    # title lalu langsung menulis deskripsi di baris berikutnya - dan
+    # yang paling mungkin ditulis sesudah sebuah kalimat adalah
+    # kalimat itu lagi, sedikit lebih panjang. Ditulis di giliran
+    # terpisah, titlenya sudah jadi dan berdiri di bagian "Sudut
+    # Pandang Halaman Ini", jadi deskripsinya ditulis sambil
+    # melihatnya - dan bisa diperintahkan untuk TIDAK mengulangnya.
+    "meta_description": "title",
+    # Tag ulasan dan judul kartu menerangkan teks milik peran lain.
+    # Ditulis di giliran yang sama, keduanya cuma bisa menebak apa
+    # yang sedang diterangkannya - dan yang keluar adalah tag yang
+    # setopik halaman tapi tidak menandai ulasan di atasnya.
+    "review_tag": "review_text",
+    "card_title": "paragraph",
+}
 
 
 def role_order(spec: dict) -> list[str]:
@@ -125,7 +196,7 @@ def slice_rule(rule: dict, mulai: int, jumlah: int) -> dict:
     potongan["count"] = jumlah
     potongan["offset"] = mulai
 
-    for kunci in ("samples", "budgets"):
+    for kunci in ("samples", "budgets", "floors", "partners"):
         nilai = rule.get(kunci)
 
         if nilai:
@@ -164,9 +235,10 @@ def plan_batches(
     berjalan: dict = {}
     jawab = 0
     tanya = 0
+    butir = 0
 
     def tutup() -> None:
-        nonlocal berjalan, jawab, tanya
+        nonlocal berjalan, jawab, tanya, butir
 
         if berjalan:
             batches.append(berjalan)
@@ -174,12 +246,42 @@ def plan_batches(
         berjalan = {}
         jawab = 0
         tanya = 0
+        butir = 0
 
     for role in role_order(spec):
         rule = spec[role]
 
         if rule["count"] < 1:
             continue
+
+        # Peran berpasangan selalu MEMULAI giliran baru, tidak pernah
+        # menumpang di ekor giliran orang lain.
+        #
+        # Terukur, dan ini penyebab pertanyaan FAQ yang terbit kosong:
+        # satu giliran berisi 3 heading, 15 paragraf, lalu 7
+        # pertanyaan di ekornya. Paragrafnya panjang-panjang, model
+        # kehabisan napas sebelum sampai ke daftar terakhir, dan yang
+        # kembali cuma 5 dari 7 pertanyaan. Diminta ulang dua kali,
+        # tetap 5 - karena permintaan ulangnya menumpang di ekor yang
+        # sama.
+        #
+        # Sendirian di gilirannya, daftar itu yang pertama ditulis
+        # model, bukan yang terakhir.
+        if role in UNSPLIT_ROLES and berjalan:
+            tutup()
+
+        # Peran yang harus melihat jawaban peran lain ditutup dulu
+        # gilirannya, supaya pasangannya sudah selesai ditulis waktu
+        # gilirannya sendiri berangkat.
+        #
+        # Diperiksa di ATAS cabang SINGLE_ROLES, bukan di bawahnya.
+        # Title dan meta_description dua-duanya peran bertekstunggal,
+        # dan pemeriksaan yang berdiri di bawah cabang itu tidak
+        # pernah dijalankan untuk keduanya.
+        pasangan = AFTER_ROLES.get(role)
+
+        if pasangan and pasangan in berjalan:
+            tutup()
 
         if role in SINGLE_ROLES:
             # Jawabannya satu teks, sependek judul atau deskripsi.
@@ -190,15 +292,63 @@ def plan_batches(
                 rule.get("max_length_any") or rule["max_length"]
             ) + JSON_OVERHEAD_PER_TEXT
 
-            if berjalan and jawab + biaya > answer_budget:
+            if berjalan and (
+                jawab + biaya > answer_budget
+                or butir + rule["count"] > MAX_ITEMS_PER_BATCH
+            ):
                 tutup()
 
             berjalan[role] = slice_rule(rule, 0, rule["count"])
             jawab += biaya
+            butir += rule["count"]
 
             continue
 
+        # Judul dan deskripsi diselesaikan sendirian di giliran
+        # pertama, sebelum satu paragraf pun ditulis.
+        #
+        # Keduanya yang menentukan sudut pandang seluruh halaman, dan
+        # sudut pandang itu baru bisa diikuti kalau sudah ada. Selama
+        # judul dan paragraf ditulis dalam satu permintaan yang sama,
+        # 27 paragraf, 7 heading, dan 3 pertanyaan FAQ di giliran
+        # pertama disusun tanpa pernah melihat judul yang jadi -
+        # masing-masing memilih sudutnya sendiri, dan halaman terbit
+        # sebagai kumpulan tulisan yang kebetulan setopik.
+        #
+        # Sesudah dipisah, tiap giliran berikutnya menerima judul dan
+        # deskripsi yang sudah jadi lewat bagian "Sudut Pandang
+        # Halaman Ini", termasuk giliran yang menulis paragraf.
+        if berjalan and all(
+            nama in SINGLE_ROLES for nama in berjalan
+        ):
+            tutup()
+
         harga = slot_costs(rule)
+
+        # Peran berpasangan tidak boleh terbelah dua giliran.
+        #
+        # Jawaban FAQ dipasangkan ke pertanyaannya menurut nomor urut,
+        # dan pasangan itu putus begitu daftarnya dipotong di tengah.
+        # Terukur di halaman jadi: enam jawaban terakhir jatuh di
+        # giliran yang menerima daftar pertanyaannya, dan keenamnya
+        # menjawab dengan tepat; satu jawaban yang tertinggal di
+        # giliran sebelumnya ditulis berbarengan dengan 41 teks lain -
+        # pertanyaannya "Cara daftar akun di ASOKASLOT?", jawabannya
+        # tentang enkripsi dan verifikasi dua langkah.
+        #
+        # Kalau tidak muat di sisa jatah, gilirannya ditutup dulu,
+        # bukan daftarnya yang dipotong.
+        if role in UNSPLIT_ROLES and berjalan:
+            butuh_jawab = sum(sisi for sisi, _ in harga)
+            butuh_tanya = sum(sisi for _, sisi in harga)
+
+            if (
+                jawab + butuh_jawab > answer_budget
+                or tanya + butuh_tanya > prompt_budget
+                or butir + rule["count"] > MAX_ITEMS_PER_BATCH
+            ):
+                tutup()
+
         mulai = 0
 
         while mulai < rule["count"]:
@@ -212,6 +362,7 @@ def plan_batches(
                 penuh = (
                     jawab + tambah_jawab + sisi_jawab > answer_budget
                     or tanya + tambah_tanya + sisi_tanya > prompt_budget
+                    or butir + muat >= MAX_ITEMS_PER_BATCH
                 )
 
                 # Giliran yang masih kosong selalu mengambil minimal
@@ -232,9 +383,14 @@ def plan_batches(
             berjalan[role] = slice_rule(rule, mulai, muat)
             jawab += tambah_jawab
             tanya += tambah_tanya
+            butir += muat
             mulai += muat
 
-            if jawab >= answer_budget or tanya >= prompt_budget:
+            if (
+                jawab >= answer_budget
+                or tanya >= prompt_budget
+                or butir >= MAX_ITEMS_PER_BATCH
+            ):
                 tutup()
 
     tutup()

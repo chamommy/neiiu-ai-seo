@@ -120,19 +120,61 @@ def string_spans(source: str):
         index += 1
 
 
+# Awalan yang menandai sebuah string memang alamat, berapa pun
+# panjangnya dan apa pun isinya sesudah itu.
+URL_START = re.compile(r"^(?:https?:|//|/|\./|\.\./)", re.I)
+
+
 def is_address(text: str) -> bool:
     """
     Apakah string ini alamat atau pengenal, bukan kalimat.
+
+    Garis miring saja tidak cukup jadi alasan. Blok data produk milik
+    template adalah satu string JavaScript berisi JSON puluhan ribu
+    karakter, lengkap dengan \\/ di dalamnya, dan aturan lama
+    memvonisnya alamat lalu melewatinya utuh - membawa serta 130 nama
+    brand lama yang sebagiannya tampil di layar sebagai nama produk.
+
+    Yang membedakan alamat dari kalimat bukan garis miringnya,
+    melainkan tidak adanya spasi. Alamat dan pengenal ditulis rapat;
+    kalimat tidak.
     """
     clean = text.strip()
 
     if not clean:
         return True
 
-    if "/" in clean or "\\" in clean:
+    if SLUG.match(clean):
         return True
 
-    return bool(SLUG.match(clean))
+    if URL_START.match(clean) or "://" in clean:
+        return True
+
+    return ("/" in clean or "\\" in clean) and " " not in clean
+
+
+def menambah_pembatas(asli: str, baru: str) -> bool:
+    """
+    Apakah nilai baru MENAMBAH tanda kutip atau garis miring balik.
+
+    Tanda kutip yang tidak diloloskan akan menutup stringnya lebih
+    awal dan mengubah sisa berkas jadi kode rusak, jadi nilai yang
+    menyisipkannya memang harus ditolak.
+
+    Yang diperiksa penambahannya, bukan keberadaannya. Menolak semua
+    yang MEMUAT tanda itu terlalu kasar, dan biayanya terukur di
+    halaman jadi: blok data produk milik template berisi JSON yang
+    seluruhnya ditulis di dalam satu string JavaScript, sehingga
+    isinya penuh \\" sejak awal. Nama brand lama di dalamnya - 130
+    kemunculan, terbawa sampai ke nama produk yang tampil di layar -
+    tidak pernah tersentuh karena hasil penggantiannya selalu memuat
+    tanda itu, padahal tidak satu pun ditambahkan oleh penggantian.
+    """
+    for tanda in QUOTES + "\\":
+        if baru.count(tanda) > asli.count(tanda):
+            return True
+
+    return False
 
 
 def config_key(source: str, quote_at: int) -> str:
@@ -230,9 +272,7 @@ def script_edits(
             if not baru or baru == asli:
                 continue
 
-            # Tanda kutip di dalam nilai baru akan menutup stringnya
-            # lebih awal dan mengubah sisa berkas jadi kode rusak.
-            if any(tanda in baru for tanda in QUOTES) or "\\" in baru:
+            if menambah_pembatas(asli, baru):
                 continue
 
             edits.append(

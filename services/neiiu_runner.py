@@ -12,6 +12,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from database.app_db import refund_one_token
+from database.neiiu_history_db import load_used_text, save_used_text
 from database.neiiu_jobs_db import (
     finish_job,
     get_job,
@@ -185,6 +186,17 @@ def run_job(job_id: int) -> None:
                 int(job["user_id"]),
             )
 
+        # Teks yang sudah terbit di halaman-halaman sebelumnya, dibaca
+        # di sini karena hanya lapisan ini yang tahu job ini milik
+        # siapa. Job sendiri dikecualikan supaya job yang diulang
+        # tidak menghitung dirinya sendiri sebagai halaman lain.
+        riwayat = load_used_text(
+            user_id=int(job["user_id"]),
+            keyword=job["keyword"],
+            template_id=int(job["template_id"] or 0),
+            exclude_job=job_id,
+        )
+
         result = run_neiiu(
             keyword=job["keyword"],
             brand_name=job["brand_name"],
@@ -201,8 +213,34 @@ def run_job(job_id: int) -> None:
             template_brand=job["template_brand"],
             design_refs=split_refs(job["design_refs"]),
             cta_url=job["cta_url"],
+            article_words=int(job["article_words"] or 0),
+            assets={
+                "logo": job["logo_url"],
+                "favicon": job["favicon_url"],
+                "poster": job["poster_url"],
+            },
+            history=riwayat,
             on_event=on_event,
         )
+
+        # Isi yang baru terbit ikut diingat, supaya halaman berikutnya
+        # tidak mengulanginya. Dicatat SESUDAH pipeline selesai: yang
+        # layak diingat cuma teks yang benar-benar jadi halaman, bukan
+        # jawaban model yang mungkin dibatalkan di tengah jalan.
+        #
+        # Kegagalan mencatat tidak boleh menggagalkan job. Halamannya
+        # sudah jadi dan sudah dibayar; yang hilang cuma ingatannya.
+        try:
+            save_used_text(
+                user_id=int(job["user_id"]),
+                job_id=job_id,
+                keyword=job["keyword"],
+                brand_name=job["brand_name"],
+                template_id=int(job["template_id"] or 0),
+                content=result.get("content") or {},
+            )
+        except Exception:
+            pass
 
         finish_job(
             job_id=job_id,

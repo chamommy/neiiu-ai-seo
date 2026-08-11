@@ -28,6 +28,7 @@ ulang tiap kali generate.
 import json
 
 from generators.brand_swap import build_pattern, match_case
+from utils.text import author_name
 from generators.schema_generator import json_for_html
 
 
@@ -65,6 +66,62 @@ TEXT_KEYS = {
     "articleSection",
     "keywords",
 }
+
+
+# Kunci JSON-LD yang isinya alamat gambar, dipetakan ke peran gambar
+# yang diisi pengguna di formulir.
+#
+# Perlu diikutkan karena rich result memakai gambar dari SINI, bukan
+# dari <img> di badan halaman. Logo yang sudah diganti di header tapi
+# masih beralamat lama di Organization.logo membuat Google
+# menampilkan logo pemilik template sebelumnya di hasil pencarian.
+IMAGE_KEYS = {
+    "logo": "logo",
+    "image": "poster",
+    "thumbnailUrl": "poster",
+    "primaryImageOfPage": "poster",
+}
+
+
+def rewrite_images(node: dict, assets: dict | None) -> int:
+    """
+    Mengganti alamat gambar di satu simpul, apa pun bentuk nilainya.
+
+    Bentuknya tiga macam di data sungguhan: alamat polos, daftar
+    alamat, dan ImageObject dengan url di dalamnya. Ketiganya
+    dipertahankan bentuknya - yang tadinya daftar tetap daftar,
+    yang tadinya objek tetap objek.
+    """
+    if not assets:
+        return 0
+
+    diganti = 0
+
+    for kunci, peran in IMAGE_KEYS.items():
+        url = str((assets or {}).get(peran) or "").strip()
+
+        if not url or kunci not in node:
+            continue
+
+        nilai = node[kunci]
+
+        if isinstance(nilai, str):
+            node[kunci] = url
+        elif isinstance(nilai, list):
+            node[kunci] = [url]
+        elif isinstance(nilai, dict):
+            if "url" in nilai:
+                nilai["url"] = url
+            elif "contentUrl" in nilai:
+                nilai["contentUrl"] = url
+            else:
+                continue
+        else:
+            continue
+
+        diganti += 1
+
+    return diganti
 
 
 def as_list(value) -> list:
@@ -138,7 +195,11 @@ def rewrite_reviews(
         penulis = ulasan.get("author")
 
         if isinstance(penulis, dict) and index < len(authors):
-            penulis["name"] = authors[index]
+            # Namanya saja. Baris pengulas di halaman memuat nama,
+            # kota, dan bintang sekaligus; Person bernama "Bagus
+            # Setiawan — Semarang • ★★★★★" adalah nama yang tidak
+            # dipakai siapa pun, dan Google membacanya apa adanya.
+            penulis["name"] = author_name(authors[index])
             diganti += 1
 
         if index < len(dates):
@@ -181,6 +242,7 @@ def rewrite_node(
     brand: dict,
     dates: list[dict],
     pola=None,
+    assets: dict | None = None,
 ) -> int:
     """
     Menulis ulang satu simpul beserta seluruh cabangnya.
@@ -230,14 +292,19 @@ def rewrite_node(
     # mana pun ikut berganti - termasuk yang tipenya tidak dikenali
     # aturan di atas.
     diganti += swap_brand_text(node, pola, nama_situs)
+    diganti += rewrite_images(node, assets)
 
     for nilai in node.values():
         if isinstance(nilai, dict):
-            diganti += rewrite_node(nilai, content, brand, dates, pola)
+            diganti += rewrite_node(
+                nilai, content, brand, dates, pola, assets
+            )
         elif isinstance(nilai, list):
             for anak in nilai:
                 if isinstance(anak, dict):
-                    diganti += rewrite_node(anak, content, brand, dates, pola)
+                    diganti += rewrite_node(
+                        anak, content, brand, dates, pola, assets
+                    )
 
     return diganti
 
@@ -322,6 +389,7 @@ def jsonld_edits(
     brand: dict,
     dates: list[dict],
     old_brand: str = "",
+    assets: dict | None = None,
 ) -> tuple[list[dict], int]:
     """
     Menyusun penggantian untuk seluruh blok JSON-LD di halaman.
@@ -338,7 +406,9 @@ def jsonld_edits(
         if blok["data"] is None:
             continue
 
-        diganti = rewrite_node(blok["data"], content, brand, dates, pola)
+        diganti = rewrite_node(
+            blok["data"], content, brand, dates, pola, assets
+        )
 
         if not diganti:
             continue

@@ -1,3 +1,23 @@
+from generators.template_slots import HEAD_BUDGET, HEAD_FLOOR
+
+
+# Rentang panjang title dan meta description, satu sumber untuk dua
+# jalur yang berbeda.
+#
+# Halaman yang dirakit dari nol dan halaman yang mengisi template
+# pengguna dulu memakai angka sendiri-sendiri, dan angkanya tidak sama:
+# title dipatok 70 di satu tempat dan 60 di tempat lain, lalu dipotong
+# lagi jadi 62 waktu nama brand ditambal. Yang terbit karena itu bukan
+# halaman yang salah, melainkan dua halaman dengan aturan berbeda dari
+# satu perintah yang sama.
+TITLE_MIN = HEAD_FLOOR["title"]
+TITLE_MAX = HEAD_BUDGET["title"]
+META_MIN = HEAD_FLOOR["meta_description"]
+META_MAX = HEAD_BUDGET["meta_description"]
+
+# Kelonggaran plafon schema terhadap batas yang diminta di prompt.
+SCHEMA_HEADROOM = 1.3
+
 SEO_ACTION_PLAN_SCHEMA = {
     "type": "object",
     "properties": {
@@ -139,13 +159,22 @@ SERP_INSIGHT_SCHEMA = {
 CONTENT_PLAN_SCHEMA = {
     "type": "object",
     "properties": {
+        # Plafonnya dilonggarkan 30% dari batas yang diminta di
+        # prompt, sama seperti di generators/template_filler.py.
+        # Grammar memotong string tepat di batasnya tanpa tahu apa-apa
+        # soal kata; yang memotong sungguhan bekerja belakangan, di
+        # tempat yang tahu di mana kata berakhir. Lantai tidak
+        # dilonggarkan - teks yang kependekan tidak bisa diperbaiki
+        # tahap mana pun.
         "title": {
             "type": "string",
-            "maxLength": 70,
+            "minLength": TITLE_MIN,
+            "maxLength": int(TITLE_MAX * SCHEMA_HEADROOM),
         },
         "meta_description": {
             "type": "string",
-            "maxLength": 165,
+            "minLength": META_MIN,
+            "maxLength": int(META_MAX * SCHEMA_HEADROOM),
         },
         "slug": {
             "type": "string",

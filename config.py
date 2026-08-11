@@ -193,6 +193,29 @@ AI_CONTEXT_LENGTH = int(
     )
 )
 
+# Seberapa bebas model memilih kata berikutnya.
+#
+# Dulu dipatok nol, dan nol berarti model selalu mengambil kata yang
+# paling mungkin. Untuk satu halaman itu terdengar aman; untuk halaman
+# KEDUA dari template yang sama, akibatnya terukur - dua run dengan
+# keyword dan brand yang sama menghasilkan ulasan yang sama huruf per
+# huruf, dan judul yang cuma beda tanda hubung. Membuat ulang halaman
+# jadi tidak ada gunanya.
+#
+# 0,6 diukur di mesin ini dengan prompt yang sama dijalankan dua kali:
+# kalimat ulasannya 92% berbeda dan judulnya 62% berbeda, dihitung per
+# frasa tiga kata. Menaikkannya ke 0,9 tidak menambah perbedaan yang
+# berarti (0,92 dan 0,69) tapi menambah peluang model melantur.
+#
+# Bentuk JSON-nya tidak ikut terancam berapa pun angkanya: yang
+# menjaga strukturnya grammar dari JSON Schema, bukan suhu.
+AI_TEMPERATURE = float(
+    os.getenv(
+        "AI_TEMPERATURE",
+        "0.6",
+    )
+)
+
 # Jawaban AI diambil secara streaming, jadi batas waktu ini bukan
 # batas total, melainkan jeda maksimal antar token.
 #
@@ -212,6 +235,46 @@ AI_CONNECT_TIMEOUT_SECONDS = int(
     os.getenv(
         "AI_CONNECT_TIMEOUT_SECONDS",
         "15",
+    )
+)
+
+# Berapa lapisan model yang dititipkan ke GPU. Nol berarti seluruhnya
+# di CPU.
+#
+# Nolnya bukan menyerah, tapi hasil pengukuran di mesin ini. GT 710
+# punya 2 GB dan sekitar 1 GB sudah dipakai desktop, sementara model
+# beserta KV cache-nya 4,7 GB - yang muat cuma 573 MB, kira-kira 12%.
+# Sisa yang 88% tetap di CPU, dan setiap token harus menunggu bagian
+# kecil yang tertinggal di kartu DDR3 berkecepatan ~14 GB/s dengan
+# tenaga hitung jauh di bawah i3-12100F.
+#
+# Diukur dengan prompt 4875 token, sebesar prompt asli saat mengisi
+# template:
+#
+#   dengan GPU  : baca  4,3 tok/s | tulis 2,95 tok/s | 1166 detik
+#   tanpa GPU   : baca 50,7 tok/s | tulis 5,13 tok/s |  106 detik
+#
+# Sebelas kali lebih cepat tanpa kartunya. Yang paling berubah adalah
+# membaca prompt, dan itu bagian terbesar: satu giliran pengisian
+# template menghabiskan 573 detik hanya untuk membaca, sebelum satu
+# kata pun ditulis.
+#
+# Kalau kartunya diganti dengan yang muat memuat seluruh model, isi
+# AI_GPU_LAYERS dengan 999 di .env supaya semua lapisan kembali ke GPU.
+AI_GPU_LAYERS = int(
+    os.getenv(
+        "AI_GPU_LAYERS",
+        "0",
+    )
+)
+
+# Ollama memakai jumlah core fisik kalau tidak diberi tahu. Di mesin
+# ini itu 4, dan mengangkatnya ke 8 thread logis terukur menaikkan
+# kecepatan baca prompt dari 37,5 ke 50,7 tok/s.
+AI_THREADS = int(
+    os.getenv(
+        "AI_THREADS",
+        str(os.cpu_count() or 4),
     )
 )
 

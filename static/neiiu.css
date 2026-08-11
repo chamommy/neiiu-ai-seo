@@ -352,6 +352,54 @@
     padding: 8px 0;
 }
 
+/* kotak konfirmasi
+
+   Bentuknya memakai .popup-dialog, .popup-actions, dan .popup-button
+   dari style.css, kelas yang sama dengan popup di halaman chat, supaya
+   kedua halaman tidak punya dua gaya konfirmasi yang berbeda. Yang
+   ditambahkan di sini cuma bagian yang khas <dialog>: latar belakang
+   milik browser dan beberapa sifat bawaannya yang perlu ditimpa. */
+
+.ask {
+    max-width: calc(100vw - 40px);
+    margin: auto;
+}
+
+.ask::backdrop {
+    background: rgba(0, 0, 0, 0.62);
+}
+
+.ask form {
+    margin: 0;
+}
+
+.ask[open] {
+    animation: ask-masuk 0.14s ease-out;
+}
+
+@keyframes ask-masuk {
+    from {
+        opacity: 0;
+        transform: translateY(-8px) scale(0.98);
+    }
+
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+.ask .popup-button:focus-visible {
+    outline: 2px solid var(--green);
+    outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ask[open] {
+        animation: none;
+    }
+}
+
 @media (max-width: 640px) {
     .neiiu-wrap {
         padding: 20px 16px 60px;
@@ -359,5 +407,9 @@
 
     .card {
         padding: 18px;
+    }
+
+    .ask .popup-button {
+        flex: 1;
     }
 }

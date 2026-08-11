@@ -121,6 +121,26 @@ def init_jobs_db() -> None:
                 "ADD COLUMN cta_url TEXT NOT NULL DEFAULT ''"
             )
 
+        # Target panjang blok artikel, dalam kata. Nol berarti pakai
+        # panjang contoh artikel di knowledge/gaya_artikel.txt apa
+        # adanya, jadi job lama yang kolomnya baru ditambahkan tetap
+        # berperilaku persis seperti sebelum kolom ini ada.
+        if "article_words" not in columns:
+            db.execute(
+                "ALTER TABLE neiiu_jobs "
+                "ADD COLUMN article_words INTEGER NOT NULL DEFAULT 0"
+            )
+
+        # Alamat gambar pengganti: logo, favicon, dan poster. Kosong
+        # berarti gambar template dibiarkan seperti aslinya, yaitu
+        # perilaku setiap job sebelum kolom ini ada.
+        for kolom in ("logo_url", "favicon_url", "poster_url"):
+            if kolom not in columns:
+                db.execute(
+                    f"ALTER TABLE neiiu_jobs "
+                    f"ADD COLUMN {kolom} TEXT NOT NULL DEFAULT ''"
+                )
+
 
 def create_job(
     user_id: int,
@@ -139,6 +159,10 @@ def create_job(
     template_brand: str = "",
     design_refs: str = "",
     cta_url: str = "",
+    article_words: int = 0,
+    logo_url: str = "",
+    favicon_url: str = "",
+    poster_url: str = "",
 ) -> int:
     now = utc_now()
 
@@ -150,11 +174,13 @@ def create_job(
                 provider, crawl_limit, serp_limit,
                 reference_url, use_cache, analyze_only,
                 region, city, template_id, template_brand,
-                design_refs, cta_url,
+                design_refs, cta_url, article_words,
+                logo_url, favicon_url, poster_url,
                 status, created_at, updated_at
             )
             VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?,
                 'queued', ?, ?
             )
             """,
@@ -175,6 +201,10 @@ def create_job(
                 template_brand,
                 design_refs,
                 cta_url,
+                int(article_words),
+                logo_url,
+                favicon_url,
+                poster_url,
                 now,
                 now,
             ),

@@ -281,8 +281,6 @@ def print_result(result: dict) -> None:
     print("Isi folder:")
     print("  index.html      — landing page kanonik")
     print("  amp/index.html  — versi AMP")
-    print("  ANALISIS.md     — kenapa rank 1-10 bisa naik")
-    print("  report.json     — seluruh data mentah")
     print(
         "\nSebelum diunggah, ganti SITE_BASE_URL di .env supaya "
         "canonical memakai domain asli."
@@ -385,6 +383,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--article-words",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Target panjang blok artikel dalam kata. Kosong atau 0 "
+            "berarti mengikuti panjang contoh di "
+            "knowledge/gaya_artikel.txt"
+        ),
+    )
+
+    parser.add_argument(
         "--color",
         type=int,
         default=None,
@@ -441,6 +451,7 @@ def main() -> int:
             analyze_only=args.analyze_only,
             design_refs=args.design_ref,
             cta_url=args.cta_url,
+            article_words=args.article_words,
             color_variant=args.color,
             plain=args.plain,
             kit_from_ref=args.kit_from_ref,

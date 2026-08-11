@@ -58,6 +58,7 @@ from database.ip_allowlist_db import (
     list_ips,
     set_enabled,
 )
+from database.neiiu_history_db import forget_job, init_history_db
 from database.neiiu_jobs_db import (
     create_job,
     delete_job,
@@ -76,6 +77,7 @@ from database.neiiu_templates_db import (
     list_templates,
     read_template_files,
 )
+from generators.template_assets import UnsafeAssetUrl, clean_assets
 from generators.template_scanner import TemplateTooDeep, scan
 from generators.template_slots import build_slot_map
 from serp.serp_search import slugify
@@ -324,12 +326,27 @@ class NeiiuJobRequest(BaseModel):
     design_refs: str = Field(default="", max_length=1000)
     # Tujuan seluruh tombol login, daftar, dan bilah mengambang.
     cta_url: str = Field(default="", max_length=300)
+    # Alamat gambar pengganti di template unggahan. Kosong berarti
+    # gambar template dipakai apa adanya. Bentuknya diperiksa di
+    # generators/template_assets.py, bukan di sini, supaya aturan
+    # alamat yang boleh dipasang cuma ditulis di satu tempat.
+    logo_url: str = Field(default="", max_length=500)
+    favicon_url: str = Field(default="", max_length=500)
+    poster_url: str = Field(default="", max_length=500)
+    # Target panjang blok artikel, dalam kata. Nol berarti
+    # mengikuti panjang contoh di knowledge/gaya_artikel.txt.
+    # Batas atasnya bukan selera: model kecil makin sering
+    # mengulang kalimat begitu diminta puluhan paragraf sekaligus,
+    # dan yang mengulang dibatalkan penyaring - artikel yang
+    # diminta terlalu panjang justru terbit lebih pendek.
+    article_words: int = Field(default=0, ge=0, le=5000)
 
 
 @app.on_event("startup")
 def startup() -> None:
     init_db()
     init_jobs_db()
+    init_history_db()
     init_ip_db()
     init_templates_db()
 
@@ -959,11 +976,14 @@ def admin_reset_password(
 # Nama file yang boleh diambil dari folder hasil. Daftar putih
 # ini yang mencegah folder output dipakai untuk membaca file lain
 # di disk lewat nama yang dikarang.
+#
+# report.json tidak ada di sini karena generator tidak lagi menulisnya.
+# ANALISIS.md dan analysis.json tetap, tapi keduanya cuma terbit di mode
+# analisis saja - mode itu memang tidak menghasilkan halaman.
 DOWNLOADABLE = {
     "index.html": ("index.html", "text/html"),
     "amp.html": ("amp/index.html", "text/html"),
     "analisis.md": ("ANALISIS.md", "text/markdown"),
-    "report.json": ("report.json", "application/json"),
     "analysis.json": ("analysis.json", "application/json"),
 }
 
@@ -1081,6 +1101,25 @@ def api_neiiu_create_job(
             detail=str(error),
         ) from error
 
+    # Alamat gambar diperiksa di sini juga, bukan cuma di pipeline.
+    # Salah ketik alamat adalah kesalahan yang paling murah diperbaiki
+    # saat formulirnya masih terbuka; kalau baru ketahuan waktu job
+    # jalan, pengguna menunggu giliran lebih dulu untuk sebuah pesan
+    # yang sudah bisa dibaca sekarang.
+    try:
+        clean_assets(
+            {
+                "logo": payload.logo_url,
+                "favicon": payload.favicon_url,
+                "poster": payload.poster_url,
+            }
+        )
+    except UnsafeAssetUrl as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
     # Kepemilikan template diperiksa sebelum job dibuat. Tanpa ini,
     # siapa pun bisa memakai template pengguna lain hanya dengan
     # menebak nomornya, dan isinya akan ikut terbaca lewat hasil
@@ -1127,6 +1166,10 @@ def api_neiiu_create_job(
         template_brand=payload.template_brand.strip(),
         design_refs=payload.design_refs.strip(),
         cta_url=payload.cta_url.strip(),
+        article_words=payload.article_words,
+        logo_url=payload.logo_url.strip(),
+        favicon_url=payload.favicon_url.strip(),
+        poster_url=payload.poster_url.strip(),
     )
 
     submit_job(job_id)
@@ -1480,6 +1523,7 @@ def api_neiiu_delete_job(
 
     try:
         delete_job(job_id, int(user["id"]))
+        forget_job(job_id)
 
     except ValueError as error:
         raise HTTPException(

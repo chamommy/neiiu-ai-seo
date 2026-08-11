@@ -9,6 +9,7 @@ halaman yang sedang menang di keyword itu sendiri.
 
 import re
 
+from ai.schemas import META_MAX, META_MIN, TITLE_MAX, TITLE_MIN
 from parser.html_parser import parse_html
 
 
@@ -46,19 +47,23 @@ def validate_page(
 
     keyword_lower = keyword.lower()
 
+    # Rentangnya diambil dari sumber yang sama dengan yang diminta ke
+    # AI. Angka sendiri di sini pernah membuat pemeriksa menolak
+    # halaman yang panjangnya persis seperti yang diperintahkan -
+    # laporan yang menghitung keberhasilan sebagai kegagalan.
     check_length(
         "Title",
         page["title_length"],
-        30,
-        62,
+        TITLE_MIN,
+        TITLE_MAX,
         problems,
     )
 
     check_length(
         "Meta description",
         page["meta_description_length"],
-        120,
-        165,
+        META_MIN,
+        META_MAX,
         problems,
     )
 

@@ -355,6 +355,33 @@ def build_blueprint(
         and page.get("usable", True)
     ]
 
+    # Halaman yang boleh menyumbang KATA. Daftar ini tidak pernah
+    # jatuh balik ke halaman kotor, dan itu bedanya dengan ok_pages
+    # di bawah.
+    #
+    # Pemisahan ini lahir dari halaman yang terbit dengan pertanyaan
+    # FAQ "Seberapa Pancasila Dirimu?" di halaman slot. Keyword
+    # "slot gacor" waktu itu memunculkan enam situs pemerintah dan
+    # kampus yang dibajak. Isi judinya cloaking - cuma dilayani ke
+    # Googlebot - jadi yang terbaca crawler ini justru isi asli
+    # situsnya: pelatihan ASN, kebijakan publik, Pancasila.
+    #
+    # check_usability() menangkap keenamnya dengan benar. Yang
+    # membocorkannya adalah baris fallback di bawah: begitu tidak ada
+    # halaman bersih tersisa, ok_pages diisi ulang dengan SELURUH
+    # halaman, lalu dipakai lagi untuk memanen entity, pertanyaan
+    # FAQ, dan tema heading. Satu-satunya pertanyaan yang terpanen
+    # hari itu adalah milik situs LAN RI, dan prompt meneruskannya ke
+    # model di bawah judul "Pertanyaan Yang Harus Dijawab Di FAQ".
+    # Model menurut. Ia tidak mengarang - ia disuruh.
+    #
+    # Fallbacknya sendiri tetap ada karena alasannya masih benar
+    # untuk ANGKA. Yang keliru cuma memakai keringanan yang sama
+    # untuk kosakata: median yang meragukan menghasilkan target yang
+    # meleset, sedangkan kata yang salah topik terbit di halaman dan
+    # dibaca orang.
+    clean_pages = list(ok_pages)
+
     # Kalau tidak ada satu pun halaman yang layak, target tetap
     # dihitung dari apa yang ada. Angka yang meragukan masih lebih
     # berguna daripada tidak ada angka sama sekali, asal statusnya
@@ -423,15 +450,19 @@ def build_blueprint(
         if page["signals"]["table_count"] > 0:
             table_pages += 1
 
+    total_ok = len(ok_pages) or 1
+
+    # Mulai di sini semuanya kosakata, jadi sumbernya clean_pages.
+    # Kalau tidak ada halaman bersih, ketiganya terbit kosong - dan
+    # kosong memang jawaban yang benar. Tidak punya bahan lebih baik
+    # daripada punya bahan dari halaman yang topiknya lain.
+    faq_questions: list[str] = []
+
+    for page in clean_pages:
         entity_counter.update(
             page["entity"].get("found_entities", [])
         )
 
-    total_ok = len(ok_pages) or 1
-
-    faq_questions: list[str] = []
-
-    for page in ok_pages:
         faq_questions.extend(page["signals"]["faq"]["questions"])
 
     return {
@@ -494,8 +525,12 @@ def build_blueprint(
         # Tema dan heading diambil dari halaman bersih saja, supaya
         # kosakata halaman institusi yang dibajak tidak ikut jadi
         # acuan konten.
-        "heading_topics": collect_heading_topics(ok_pages, keyword),
-        "common_headings": collect_common_headings(ok_pages),
+        #
+        # Janji di kalimat itu dulu tidak ditepati persis waktu
+        # paling dibutuhkan: sumbernya ok_pages, yang tepat pada saat
+        # semua halaman kotor berisi seluruh halaman kotor.
+        "heading_topics": collect_heading_topics(clean_pages, keyword),
+        "common_headings": collect_common_headings(clean_pages),
         "competitor_questions": faq_questions[:25],
         "people_also_ask": serp.get("people_also_ask", []),
         "related_searches": serp.get("related_searches", []),

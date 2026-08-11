@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>NEIIU — Generator Landing Page</title>
     <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v=4">
-    <link rel="stylesheet" href="{{ url_for('static', path='/neiiu.css') }}?v=1">
+    <link rel="stylesheet" href="{{ url_for('static', path='/neiiu.css') }}?v=2">
 </head>
 <body class="neiiu-body">
 
@@ -163,6 +163,33 @@
                 </div>
 
                 <div class="field">
+                    <label for="articleWords">
+                        Panjang artikel (kata)
+                    </label>
+                    <input
+                        type="number"
+                        id="articleWords"
+                        name="articleWords"
+                        placeholder="1500"
+                        min="0"
+                        max="5000"
+                        step="100"
+                    >
+                    <span class="hint">
+                        Isi angka kalau artikelnya mau lebih panjang.
+                        Yang dilebarkan <b>isi paragraf yang sudah ada
+                        di templatemu</b> — tidak ada satu paragraf
+                        pun yang ditambahkan, jumlahnya tetap sama
+                        persis. <b>Kosongkan</b> berarti tiap paragraf
+                        ditulis sepanjang jatah aslinya. Satu paragraf
+                        paling banyak dilebarkan tiga kali lipat, jadi
+                        target yang melewati itu dilaporkan apa adanya
+                        di log. Makin panjang makin lama: sekitar 3
+                        menit tiap 1.000 kata di kecepatan sekarang.
+                    </span>
+                </div>
+
+                <div class="field">
                     <label for="provider">Sumber SERP</label>
                     <select id="provider" name="provider">
                         <option value="serper">Serper.dev (butuh API key)</option>
@@ -248,7 +275,84 @@
                         brand ini sendiri.
                     </span>
                 </div>
+
+                <div class="field" style="grid-column: 1 / -1">
+                    <label for="logoUrl">Link logo (opsional)</label>
+                    <input
+                        type="text"
+                        id="logoUrl"
+                        name="logoUrl"
+                        placeholder="https://cdn-mu.example/logo-baru.png"
+                        maxlength="500"
+                        autocomplete="off"
+                    >
+                    <span class="hint">
+                        Yang diganti gambar yang class, id, alt, atau
+                        nama berkasnya menyebut <b>logo</b>. Kalau
+                        template tidak menamai satu pun, yang dipakai
+                        gambar pertama di dalam
+                        <code>&lt;header&gt;</code> atau
+                        <code>&lt;nav&gt;</code>. Alamat di
+                        <code>Organization.logo</code> ikut berganti,
+                        supaya logo di hasil pencarian bukan logo
+                        pemilik template sebelumnya.
+                    </span>
+                </div>
+
+                <div class="field">
+                    <label for="faviconUrl">Link favicon (opsional)</label>
+                    <input
+                        type="text"
+                        id="faviconUrl"
+                        name="faviconUrl"
+                        placeholder="https://cdn-mu.example/favicon.ico"
+                        maxlength="500"
+                        autocomplete="off"
+                    >
+                    <span class="hint">
+                        Mengganti semua
+                        <code>&lt;link rel="icon"&gt;</code>,
+                        <code>shortcut icon</code>,
+                        <code>apple-touch-icon</code>, dan
+                        <code>mask-icon</code>.
+                    </span>
+                </div>
+
+                <div class="field">
+                    <label for="posterUrl">Link gambar poster (opsional)</label>
+                    <input
+                        type="text"
+                        id="posterUrl"
+                        name="posterUrl"
+                        placeholder="https://cdn-mu.example/poster.jpg"
+                        maxlength="500"
+                        autocomplete="off"
+                    >
+                    <span class="hint">
+                        Mengganti <code>og:image</code>,
+                        <code>twitter:image</code>, atribut
+                        <code>poster</code> milik video, lalu
+                        <b>semua gambar isi yang tersisa</b> —
+                        termasuk yang tidak menamai dirinya apa pun.
+                        Yang <b>tidak</b> ikut: gambar seukuran ikon
+                        (di bawah 64px atau ber-class
+                        <code>w-6</code>, <code>h-12</code>), berkas
+                        <code>.svg</code>, logo, favicon, dan isi blok
+                        iklan. Kalau ada satu gambar yang meleset,
+                        tandai sendiri di template dengan
+                        <code>data-neiiu="poster"</code> atau
+                        <code>data-neiiu-skip</code>.
+                    </span>
+                </div>
             </div>
+
+            <p class="hint" style="margin:2px 0 0">
+                Ketiganya cuma berlaku kalau Template dipilih, dan
+                cuma menukar alamat gambarnya — ukuran, posisi, dan
+                CSS-nya tetap milik templatemu. Isi alamat lengkap
+                yang diawali <code>https://</code>, atau alamat di
+                dalam situs sendiri yang diawali <code>/</code>.
+            </p>
 
             <div class="checks">
                 <label class="check">
@@ -348,7 +452,43 @@
 
 </main>
 
+<!--
+    Kotak konfirmasi. Dipakai menggantikan confirm() bawaan browser,
+    yang di Chrome muncul menempel di tepi atas jendela, jauh dari
+    tombol yang baru saja ditekan.
+
+    <dialog> dipilih supaya latarnya, kunci fokus, dan tombol Esc
+    datang dari browser. method="dialog" membuat kedua tombol menutup
+    sendiri dan mengisi returnValue. "Batal" sengaja ditaruh pertama
+    agar itu yang menerima fokus dan yang terpicu saat Enter ditekan.
+-->
+<dialog class="ask popup-dialog" id="askDialog">
+    <form method="dialog">
+        <h2 id="askTitle">Konfirmasi</h2>
+        <p id="askText"></p>
+
+        <div class="popup-actions">
+            <button
+                type="submit"
+                value="batal"
+                class="popup-button secondary"
+                id="askCancel"
+            >
+                Batal
+            </button>
+            <button
+                type="submit"
+                value="ya"
+                class="popup-button danger"
+                id="askOk"
+            >
+                Hapus
+            </button>
+        </div>
+    </form>
+</dialog>
+
 <script id="regionData" type="application/json">{{ regions | tojson }}</script>
-<script src="{{ url_for('static', path='/neiiu.js') }}?v=2"></script>
+<script src="{{ url_for('static', path='/neiiu.js') }}?v=5"></script>
 </body>
 </html>

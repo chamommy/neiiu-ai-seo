@@ -7,6 +7,721 @@ memberi ringkasan terstruktur jauh lebih akurat daripada
 menempelkan seluruh isi halaman kompetitor.
 """
 
+import hashlib
+import re
+
+from pathlib import Path
+
+from ai.schemas import META_MAX, META_MIN, TITLE_MAX, TITLE_MIN
+from utils.text import content_tokens
+
+
+# Contoh gaya milik pengguna. Isinya bukan bahan untuk disalin
+# melainkan penunjuk nada: panjang kalimat, cara membuka, cara
+# menutup, dan sudut pandang yang dipakai.
+#
+# Dipisah dua berkas karena dua slot ini punya batas panjang yang
+# jauh berbeda. Title dipatok TITLE_MAX karakter; contoh deskripsi
+# milik pengguna panjangnya 119-279 karakter dengan median 181, jadi
+# tidak satu pun bisa dipakai sebagai contoh title tanpa mengajari
+# model menulis dua kali lebih panjang dari ruang yang ada.
+KNOWLEDGE_DIR = Path(__file__).resolve().parent.parent / "knowledge"
+
+STYLE_FILES = {
+    "title": KNOWLEDGE_DIR / "gaya_title.txt",
+    "meta_description": KNOWLEDGE_DIR / "gaya_title_deskripsi.txt",
+}
+
+# Contoh artikel utuh milik pengguna, disimpan apa adanya.
+#
+# Berkasnya tidak bisa dibaca seperti dua berkas di atas. Yang itu
+# satu contoh per baris; yang ini artikel sungguhan - paragrafnya
+# dipisah baris kosong, judulnya diawali "#", subjudulnya "##", dan
+# nama brandnya ditebalkan dengan "**". Karena "#" di sini berarti
+# judul, bukan keterangan, berkasnya punya pembaca sendiri.
+ARTICLE_FILE = KNOWLEDGE_DIR / "gaya_artikel.txt"
+
+# Paragraf yang jauh lebih panjang dari jatah mana pun tidak dipakai
+# sebagai contoh. Model menulis sepanjang contohnya, dan yang
+# kepanjangan akan dipotong - jadi contoh yang terlalu panjang justru
+# mengajari model menulis untuk dibuang.
+#
+# Angkanya dulu 420, dipatok dari lebar slot template. Sejak artikel
+# punya bloknya sendiri, jatah paragrafnya justru diambil dari berkas
+# ini - paragraf terpanjangnya 456 karakter - jadi batas 420 membuang
+# contoh yang panjangnya PERSIS panjang yang diminta.
+MAX_ARTICLE_SAMPLE = 520
+
+# Penebalan markdown dibuang saat contohnya dikirim, bukan dihapus
+# dari berkasnya. Slot template diisi teks biasa, dan contoh yang
+# masih memakai ** mengajari model menulis bintang ke dalam halaman.
+BOLD_MARK = re.compile(r"\*\*+")
+
+# Berapa contoh yang ikut ke prompt. Cukup untuk menunjukkan pola,
+# tidak cukup untuk membuat model menyalin salah satunya.
+STYLE_SAMPLE_SIZE = 8
+
+# Seberapa besar kumpulan contoh harus tetap, supaya dua halaman
+# berbeda tidak berangkat dari delapan contoh yang sama persis.
+#
+# Tiga kali jumlah yang diambil. Di bawah itu, benih keberagaman di
+# pick_style_examples tidak punya bahan untuk memilih apa pun.
+MIN_STYLE_POOL = STYLE_SAMPLE_SIZE * 3
+
+# Contoh yang memuat klaim seperti ini tidak ikut dikirim ke model.
+#
+# Bukan soal selera. Pipeline ini tidak punya satu pun data tentang
+# lisensi, akreditasi, angka RTP, atau winrate brand mana pun, jadi
+# kalimat yang menyebutkannya adalah angka yang dikarang - dan angka
+# karangan di halaman yang mengajak orang menyetor uang adalah hal
+# yang berbeda dari gaya penulisan yang menarik.
+#
+# Sudut penulisan yang bikin contoh-contoh itu hidup - tambang,
+# fakultas, koperasi, maskapai, kanvas - sama sekali tidak bergantung
+# pada klaim semacam ini, dan semuanya tetap lolos ke prompt.
+#
+# Kosongkan daftar ini kalau saringannya memang tidak dikehendaki.
+CLAIM_FILTER = re.compile(
+    r"menjamin|dijamin|jaminan|kemenangan pasti|pasti akurat|"
+    r"pasti cuan|menang terus|jalan pintas jadi jutawan|"
+    r"kekayaan secara cepat|lisensi internasional|akreditasi|"
+    r"winrate|rtp .{0,12}\d{2}\s*%|\bup to \d{2}\s*%|"
+    r"kemenangan maksimal|kemenangan tertinggi",
+    re.IGNORECASE,
+)
+
+
+def load_article_examples() -> dict[str, list[str]]:
+    """
+    Membaca contoh artikel milik pengguna, dipisah per jenis.
+
+    Blok dipisah baris kosong. Yang diawali "##" adalah subjudul,
+    yang diawali "#" adalah judul artikel, sisanya paragraf.
+
+    Judul artikel tidak ikut dipakai sebagai contoh title halaman.
+    Judul artikel milik pengguna panjang dan memakai huruf besar
+    semua - "LINK LOGIN [ BRAND ] SITUS SLOT77 ONLINE TERBESAR
+    PALING GACOR HARI INI 2026" - sementara title halaman dipatok
+    TITLE_MAX karakter. Meniru bentuk itu berarti menulis judul yang
+    hilang separuhnya di hasil pencarian.
+    """
+    try:
+        isi = ARTICLE_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return {"paragraph": [], "heading": []}
+
+    paragraf: list[str] = []
+    subjudul: list[str] = []
+
+    for blok in isi.split("\n\n"):
+        teks = " ".join(BOLD_MARK.sub("", blok).split()).strip()
+
+        if not teks:
+            continue
+
+        if teks.startswith("## "):
+            subjudul.append(teks[3:].strip())
+            continue
+
+        if teks.startswith("#"):
+            continue
+
+        if len(teks) > MAX_ARTICLE_SAMPLE:
+            continue
+
+        if CLAIM_FILTER.search(teks):
+            continue
+
+        paragraf.append(teks)
+
+    return {"paragraph": paragraf, "heading": subjudul}
+
+
+# Bentuk cadangan kalau berkas contoh tidak terbaca. Angkanya
+# disalin dari berkas yang ada sekarang, jadi hilangnya berkas itu
+# mengubah gaya kalimatnya saja - bukan membuat artikelnya lenyap.
+DEFAULT_ARTICLE_SHAPE = (
+    {"paragraphs": (450, 300, 270), "subsections": ()},
+    {
+        "paragraphs": (400, 350, 240, 220, 210, 220),
+        "subsections": (),
+    },
+    {
+        "paragraphs": (450, 360),
+        "subsections": (
+            {"paragraphs": (320, 230)},
+            {"paragraphs": (250, 170)},
+        ),
+    },
+)
+
+# Lantai jatah satu paragraf artikel.
+#
+# Contoh milik pengguna punya beberapa paragraf pendek di antara yang
+# panjang, dan itu memang irama tulisannya - tapi jatah yang terlalu
+# kecil membuat kalimat kedua terpotong, dan paragraf yang terpotong
+# ditutup titik terbaca seolah utuh padahal tidak mengatakan apa pun.
+MIN_ARTICLE_PARAGRAPH = 120
+
+# Dipakai kalau berkas contoh tidak terbaca sama sekali. Sekitar
+# panjang rata-rata kata bahasa Indonesia beserta spasinya.
+DEFAULT_CHARS_PER_WORD = 7.0
+
+
+def default_article_shape() -> list[dict]:
+    """
+    Salinan bentuk cadangan yang boleh diubah pemanggilnya.
+    """
+    return [
+        {
+            "paragraphs": list(bagian["paragraphs"]),
+            "subsections": [
+                {"paragraphs": list(sub["paragraphs"])}
+                for sub in bagian["subsections"]
+            ],
+        }
+        for bagian in DEFAULT_ARTICLE_SHAPE
+    ]
+
+
+def load_article_shape() -> list[dict]:
+    """
+    Membaca BENTUK artikel milik pengguna, bukan isinya.
+
+    Yang diambil: berapa bagian, berapa paragraf di tiap bagian,
+    berapa subbagian, dan sepanjang apa tiap paragrafnya. Teksnya
+    sendiri tidak ikut - itu urusan load_article_examples, yang
+    memakai berkas yang sama untuk keperluan yang berbeda.
+
+    Dipisah dari pembacaan contoh gaya karena keduanya menjawab
+    pertanyaan yang berbeda tentang berkas yang sama. Contoh gaya
+    menjawab "kalimatnya berbunyi seperti apa"; bentuk menjawab
+    "artikelnya disusun seperti apa". Yang pertama boleh menyaring
+    dan mengacak; yang kedua tidak boleh, karena urutan dan
+    jumlahnya justru isinya.
+
+    Mengembalikan daftar bagian:
+      [{"paragraphs": [451, 300, 269], "subsections": [...]}, ...]
+    """
+    try:
+        isi = ARTICLE_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return default_article_shape()
+
+    bagian: list[dict] = []
+
+    for blok in isi.split("\n\n"):
+        teks = " ".join(BOLD_MARK.sub("", blok).split()).strip()
+
+        if not teks:
+            continue
+
+        if teks.startswith("## "):
+            if bagian:
+                bagian[-1]["subsections"].append({"paragraphs": []})
+
+            continue
+
+        if teks.startswith("#"):
+            bagian.append({"paragraphs": [], "subsections": []})
+            continue
+
+        if not bagian:
+            # Paragraf yang berdiri sebelum judul pertama. Berkasnya
+            # boleh saja ditulis begitu, dan membuangnya berarti
+            # artikel yang terbit lebih pendek daripada contohnya.
+            bagian.append({"paragraphs": [], "subsections": []})
+
+        panjang = max(MIN_ARTICLE_PARAGRAPH, len(teks))
+
+        if bagian[-1]["subsections"]:
+            bagian[-1]["subsections"][-1]["paragraphs"].append(panjang)
+        else:
+            bagian[-1]["paragraphs"].append(panjang)
+
+    # Bagian dan subbagian yang tidak punya paragraf dibuang. Judul
+    # tanpa isi di bawahnya cuma menyuruh model menulis judul yang
+    # tidak akan pernah terpakai.
+    bersih: list[dict] = []
+
+    for item in bagian:
+        subs = [
+            sub for sub in item["subsections"] if sub["paragraphs"]
+        ]
+
+        if not item["paragraphs"] and not subs:
+            continue
+
+        bersih.append(
+            {"paragraphs": item["paragraphs"], "subsections": subs}
+        )
+
+    # Berkasnya ada tapi tidak memuat satu paragraf pun - misalnya
+    # baru berisi judul. Bentuk cadangan dipakai supaya blok artikel
+    # tetap terbit, bukan hilang tanpa pesan.
+    return bersih or default_article_shape()
+
+
+# Batas atas jumlah bagian, apa pun target kata yang diminta.
+#
+# Bukan soal selera melainkan yang terukur: model kecil menulis makin
+# banyak kalimat berulang begitu diminta puluhan paragraf sekaligus,
+# dan penyaring kembar membatalkannya - jadi artikel yang diminta
+# terlalu panjang justru terbit lebih pendek daripada yang diminta
+# sedang. Angkanya dipasang jauh di atas kebutuhan wajar supaya tidak
+# pernah terasa, tapi tetap menahan salah ketik.
+MAX_ARTICLE_SECTIONS = 40
+
+
+def article_shape(target_words: int = 0) -> list[dict]:
+    """
+    Bentuk artikel, diskalakan ke target jumlah kata.
+
+    Bentuk dasarnya dibaca dari contoh milik pengguna. Yang dilakukan
+    di sini bukan mengarang bentuk baru melainkan MENGULANG bentuk
+    itu sampai targetnya tercapai: bagian pertama contoh, lalu kedua,
+    lalu ketiga, lalu kembali ke bagian pertama, dan seterusnya.
+
+    Diulang, bukan dipanjangkan paragrafnya. Irama contohnya - dua
+    paragraf pembuka yang panjang, beberapa yang pendek di tengah,
+    subbagian di bagian terakhir - adalah bagian dari gaya yang mau
+    ditiru, dan memelarkan tiap paragraf sampai targetnya tercapai
+    justru menghapus irama itu.
+
+    target_words 0 berarti pakai contohnya apa adanya.
+    """
+    dasar = load_article_shape()
+
+    if not dasar or target_words <= 0:
+        return dasar
+
+    per_kata = article_chars_per_word() or DEFAULT_CHARS_PER_WORD
+
+    hasil: list[dict] = []
+    kata = 0.0
+
+    while kata < target_words and len(hasil) < MAX_ARTICLE_SECTIONS:
+        bagian = dasar[len(hasil) % len(dasar)]
+
+        hasil.append(
+            {
+                "paragraphs": list(bagian["paragraphs"]),
+                "subsections": [
+                    {"paragraphs": list(sub["paragraphs"])}
+                    for sub in bagian["subsections"]
+                ],
+            }
+        )
+
+        huruf = sum(bagian["paragraphs"]) + sum(
+            sum(sub["paragraphs"]) for sub in bagian["subsections"]
+        )
+
+        kata += huruf / per_kata
+
+    return hasil
+
+
+def article_word_estimate(shape: list[dict]) -> int:
+    """
+    Perkiraan jumlah kata satu bentuk artikel.
+
+    Perkiraan, bukan janji: jatah tiap paragraf adalah batas atas,
+    dan model kadang menulis lebih pendek. Dipakai untuk melaporkan
+    apa yang direncanakan, bukan untuk menagih hasilnya.
+    """
+    per_kata = article_chars_per_word() or DEFAULT_CHARS_PER_WORD
+
+    huruf = sum(
+        sum(bagian["paragraphs"])
+        + sum(sum(sub["paragraphs"]) for sub in bagian["subsections"])
+        for bagian in shape
+    )
+
+    return int(huruf / per_kata)
+
+
+def article_chars_per_word() -> float:
+    """
+    Berapa karakter satu kata, diukur dari contoh milik pengguna.
+
+    Dipakai menerjemahkan target "sekian kata" jadi jatah karakter,
+    karena jatah tiap paragraf dihitung dalam karakter sementara
+    orang memikirkan panjang artikel dalam kata.
+
+    Diukur, bukan dipatok. Angkanya berbeda antar bahasa dan antar
+    gaya tulisan, dan berkas contohnya ditulis pengguna sendiri
+    dalam bahasa yang dipakai halamannya.
+    """
+    try:
+        isi = ARTICLE_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return DEFAULT_CHARS_PER_WORD
+
+    huruf = 0
+    kata = 0
+
+    for blok in isi.split("\n\n"):
+        teks = " ".join(BOLD_MARK.sub("", blok).split()).strip()
+
+        if not teks or teks.startswith("#"):
+            continue
+
+        huruf += len(teks)
+        kata += len(teks.split())
+
+    if not kata:
+        return DEFAULT_CHARS_PER_WORD
+
+    return huruf / kata
+
+
+# Tanda bahwa sebuah contoh berhenti di tempat yang memang akhir.
+SENTENCE_END = ".!?…"
+
+
+def drop_cut_fragments(contoh: list[str]) -> list[str]:
+    """
+    Membuang contoh title yang sebenarnya potongan kalimat.
+
+    Berkas contoh title tidak pernah ditulis pengguna sebagai daftar
+    title. Ia DITURUNKAN dari berkas contoh deskripsi dengan cara
+    memotong kalimat pembukanya di sekitar 60 huruf - keterangan itu
+    tertulis di kepala berkasnya sendiri, dan bisa dibuktikan:
+    seluruh 116 barisnya adalah awalan persis dari sebuah baris di
+    gaya_title_deskripsi.txt.
+
+    Sebagian potongan itu kebetulan jatuh tepat di akhir kalimat dan
+    tetap berbunyi utuh. Sisanya berhenti di tengah -
+
+        [ BRAND ] adalah pilihan tepat untuk menemukan titik
+        Mainkan berbagai jenis slot online gratis dalam satu
+        Raih Kemenangan Maxwin di [ BRAND ] sekarang bersama sang
+
+    - dan yang seperti itu 75 dari 84 contoh yang lolos saringan
+    panjang. Jadi hampir seluruh contoh yang dilihat model adalah
+    kalimat yang berhenti sebelum selesai, dan model menulis
+    sepanjang DAN seperti contohnya. Itu sebabnya title yang terbit
+    datar dan menggantung: "WAYANGPLAY slot gacor – Pengalaman
+    bermain terbaik", berhenti persis di lantai 50 huruf.
+
+    Yang dibuang cuma yang TERBUKTI potongan: awalan dari sebuah
+    baris deskripsi yang tidak berhenti di tanda titik. Title tulisan
+    tangan yang memang tidak berakhiran tanda baca - dan itu bentuk
+    title yang lazim - tidak akan pernah cocok dengan syarat pertama,
+    jadi tidak ikut terbuang.
+
+    Kalau yang tersisa terlalu sedikit untuk jadi contoh, daftarnya
+    dikembalikan apa adanya: contoh yang kurang bagus masih lebih
+    berguna daripada tidak ada contoh sama sekali.
+    """
+    try:
+        sumber = [
+            teks
+            for teks in (
+                item.strip()
+                for item in STYLE_FILES["meta_description"]
+                .read_text(encoding="utf-8")
+                .splitlines()
+            )
+            if teks and not teks.startswith("#")
+        ]
+    except OSError:
+        return contoh
+
+    if not sumber:
+        return contoh
+
+    utuh = [
+        teks
+        for teks in contoh
+        if teks.rstrip()[-1:] in SENTENCE_END
+        or not any(
+            baris.startswith(teks) and len(baris) > len(teks)
+            for baris in sumber
+        )
+    ]
+
+    return utuh if len(utuh) >= STYLE_SAMPLE_SIZE else contoh
+
+
+def load_style_examples(slot: str = "meta_description") -> list[str]:
+    """
+    Membaca contoh gaya milik pengguna, tanpa baris keterangan.
+
+    Berkas yang belum ada dianggap kosong, bukan kesalahan. Contoh
+    gaya itu tambahan; tanpa berkasnya pipeline tetap jalan dengan
+    aturan tertulis saja.
+    """
+    if slot in ("paragraph", "heading"):
+        return load_article_examples().get(slot, [])
+
+    berkas = STYLE_FILES.get(slot)
+
+    if not berkas:
+        return []
+
+    try:
+        baris = berkas.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+
+    bersih = [
+        teks
+        for teks in (item.strip() for item in baris)
+        if teks and not teks.startswith("#") and not CLAIM_FILTER.search(teks)
+    ]
+
+    if slot == "title":
+        bersih = drop_cut_fragments(bersih)
+
+    # Contoh disaring ke rentang panjang yang diminta.
+    #
+    # Model menulis sepanjang contohnya, jadi contoh di luar rentang
+    # mengajari model menulis panjang yang akan ditolak. Berkas
+    # pengguna memuat ketiga-tiganya sekaligus:
+    #
+    #                  di bawah   di dalam   di atas
+    #   title (50-70)        31         85         0
+    #   deskripsi (160-200)  22         66        32
+    #
+    # Yang tersisa di kedua berkas masih delapan kali lebih banyak
+    # daripada yang dikirim per run, jadi tidak ada keberagaman yang
+    # hilang.
+    #
+    # Title sempat tidak disaring, dan alasannya berlaku waktu itu:
+    # lantainya 65, sedangkan contoh terpanjang milik pengguna 61
+    # karakter, jadi menyaringnya berarti mengirim daftar kosong.
+    # Sejak lantainya turun ke 50, sebagian besar contohnya justru
+    # masuk - dan saringan yang cukup punya jalan mundur di bawah ini
+    # tidak pernah bisa mengosongkan daftarnya.
+    batas = {
+        "title": (TITLE_MIN, TITLE_MAX),
+        "meta_description": (META_MIN, META_MAX),
+    }.get(slot)
+
+    if batas:
+        pas = [teks for teks in bersih if batas[0] <= len(teks) <= batas[1]]
+
+        # Yang di dalam rentang selalu didahulukan, lalu ditambah yang
+        # PALING DEKAT ke rentangnya sampai jumlahnya cukup beragam.
+        #
+        # Ini menutup kerugian yang muncul sesudah contoh potongan
+        # dibuang. Contoh title yang utuh DAN masih di rentang 50-70
+        # tinggal sembilan, sementara satu run mengambil delapan -
+        # jadi tiap halaman berangkat dari contoh yang hampir sama,
+        # dan seluruh halaman yang dibuat alat ini terbaca seperti
+        # ditulis dari satu cetakan. Itu justru cacat yang benih
+        # keberagaman di pick_style_examples ada untuk mencegahnya.
+        #
+        # Menambah dari luar rentang aman di sini: yang benar-benar
+        # menegakkan panjang bukan contohnya melainkan minLength di
+        # JSON Schema. Contohnya cuma mengajarkan nada.
+        if len(pas) < MIN_STYLE_POOL:
+            sisa = sorted(
+                (teks for teks in bersih if teks not in pas),
+                key=lambda teks: min(
+                    abs(len(teks) - batas[0]),
+                    abs(len(teks) - batas[1]),
+                ),
+            )
+
+            pas = pas + sisa[: MIN_STYLE_POOL - len(pas)]
+
+        if len(pas) >= STYLE_SAMPLE_SIZE:
+            return pas
+
+    return bersih
+
+
+def pick_style_examples(
+    keyword: str,
+    brand_name: str,
+    jumlah: int = STYLE_SAMPLE_SIZE,
+    slot: str = "meta_description",
+    variation: str = "",
+) -> list[str]:
+    """
+    Memilih beberapa contoh gaya, tetap sama sepanjang satu run.
+
+    Titik awalnya diturunkan, bukan diacak, dan itu mengikat: awalan
+    prompt harus identik di setiap giliran supaya cache prompt Ollama
+    tidak batal.
+
+    Tiga bahan masuk ke benihnya, masing-masing menjawab soal yang
+    berbeda:
+
+    - keyword dan brand, supaya dua halaman brand berbeda tidak
+      berangkat dari contoh yang sama persis - kalau iya, seluruh
+      halaman yang dihasilkan alat ini terbaca seperti ditulis dari
+      satu cetakan.
+    - slot, supaya contoh title dan contoh deskripsi tidak jatuh di
+      posisi yang sama di berkas masing-masing.
+    - variation, penanda run dari build_brand. Ini yang membuat
+      halaman kedua dari template dan keyword yang SAMA tidak
+      berangkat dari delapan contoh yang sama seperti halaman
+      pertama. Tanpa itu, satu-satunya sumber perbedaan tinggal suhu
+      model, dan model yang membaca contoh yang persis sama cenderung
+      kembali ke kalimat yang sama.
+    """
+    contoh = load_style_examples(slot)
+
+    if not contoh:
+        return []
+
+    # Slot ikut ke dalam benih supaya contoh title dan contoh
+    # deskripsi tidak jatuh di posisi yang sama di berkas
+    # masing-masing.
+    benih = hashlib.sha1(
+        f"{keyword}|{brand_name}|{slot}|{variation}".encode("utf-8")
+    ).digest()
+
+    mulai = int.from_bytes(benih[:4], "big") % len(contoh)
+
+    # Langkah dibuat besar dan ganjil supaya contohnya tersebar ke
+    # seluruh berkas, bukan delapan baris berurutan. Baris yang
+    # bertetangga di berkas biasanya ditulis dalam satu sesi dan
+    # sudut pandangnya mirip - persis yang tidak berguna sebagai
+    # contoh keberagaman gaya.
+    langkah = (int.from_bytes(benih[4:8], "big") % 23) * 2 + 3
+
+    dipilih: list[str] = []
+    dilihat: set[int] = set()
+
+    for putaran in range(min(jumlah, len(contoh))):
+        index = (mulai + putaran * langkah) % len(contoh)
+
+        while index in dilihat:
+            index = (index + 1) % len(contoh)
+
+        dilihat.add(index)
+        dipilih.append(contoh[index])
+
+    return dipilih
+
+
+def format_style_examples(
+    keyword: str,
+    brand_name: str,
+    variation: str = "",
+) -> str:
+    """
+    Bagian prompt berisi contoh gaya, siap ditempel ke brief.
+
+    Contoh title dan contoh deskripsi ditulis di bawah keterangan
+    yang berbeda. Digabung jadi satu daftar, model membaca contoh
+    deskripsi 181 karakter sebagai contoh title juga, lalu menulis
+    title yang dipotong di batasnya - potongan yang justru membuang
+    ajakan di akhir kalimatnya.
+    """
+    nama = brand_name or "situs ini"
+
+    bagian: list[str] = []
+
+    judul_contoh = pick_style_examples(
+        keyword,
+        brand_name,
+        slot="title",
+        variation=variation,
+    )
+
+    if judul_contoh:
+        bagian.append(
+            "Contoh title milik situs ini, semuanya sudah di rentang "
+            f"{TITLE_MIN}-{TITLE_MAX} karakter yang diminta.\n"
+            "Yang diambil dari sini CUMA BENTUKNYA: cara membuka, cara "
+            "menyebut nama situs, ajakan di akhirnya, dan berhenti di "
+            "titik yang sama.\n"
+            "KATANYA JANGAN DIAMBIL. Menulis ulang salah satu baris di "
+            "bawah - seluruhnya maupun separuhnya, dengan nama situs "
+            "ditukar atau satu dua kata diganti - dihitung tidak "
+            "menjawab, dan judulnya akan diminta ulang. Ini bukan "
+            "daftar pilihan; ini contoh bentuk. Yang kamu tulis harus "
+            f"tentang \"{keyword}\" dengan katamu sendiri:\n"
+            + "\n".join(
+                f"  - {teks.replace('[ BRAND ]', nama)}"
+                for teks in judul_contoh
+            )
+        )
+
+    deskripsi_contoh = pick_style_examples(
+        keyword,
+        brand_name,
+        slot="meta_description",
+        variation=variation,
+    )
+
+    if deskripsi_contoh:
+        bagian.append(
+            (
+                "Contoh meta description:"
+                if judul_contoh
+                else "Contohnya:"
+            )
+            + " berlaku aturan yang sama - bentuknya ditiru, katanya "
+            "ditulis baru. Deskripsi yang menyalin salah satu baris di "
+            "bawah juga akan diminta ulang.\n"
+            + "\n".join(
+                f"  - {teks.replace('[ BRAND ]', nama)}"
+                for teks in deskripsi_contoh
+            )
+        )
+
+    # Contoh paragraf dibatasi lebih sedikit daripada title dan
+    # deskripsi. Paragraf panjangnya berlipat, dan delapan di antaranya
+    # memakan ruang prompt yang dibutuhkan jawabannya sendiri.
+    artikel_contoh = pick_style_examples(
+        keyword,
+        brand_name,
+        jumlah=4,
+        slot="paragraph",
+        variation=variation,
+    )
+
+    if artikel_contoh:
+        bagian.append(
+            "Contoh paragraf artikel. Panjangnya di sini bukan "
+            "patokan - yang mengikat tetap batas karakter tiap slot. "
+            "Yang ditiru cara membuka kalimat, cara menyebut nama "
+            "situs di tengah kalimat, dan cara menutup dengan manfaat "
+            "yang bisa dibayangkan pembaca:\n"
+            + "\n".join(
+                f"  - {teks.replace('[ BRAND ]', nama)}"
+                for teks in artikel_contoh
+            )
+        )
+
+    judul_bagian = pick_style_examples(
+        keyword,
+        brand_name,
+        jumlah=4,
+        slot="heading",
+        variation=variation,
+    )
+
+    if judul_bagian:
+        bagian.append(
+            "Contoh judul bagian di dalam artikel:\n"
+            + "\n".join(
+                f"  - {teks.replace('[ BRAND ]', nama)}"
+                for teks in judul_bagian
+            )
+        )
+
+    if not bagian:
+        return ""
+
+    return (
+        "\n## Gaya Tulisan Yang Dipakai Situs Ini\n"
+        "Ini contoh tulisan milik situs ini. JANGAN disalin dan "
+        "jangan diikuti topiknya - yang ditiru cuma gayanya: panjang "
+        "kalimatnya, cara membukanya, ajakan di akhirnya, dan "
+        "keberanian memakai satu sudut pandang yang khas alih-alih "
+        "kalimat serba umum.\n\n"
+        + "\n\n".join(bagian)
+        + "\n"
+    )
+
 
 SERP_ANALYST_SYSTEM_PROMPT = """
 Kamu adalah analis SEO yang membaca data halaman pertama Google.
@@ -80,6 +795,30 @@ def format_list(
         return empty
 
     return "\n".join(f"- {item}" for item in clean[:limit])
+
+
+def blok_daftar(judul: str, items: list, limit: int = 10) -> str:
+    """
+    Bagian brief yang hilang seluruhnya kalau isinya kosong.
+
+    format_list() menulis "- Tidak ada" untuk daftar kosong. Di bawah
+    judul biasa itu tidak apa-apa, tapi di bawah judul yang berbunyi
+    perintah - "Pertanyaan Yang Harus Dijawab Di FAQ", "Tema Yang
+    Wajib Disinggung" - hasilnya perintah tanpa isi, dan model kecil
+    cenderung mengarang sesuatu untuk mengisinya.
+
+    Tiga daftar itu sekarang memang bisa kosong: sejak kosakata cuma
+    boleh datang dari halaman bersih, keyword yang halaman pertamanya
+    dibajak semua tidak menyisakan bahan apa pun. Brief yang tidak
+    menyebut bagiannya sama sekali lebih jujur daripada brief yang
+    menyebutnya lalu bilang tidak ada.
+    """
+    isi = format_list(items, limit=limit, empty="")
+
+    if not isi:
+        return ""
+
+    return f"\n{judul}\n{isi}\n"
 
 
 def format_competitor_table(pages: list[dict]) -> str:
@@ -276,6 +1015,14 @@ ROLE_LABELS = {
     "faq_answer": "jawaban FAQ",
     "review_text": "isi ulasan pengguna",
     "review_author": "nama orang yang menulis ulasan",
+    "review_tag": (
+        "tag ulasan: dua sampai empat kata yang merangkum ulasan "
+        "di atasnya, TANPA titik di akhir"
+    ),
+    "card_title": (
+        "judul kartu keunggulan: dua sampai lima kata, menamai "
+        "keterangan di bawahnya, TANPA titik di akhir"
+    ),
     "caption": "keterangan gambar",
     "nav_label": (
         "label menu atau tombol, satu sampai tiga kata, "
@@ -287,8 +1034,330 @@ ROLE_LABELS = {
 }
 
 
+# Berapa banyak title dan deskripsi kompetitor yang ikut ke brief.
+#
+# Enam cukup untuk memperlihatkan kosakata yang sama-sama dipakai
+# halaman pertama, dan masih di bawah jumlah yang membuat model
+# menyalin salah satunya bulat-bulat.
+SERP_TITLE_SAMPLES = 6
+
+# Berapa istilah yang ikut sebagai bahan kata.
+SERP_TERM_SAMPLES = 12
+
+
+def ranking_titles(analysis: dict) -> list[tuple[int, str, str]]:
+    """
+    Title dan deskripsi halaman yang sedang ngerank, urut peringkat.
+
+    Halaman yang gagal di-crawl, yang isinya tidak terbaca, dan yang
+    berdiri di domain bajakan dikeluarkan. Ketiganya ngerank karena
+    hal yang tidak ada hubungannya dengan pilihan katanya - domain
+    curian, cloaking, atau kebetulan - jadi menirunya berarti meniru
+    sesuatu yang bukan penyebabnya.
+    """
+    hasil: list[tuple[int, str, str]] = []
+
+    for page in analysis.get("pages") or []:
+        if page.get("status") != "ok":
+            continue
+
+        if page.get("hijack", {}).get("is_hijacked"):
+            continue
+
+        if not page.get("usable", True):
+            continue
+
+        judul = " ".join(str(page.get("title") or "").split())
+
+        if not judul:
+            continue
+
+        deskripsi = " ".join(str(page.get("meta_description") or "").split())
+
+        hasil.append((int(page.get("position") or 0), judul, deskripsi))
+
+    return hasil
+
+
+def serp_word_bank(analysis: dict) -> str:
+    """
+    Bahan kata untuk title dan meta_description, diambil dari SERP.
+
+    Ini yang diluruskan pengguna: seluruh analisis di awal run - crawl
+    sepuluh halaman, hitung median, kumpulkan entity - gunanya memang
+    ini. Sebelumnya hasilnya cuma dipakai sebagai latar ("intent
+    pencarian", "celah konten"), dan model menulis title dari
+    kepalanya sendiri sementara data kosakata yang mahal itu tergeletak
+    tanpa dibaca siapa pun.
+
+    Yang ditaruh di sini kata dan frasa, bukan kalimat contoh. Title
+    kompetitor ikut karena di situlah kosakatanya terlihat sedang
+    dipakai, bukan supaya disalin - dan aturan di bawahnya menyebut
+    perbedaan itu dengan tegas.
+    """
+    blueprint = analysis.get("blueprint") or {}
+    target = blueprint.get("target") or {}
+
+    bagian: list[str] = []
+
+    judul = ranking_titles(analysis)[:SERP_TITLE_SAMPLES]
+
+    if judul:
+        bagian.append(
+            "Title yang sedang ngerank, beserta panjangnya:\n"
+            + "\n".join(
+                f"  [{urut}] ({len(teks)} karakter) {teks}"
+                for urut, teks, _ in judul
+            )
+        )
+
+        # Yang terpanjang duluan, dan yang sangat pendek tidak ikut.
+        #
+        # Ini bank kata, jadi yang berguna adalah deskripsi yang
+        # memuat banyak kata. Deskripsi 45 karakter tidak menyumbang
+        # kosakata apa pun, dan yang disumbangkannya justru contoh
+        # panjang yang bertentangan dengan lantai yang diminta.
+        deskripsi = sorted(
+            (teks for _, _, teks in judul if len(teks) >= 80),
+            key=len,
+            reverse=True,
+        )
+
+        if deskripsi:
+            bagian.append(
+                "Deskripsi yang mereka pasang:\n"
+                + "\n".join(f"  - {teks}" for teks in deskripsi[:4])
+            )
+
+    dicari = [
+        str(item).strip()
+        for item in (blueprint.get("related_searches") or [])
+        if str(item).strip()
+    ]
+
+    if dicari:
+        bagian.append(
+            "Yang juga dicari orang untuk keyword ini:\n"
+            + "\n".join(f"  - {teks}" for teks in dicari[:SERP_TERM_SAMPLES])
+        )
+
+    entity = [
+        str(item.get("entity") or "").strip()
+        for item in (blueprint.get("common_entities") or [])
+        if str(item.get("entity") or "").strip()
+    ]
+
+    if entity:
+        bagian.append(
+            "Kata yang muncul di banyak halaman sekaligus:\n"
+            + "\n".join(
+                f"  - {teks}" for teks in entity[:SERP_TERM_SAMPLES]
+            )
+        )
+
+    if not bagian:
+        return ""
+
+    # Angka median disebutkan sebagai PELUANG, bukan sebagai patokan.
+    #
+    # Ini penting dan sempat salah. Menuliskannya apa adanya -
+    # "panjang yang lazim: 54 karakter" - membuat satu-satunya angka
+    # konkret di bagian ini justru membantah lantai yang diminta di
+    # aturan, dan model memilih angka yang dilihatnya. Datanya tetap
+    # jujur; yang berubah cuma apa artinya, dan artinya memang begitu:
+    # kalau semua orang berhenti di 54, ruang sesudahnya kosong.
+    lazim = ""
+
+    median_judul = int(target.get("title_length_median") or 0)
+    median_meta = int(target.get("meta_length_median") or 0)
+
+    if median_judul or median_meta:
+        lazim = (
+            f"\nMereka berhenti di sekitar {median_judul} karakter "
+            f"untuk title dan {median_meta} untuk deskripsi. Jatah "
+            "yang diberikan ke kamu lebih besar dari itu, dan "
+            "selisihnya bukan ruang kosong yang harus diisi kata "
+            "pengisi - itu tempat satu hal konkret lagi yang tidak "
+            "sempat mereka sebutkan.\n"
+        )
+
+    return (
+        "\n## Bahan Kata Untuk Title Dan Deskripsi\n"
+        "Seluruh analisis halaman pertama Google dikerjakan untuk "
+        "bagian ini. Isinya kosakata yang terbukti dipakai orang "
+        "mencari dan dipakai halaman yang sedang menang - dan dari "
+        "situlah kata-kata di title dan meta_description diambil, "
+        "bukan dikarang dari nol.\n"
+        "Yang diambil KATA dan FRASA-nya, bukan kalimatnya. Menyalin "
+        "satu title di bawah ini, atau menyusun ulang urutan katanya "
+        "saja, menghasilkan halaman yang bersaing sebagai salinan "
+        "pucat halaman yang sudah ada duluan.\n\n"
+        + "\n\n".join(bagian)
+        + "\n"
+        + lazim
+    )
+
+
 # Sampai berapa banyak teks batas panjangnya disebut satu per satu.
 MAX_PER_ITEM_LIMITS = 30
+
+# Berapa pertanyaan orang yang ikut sebagai contoh bentuk.
+#
+# Sepuluh cukup memperlihatkan polanya - apa yang ditanyakan orang
+# dan sependek apa - dan masih di bawah jumlah yang membuat model
+# menyalin salah satunya bulat-bulat.
+FAQ_SHAPE_SAMPLES = 10
+
+# Peran yang contoh teks lamanya dikirim untuk menunjukkan FUNGSI
+# bagiannya, bukan untuk dipertahankan artinya. Harus sama dengan
+# KEEP_FUNCTION_ROLES di generators/template_filler.py.
+FUNCTION_SAMPLE_ROLES = {"heading"}
+
+# Peran bertekstunggal yang teks lamanya dikirim sebagai cetakan
+# BENTUK: susunannya, tanda pisahnya, dan panjangnya - bukan artinya.
+#
+# Ini permintaan pengguna: "contoh gayanya pakai dari template, tapi
+# kata-katanya generate sendiri". Keduanya dipisahkan dari daftar
+# padanan karena daftar itu memerintahkan mempertahankan ARTI teks
+# lama, dan untuk judul halaman itu perintah yang salah.
+#
+# Hanya dua peran ini yang masih diperlihatkan teks lamanya. Judul
+# kartu dan tag ulasan sempat ikut dan justru jadi bahan salinan;
+# penjelasannya di cabang PARTNER_SOURCE di bawah.
+HEAD_SHAPE_ROLES = ("title", "meta_description")
+
+# Peran yang tiap teksnya menerangkan satu teks milik peran lain.
+# Harus sama dengan PARTNER_ROLES di generators/template_filler.py.
+PARTNER_SOURCE = {
+    "card_title": "paragraph",
+    "review_tag": "review_text",
+}
+
+PARTNER_ORDERS = {
+    "card_title": (
+        "tulis satu judul untuk tiap keterangan kartu di bawah, "
+        "urut nomornya:"
+    ),
+    "review_tag": (
+        "tulis satu tag untuk tiap ulasan di bawah, urut nomornya:"
+    ),
+}
+
+# Berapa banyak teks yang sudah terpakai disebutkan lagi di giliran
+# berikutnya. Cukup untuk memberi tahu model apa yang sudah dipakai
+# tanpa memakan ruang yang dibutuhkan jawabannya sendiri.
+MAX_USED_REMINDERS = 60
+
+# Berapa banyak teks dari halaman-halaman SEBELUMNYA yang disebutkan.
+#
+# Lebih sedikit daripada MAX_USED_REMINDERS, dan itu disengaja.
+# Daftar ini ada di dalam brief, jadi ia dibayar sekali per run - tapi
+# tugasnya juga berbeda: yang di atas menjaga jangan sampai satu
+# halaman menulis kalimat yang sama dua kali, sedangkan yang ini cuma
+# perlu memberi tahu model ke arah mana halaman sebelumnya sudah
+# pergi. Untuk itu, contoh dari tiap peran sudah cukup - penolakan
+# yang sebenarnya dikerjakan Python lewat riwayat yang sama.
+MAX_HISTORY_REMINDERS = 40
+
+# Urutan peran di daftar riwayat, dari yang paling menentukan sudut
+# pandang halaman. Kalau daftarnya kepanjangan, yang terpotong yang
+# paling belakang - jadi judul dan heading selalu terbawa.
+HISTORY_PROMPT_ORDER = (
+    "title",
+    "meta_description",
+    "h1",
+    "heading",
+    "faq_question",
+    "card_title",
+    "review_tag",
+    "review_text",
+    "paragraph",
+)
+
+# Peran yang daftar teks terpakainya ikut dikirim ke giliran
+# berikutnya.
+#
+# Dua kelompok, dengan alasan yang berbeda.
+#
+# Label pendek yang jumlahnya ratusan dan dikerjakan berpuluh giliran:
+# tanpa daftar ini, halaman terbit dengan ratusan menu berbunyi mirip.
+#
+# Pertanyaan FAQ, ulasan, dan judul bagian: yang ini bukan soal
+# lintas giliran melainkan soal GILIRAN ULANG. Model rutin menutup
+# daftarnya lebih awal - 5 dari 7 pertanyaan - dan sisanya diminta
+# lagi lewat permintaan susulan. Selama permintaan itu tidak membawa
+# apa yang sudah ditulis, model menulis variasi dari pertanyaan yang
+# sama, penyaring kembar membuangnya, dan slotnya tetap kosong
+# meskipun sudah diminta dua kali. Terukur persis begitu di sini.
+REPEAT_PRONE_ROLES = (
+    "nav_label",
+    "label",
+    "table_cell",
+    "faq_question",
+    "review_text",
+    "heading",
+    # Judul kartu dan tag ulasan jumlahnya sedikit dan topiknya
+    # sempit, jadi giliran ulang yang tidak melihat yang sudah
+    # tertulis hampir pasti menulis variasi dari yang barusan dibuang
+    # penyaring kembar.
+    "card_title",
+    "review_tag",
+)
+
+
+def kata_terlarang(judul: str, keyword: str, brand: str) -> str:
+    """
+    Kata khas judul yang tidak boleh dipakai lagi di baris pertama.
+
+    Melarang secara umum ternyata tidak menutup apa-apa: di job 35
+    deskripsi tetap terbit membuka dengan kalimat judul, sesudah
+    diminta dua kali. Yang berbeda di sini larangannya SEBUT NAMA -
+    model tidak perlu menebak bagian mana dari judul yang dianggap
+    pengulangan.
+
+    Nama brand dan kata keyword sengaja DIKELUARKAN dari daftar.
+    Keduanya memang harus muncul lagi di deskripsi; melarangnya
+    berarti menukar satu cacat dengan cacat yang lebih mahal.
+    """
+    # Kata sambung dibuang lewat penokenan SELURUH judul, bukan per
+    # kata. Ditokenkan satu per satu, "dengan" balik lagi lewat jalan
+    # mundur di content_tokens - kalimat yang seluruhnya kata sambung
+    # tetap harus bisa dibandingkan, dan satu kata sambung sendirian
+    # adalah kalimat semacam itu.
+    isi = content_tokens(judul)
+    aman = content_tokens(f"{keyword} {brand}")
+
+    khas = [
+        kata
+        for kata in dict.fromkeys(str(judul or "").split())
+        if (kata.casefold() in isi) and kata.casefold() not in aman
+    ]
+
+    if not khas:
+        return ""
+
+    return (
+        "Kata-kata ini sudah terpakai di judul, jadi JANGAN dipakai "
+        "lagi di kalimat pertama deskripsimu: "
+        + ", ".join(khas)
+        + ". Nama situs dan kata pencariannya justru harus tetap "
+        "disebut - yang dilarang cuma daftar di atas.\n"
+    )
+
+
+def rentang_teks(nomor: int, plafon: int, lantai: int = 0) -> str:
+    """
+    Satu butir keterangan panjang untuk satu slot.
+
+    Ditulis sebagai rentang kalau slotnya punya lantai. Bedanya bukan
+    kosmetik: "ke-1 maksimal 542" dijawab model dengan 90 karakter
+    tanpa melanggar apa pun yang tertulis, dan slot berjatah 542 yang
+    diisi 90 karakter meninggalkan empat perlima ruangnya kosong.
+    """
+    if lantai and lantai < plafon:
+        return f"ke-{nomor} {lantai}-{plafon}"
+
+    return f"ke-{nomor} maksimal {plafon}"
 
 
 def build_template_content_prompt(
@@ -297,6 +1366,7 @@ def build_template_content_prompt(
     spec: dict,
     brand: dict,
     sudah: dict | None = None,
+    riwayat: dict | None = None,
 ) -> tuple[str, str]:
     """
     Menyusun prompt untuk mengisi template milik pengguna.
@@ -313,8 +1383,23 @@ def build_template_content_prompt(
     language_code = brand.get("region", "id")
     language_name = brand.get("language_name", "Indonesia")
 
+    # Topik halaman ditulis sebagai satu frasa, bukan dua keterangan
+    # terpisah.
+    #
+    # Sebelumnya keyword dan nama brand disebut di dua baris berbeda,
+    # dan model memperlakukannya sebagai dua hal: seluruh artikel
+    # ditulis tentang keyword sebagai topik umum, sementara nama
+    # brandnya cuma muncul di judul. Terukur di halaman jadi - nama
+    # brand cuma 9 kali di seluruh halaman, dan paragrafnya berbunyi
+    # "Slot online kini bisa diakses dari mana saja", kalimat yang
+    # cocok untuk situs mana pun dan tidak memperkenalkan siapa pun.
+    topik = " ".join(x for x in (brand_name, keyword) if x).strip()
+
     kebutuhan: list[str] = []
     padanan: list[str] = []
+    fungsi: list[str] = []
+    bentuk: list[str] = []
+    cetakan: list[tuple[str, str]] = []
 
     for role, rule in sorted(spec.items()):
         label = ROLE_LABELS.get(role, role)
@@ -322,9 +1407,25 @@ def build_template_content_prompt(
         limit = rule.get("max_length_any") or rule["max_length"]
         jatah = rule.get("budgets") or []
 
+        # Nomor urut selalu dimulai dari satu, karena tiap giliran
+        # menerima daftar contoh dan daftar pertanyaannya sendiri -
+        # nomor di prompt menunjuk posisi di dalam giliran itu, bukan
+        # posisi di seluruh halaman.
+        awal = 1
+
         if role in {"title", "meta_description", "meta_keywords", "h1"}:
+            # Peran yang punya lantai disebut sebagai RENTANG, bukan
+            # plafon. Bedanya terukur: "maksimal 80 karakter" dijawab
+            # model dengan 52 karakter, karena berhenti lebih awal
+            # tidak melanggar apa pun yang tertulis di situ.
+            lantai = int(rule.get("min_length") or 0)
+
             kebutuhan.append(
-                f"- {role}: 1 teks, maksimal {limit} karakter ({label})"
+                f"- {role}: 1 teks, panjangnya {lantai} sampai "
+                f"{limit} karakter — WAJIB melewati {lantai} "
+                f"karakter ({label})"
+                if lantai
+                else f"- {role}: 1 teks, maksimal {limit} karakter ({label})"
             )
         elif (
             len(set(jatah)) > 1
@@ -340,26 +1441,165 @@ def build_template_content_prompt(
             # keterangan yang selisihnya beberapa karakter, dan ruang
             # itu jauh lebih berguna dipakai menulis jawabannya.
             kebutuhan.append(
-                f"- {role}: tepat {count} teks ({label}), batas per teks: "
+                f"- {role}: tepat {count} teks ({label}), "
+                "panjang per teks: "
                 + ", ".join(
-                    f"ke-{nomor} maksimal {nilai}"
-                    for nomor, nilai in enumerate(jatah, start=1)
+                    rentang_teks(nomor, nilai, lantai)
+                    for nomor, nilai, lantai in zip(
+                        range(awal, awal + count),
+                        jatah,
+                        list(rule.get("floors") or [0] * count),
+                    )
                 )
                 + " karakter"
             )
         else:
+            batas_bawah = min(
+                (nilai for nilai in (rule.get("floors") or []) if nilai),
+                default=0,
+            )
+
             kebutuhan.append(
                 f"- {role}: tepat {count} teks, "
-                f"masing-masing maksimal {limit} karakter ({label})"
+                + (
+                    f"masing-masing {batas_bawah} sampai {limit} karakter"
+                    if batas_bawah
+                    else f"masing-masing maksimal {limit} karakter"
+                )
+                + f" ({label})"
             )
 
         contoh = rule.get("samples")
 
-        if contoh:
-            padanan.append(f"\n{role} — ganti berurutan, arti tetap sama:")
-            padanan.extend(
-                f"  {nomor}. {teks}"
-                for nomor, teks in enumerate(contoh, start=1)
+        # Peran berpasangan diperiksa SEBELUM syarat bercontoh.
+        # Bagiannya tidak dibangun dari contoh teks lama sama sekali,
+        # jadi ia harus tetap muncul meski contohnya tidak ada.
+        if role in PARTNER_SOURCE:
+            # Teks lamanya sengaja TIDAK ikut ditampilkan.
+            #
+            # Sempat ikut, sebagai cetakan bentuk, dan hasilnya
+            # kebalikan dari yang dimaksud: model menyalin balik
+            # contohnya dikurangi awalannya - "1. Deposit QRIS 1
+            # Detik" dijawab "Deposit QRIS 1 Detik" - lalu Python
+            # memasang nomornya kembali dan yang terbit teks lama
+            # PERSIS. Terukur di halaman jadi: kartu 1 sampai 3 dan
+            # tag 1 sampai 4 tidak bergeser sehuruf pun, sementara
+            # log melaporkan semuanya sudah terisi.
+            #
+            # Nomor urut dan awalan "Tag:" tidak perlu diperlihatkan
+            # sama sekali, karena bukan model yang menulisnya.
+            # Ditutup di sini, satu-satunya yang bisa disalin model
+            # tinggal keterangannya sendiri - dan itu memang yang
+            # harus dinamainya.
+            pasangan = str(PARTNER_SOURCE.get(role, ""))
+            sumber = list((sudah or {}).get(pasangan) or [])
+            nomor_pasangan = list(rule.get("partners") or [])
+
+            bentuk.append(f"\n{role} — {PARTNER_ORDERS.get(role, '')}")
+
+            for nomor in range(1, count + 1):
+                index = (
+                    nomor_pasangan[nomor - 1]
+                    if nomor - 1 < len(nomor_pasangan)
+                    else -1
+                )
+
+                teks = (
+                    str(sumber[index]).strip()
+                    if 0 <= index < len(sumber)
+                    else ""
+                )
+
+                bentuk.append(
+                    f"  [{nomor}] {teks}"
+                    if teks
+                    else f"  [{nomor}] (teksnya belum ditulis)"
+                )
+
+            continue
+
+        if not contoh:
+            continue
+
+        # Judul dan deskripsi halaman punya bagiannya sendiri.
+        # Keduanya cuma satu teks, dan menaruhnya di daftar bernomor
+        # membuat model membacanya sebagai satu butir di antara
+        # butir-butir lain alih-alih sebagai cetakan bentuk.
+        if role in HEAD_SHAPE_ROLES:
+            cetakan.append((role, str(contoh[0]).strip()))
+            continue
+
+        # Judul bagian dikirim dengan alasan yang berbeda dari menu:
+        # bukan supaya artinya bertahan, melainkan supaya fungsinya
+        # bertahan. Kalau keduanya dikirim di bawah satu keterangan,
+        # model menerjemahkan judul apa adanya dan halamannya terbit
+        # dengan judul "FAQ OSB99" cuma berganti nama brand.
+        tujuan = fungsi if role in FUNCTION_SAMPLE_ROLES else padanan
+
+        # Penanda posisi ditulis [1], bukan "1.".
+        #
+        # Bentuk "1." tidak bisa dibedakan dari nomor yang memang
+        # bagian teksnya, dan template ini punya keduanya sekaligus:
+        # daftar fitur bernomor "1. Deposit QRIS 1 Detik" berdiri di
+        # antara teks biasa. Model diminta mempertahankan penomoran
+        # yang memang isi, lalu ikut menuliskan nomor daftarnya juga -
+        # terbit di halaman jadi sebagai "26. Cara Pesan" dan
+        # "38. Inggris" di sepanjang menu.
+        tujuan.append(f"\n{role} — ganti berurutan:")
+        tujuan.extend(
+            f"  [{nomor}] {teks}"
+            for nomor, teks in enumerate(contoh, start=1)
+        )
+
+    # Pertanyaan yang benar-benar dipakai halaman yang sedang ngerank.
+    #
+    # Ini keluhan pengguna: pertanyaan FAQ-nya kurang menarik, dan
+    # yang diminta persisnya "contoh sesuai website yang sudah ngerank
+    # di pencarian Google". Bahannya sudah ada sejak awal - People
+    # Also Ask dan pertanyaan yang dipakai halaman pertama ikut
+    # dikumpulkan analisis SERP - tapi selama ini masuk brief cuma
+    # sebagai sepuluh baris di antara belasan daftar lain, lalu
+    # ditimpa aturan "data SERP adalah bahan KATA, bukan teks untuk
+    # disalin". Aturan itu benar untuk kalimat isi dan salah untuk
+    # yang satu ini: yang perlu ditiru dari pertanyaan orang justru
+    # BENTUKNYA - apa yang ditanyakan, dari sudut mana, dan sependek
+    # apa.
+    #
+    # Ditulis di gilirannya sendiri, tepat di atas permintaannya, dan
+    # cuma muncul di giliran yang memang menulis pertanyaan.
+    bagian_contoh_tanya = ""
+
+    if "faq_question" in spec:
+        orang_tanya = [
+            " ".join(str(teks).split())
+            for teks in (
+                blueprint["people_also_ask"]
+                + blueprint["competitor_questions"]
+            )
+            if str(teks).strip()
+        ]
+
+        orang_tanya = list(dict.fromkeys(orang_tanya))[:FAQ_SHAPE_SAMPLES]
+
+        if orang_tanya:
+            bagian_contoh_tanya = (
+                "\n## Bentuk Pertanyaan Yang Dipakai Halaman Ngerank\n"
+                "Ini pertanyaan yang benar-benar diketik orang di "
+                "Google dan yang dipasang halaman-halaman di peringkat "
+                "atas untuk pencarian ini.\n"
+                "JANGAN menyalin satu pun. Yang ditiru bentuknya: "
+                "sependek itu, sekonkret itu, dan bertanya dari sudut "
+                "orang yang mau memakai layanannya - bukan dari sudut "
+                "orang yang sedang menulis ensiklopedia.\n"
+                "Perhatikan apa yang ditanyakan orang: langkahnya, "
+                "syaratnya, berapa lama, berapa biayanya, aman atau "
+                "tidak, apa yang terjadi kalau gagal. Itu yang dicari "
+                "orang, dan itu yang membuat blok FAQ dibaca sampai "
+                "habis.\n"
+                "Pertanyaanmu menanyakan hal serupa, tapi tentang "
+                f"\"{topik or keyword}\" dan dengan kalimatmu sendiri.\n"
+                + "\n".join(f"  - {teks}" for teks in orang_tanya)
+                + "\n"
             )
 
     # Pertanyaan yang sudah ditulis di giliran sebelumnya, supaya
@@ -376,37 +1616,347 @@ def build_template_content_prompt(
     aturan_faq = spec.get("faq_answer")
 
     if aturan_faq and sudah:
-        mulai = int(aturan_faq.get("offset", 0))
-        tanya = list(sudah.get("faq_question") or [])[
-            mulai : mulai + aturan_faq["count"]
+        semua_tanya = list(sudah.get("faq_question") or [])
+
+        # Posisi yang benar-benar diminta di giliran ini.
+        #
+        # Untuk giliran biasa itu deretan berurutan mulai dari offset.
+        # Untuk giliran susulan - yang mengisi jawaban yang tadi
+        # dilewati model - posisinya BERSERAK, dan gap_spec sudah
+        # mencatatnya di "positions". Memakai potongan berurutan di
+        # situ menampilkan pertanyaan ke-3 dan ke-4 untuk lubang yang
+        # sebenarnya ada di posisi ke-3 dan ke-6, dan jawaban yang
+        # ditulis dengan benar dipasang ke pertanyaan yang salah -
+        # persis cacat yang bagian ini ada untuk mencegahnya.
+        posisi = aturan_faq.get("positions")
+
+        if posisi:
+            mulai = 0
+            urutan = list(posisi)
+        else:
+            mulai = int(aturan_faq.get("offset", 0))
+            urutan = list(range(mulai, mulai + aturan_faq["count"]))
+
+        tanya = [
+            semua_tanya[index] if index < len(semua_tanya) else ""
+            for index in urutan
         ]
 
-        if tanya:
+        if any(str(teks).strip() for teks in tanya):
             bagian_tanya = (
                 "\n## Pertanyaan Yang Harus Dijawab Berurutan\n"
-                "Ini pertanyaan yang sudah tertulis di halaman. "
-                "faq_answer ke-N adalah jawaban untuk pertanyaan ke-N "
-                "di daftar ini, jadi jawab yang ditanyakan - bukan "
-                "menulis kalimat lain tentang topik yang sama.\n"
+                "Ini pertanyaan yang sudah tertulis di halaman, dan "
+                "tugas giliran ini HANYA menjawabnya. faq_answer ke-N "
+                "adalah jawaban untuk pertanyaan ke-N di daftar ini.\n"
+                "Baca dulu pertanyaannya, baru tulis jawabannya. "
+                "Jawaban yang benar tapi dipasang di nomor yang salah "
+                "sama rusaknya dengan jawaban yang ngawur: pembaca "
+                "melihat pertanyaan tentang deposit dijawab dengan "
+                "cara login.\n"
+                "Kalau pertanyaannya menanyakan CARA, jawabannya "
+                "berisi langkahnya. Kalau menanyakan APAKAH, "
+                "jawabannya dimulai dengan ya atau tidak. Kalau "
+                "menanyakan BERAPA LAMA, jawabannya menyebut "
+                "waktunya.\n"
+                "Tanda [N] cuma penunjuk posisi, jangan ikut ditulis.\n"
                 + "\n".join(
-                    f"  {nomor}. {teks}"
+                    f"  [{nomor}] {teks}"
                     for nomor, teks in enumerate(tanya, start=1)
                 )
                 + "\n"
             )
 
+    # Judul bagian yang sudah berdiri di atas paragraf-paragraf ini.
+    #
+    # Alasannya sama dengan daftar pertanyaan FAQ di atas, dan
+    # akibatnya sama parahnya: judul dan paragraf yang dikepalainya
+    # sering jatuh di giliran yang berbeda, dan paragraf yang ditulis
+    # tanpa pernah melihat judulnya berbunyi tentang apa saja yang
+    # kebetulan setopik halaman - judul "Keamanan Akun dan Riwayat
+    # Transaksi" berdiri di atas tiga paragraf tentang kecepatan
+    # deposit, dan pembaca melihatnya lebih dulu daripada mesin
+    # pencari mana pun.
+    bagian_artikel = ""
+    aturan_paragraf = spec.get("paragraph")
+
+    if aturan_paragraf and sudah:
+        judul_tertulis = [
+            str(teks).strip()
+            for teks in (sudah.get("heading") or [])
+            if str(teks).strip()
+        ]
+
+        if judul_tertulis:
+            bagian_artikel = (
+                "\n## Judul Yang Sudah Berdiri Di Halaman Ini\n"
+                "Judul bagiannya sudah ditulis di giliran sebelumnya. "
+                "Paragraf yang kamu tulis sekarang berdiri di "
+                "bawahnya, jadi isinya harus membahas apa yang "
+                "dijanjikan judulnya - bukan topik lain yang kebetulan "
+                "sama-sama tentang halaman ini.\n"
+                + "\n".join(f"  - {teks}" for teks in judul_tertulis)
+                + "\n"
+            )
+
     bagian_padanan = (
         "\n## Teks Lama Yang Harus Diganti Berurutan\n"
-        "Nomor ke-N di daftar bawah ini diganti oleh teks ke-N yang "
-        f"kamu tulis. Tulis padanannya dalam {language_name} dengan "
+        "Baris [N] di daftar bawah ini diganti oleh teks ke-N yang "
+        "kamu tulis. Tanda [N] itu penunjuk posisi, bukan bagian dari "
+        "teksnya - jangan pernah ikut ditulis di jawabanmu. "
+        f"Tulis padanannya dalam {language_name} dengan "
         "ARTI YANG SAMA, bukan tulisan baru yang bebas. Ini teks "
         "menu dan tombol; kalau artinya berubah, tautannya jadi "
         "menyesatkan meskipun alamatnya tidak berubah.\n"
+        "Contoh yang benar: \"Mens\" jadi \"Pria\", \"View All\" jadi "
+        "\"Lihat Semua\", \"Contact Us\" jadi \"Hubungi Kami\".\n"
+        "Contoh yang SALAH: ketiganya ditulis jadi variasi "
+        f"\"{keyword}\". Menu yang seluruh isinya berbunyi mirip "
+        "tidak menunjuk ke mana-mana.\n"
+        "Bentuk teks lamanya ikut dipertahankan: nomor urut, angka, "
+        "tanda pisah, dan simbol bintang ditulis lagi di tempat yang "
+        "sama. \"[3] 1. Deposit Cepat\" dijawab \"1. \" ditambah "
+        "padanannya - angka 3 tidak ikut karena itu penunjuk posisi, "
+        "angka 1 ikut karena itu memang tertulis di teksnya. "
+        "\"[4] Rina — Malang • ★★★★★\" tetap "
+        "berbentuk nama, tanda pisah, kota, lalu bintang yang sama "
+        "banyaknya.\n"
+        "Nama orang diganti nama yang wajar di "
+        f"{brand.get('region_label', 'Indonesia')}. Nama merek atau "
+        "produk milik perusahaan lain disalin apa adanya.\n"
         + "\n".join(padanan)
         + "\n"
         if padanan
         else ""
     )
+
+    # Title dan deskripsi yang sudah ditulis di giliran pertama,
+    # dipasang sebagai patokan untuk seluruh giliran sesudahnya.
+    #
+    # Ini permintaan pengguna dan sekaligus perbaikan: tanpa patokan,
+    # tiap giliran memilih sudut pandangnya sendiri, dan halamannya
+    # terbit dengan judul bernada promosi di atas paragraf bernada
+    # ensiklopedia, FAQ yang menjawab pertanyaan lain, dan ulasan
+    # yang membicarakan hal yang tidak ada di halaman itu. Title dan
+    # deskripsi ditulis paling awal justru supaya bisa jadi patokan.
+    bagian_tema = ""
+
+    if sudah:
+        tema = [
+            (nama, str(nilai[0]).strip())
+            for nama, nilai in (
+                ("Judul halaman", sudah.get("title")),
+                ("H1", sudah.get("h1")),
+                ("Deskripsi", sudah.get("meta_description")),
+            )
+            if nilai and str(nilai[0]).strip()
+        ]
+
+        if tema:
+            # Peringatan tambahan khusus untuk giliran yang menulis
+            # deskripsi.
+            #
+            # Bagian ini menyuruh melanjutkan sudut pandang judulnya,
+            # dan cara paling malas melanjutkan sebuah kalimat adalah
+            # menuliskannya lagi. Terukur di halaman jadi - judul
+            # "JUHI88 Slot Gacor Terpercaya dengan Deposit QRIS Cepat
+            # dan Aman", deskripsi dibuka "JUHI88 slot gacor
+            # terpercaya dengan deposit QRIS cepat dan aman." Kalimat
+            # yang sama, huruf kecil, lalu disambung.
+            larangan = (
+                "PENTING untuk deskripsi yang kamu tulis sekarang: "
+                "JANGAN membukanya dengan kalimat judul di atas, "
+                "dan jangan menuliskan ulang judul itu dalam susunan "
+                "kata yang berbeda. Judulnya sudah terbaca sendiri di "
+                "hasil pencarian, tepat di atas deskripsimu; "
+                "mengulangnya berarti membuang seluruh baris pertama "
+                "untuk mengatakan sesuatu yang barusan dibaca orang. "
+                "Buka dengan hal yang BELUM disebut judulnya - "
+                "langkahnya, syaratnya, siapa yang memakainya, atau "
+                "apa yang dirasakan sesudahnya.\n"
+                + kata_terlarang(
+                    dict(tema).get("Judul halaman", ""),
+                    keyword,
+                    brand_name,
+                )
+                if "meta_description" in spec
+                else ""
+            )
+
+            bagian_tema = (
+                "\n## Sudut Pandang Halaman Ini\n"
+                "Judulnya sudah ditulis lebih dulu, dan DARI SITULAH "
+                "seluruh isi halaman ini mengalir. Bukan sekadar "
+                "patokan nada: sudut yang dipilih di sana adalah "
+                "sudut yang harus dilanjutkan paragraf, heading, FAQ, "
+                "dan ulasan yang kamu tulis sekarang.\n"
+                "Kalau judulnya menonjolkan kecepatan, isinya bicara "
+                "kecepatan. Kalau judulnya menonjolkan keamanan, "
+                "isinya bicara keamanan. Jangan memilih sudut sendiri "
+                "dan jangan menambah sudut baru.\n"
+                + larangan
+                + "\n".join(f"  {nama}: {teks}" for nama, teks in tema)
+                + "\n"
+            )
+
+    # Cetakan bentuk judul dan deskripsi, diambil dari template yang
+    # diunggah pengguna.
+    #
+    # Ini permintaan pengguna, dan sebelumnya tidak ada sama sekali:
+    # kedua teks itu satu-satunya bagian template yang TIDAK pernah
+    # diperlihatkan ke model. Akibatnya satu-satunya patokan bentuk
+    # yang tersisa adalah berkas contoh gaya, dan yang ditiru model
+    # dari situ bukan gayanya melainkan frame yang paling sering
+    # muncul - "[ BRAND ] menghadirkan ..." terulang belasan kali di
+    # berkas itu, dan judul yang terbit "TIMAH33 menghadirkan slot
+    # gacor dengan sistem spin modern".
+    #
+    # Yang diminta di sini kebalikannya: susunannya ditiru, katanya
+    # ditulis baru.
+    bagian_cetakan = (
+        "\n## Bentuk Judul Dan Deskripsi Di Template Ini\n"
+        "Ini judul dan deskripsi yang SEKARANG terpasang di template "
+        "yang sedang diisi. Isinya milik pemilik template dan tidak "
+        "boleh dipakai lagi - yang diambil cuma BENTUKNYA.\n"
+        "Yang ditiru: susunan kalimatnya, seberapa konkret janji yang "
+        "disebut, dan berapa kalimat yang dipakai deskripsinya.\n"
+        "Yang TIDAK ditiru dari sini: letak nama situs dan tanda "
+        "pisahnya di title. Dua hal itu sudah dipatok di aturan title "
+        "di atas, dan aturan itu menang atas bentuk template ini.\n"
+        "Yang TIDAK ikut: topiknya, katanya, dan angkanya. Kalau "
+        "bentuk lamanya \"NAMA - Janji Konkret yang Sifat dan "
+        "Sifat\", yang kamu tulis juga berbentuk begitu, tapi "
+        f"janjinya tentang \"{topik or keyword}\" dan disusun dengan "
+        "katamu sendiri.\n"
+        "Menyalin salah satu baris di bawah, seluruhnya atau "
+        "separuhnya, dihitung tidak menjawab.\n"
+        + "\n".join(f"  {nama} lama: {teks}" for nama, teks in cetakan)
+        + "\n"
+        if cetakan
+        else ""
+    )
+
+    bagian_bentuk = (
+        "\n## Teks Yang Harus Kamu Namai\n"
+        "Tiap baris [N] di bawah adalah teks yang SUDAH tertulis di "
+        "halaman ini. Teks ke-N yang kamu tulis sekarang menamai "
+        "baris ke-N itu. Tanda [N] penunjuk posisi, jangan ikut "
+        "ditulis.\n"
+        "Bacalah dulu barisnya, baru tulis namanya. Yang benar bisa "
+        "dicocokkan orang: baris yang bercerita tentang setor jam "
+        "dua pagi dinamai soal waktu, baris yang bercerita tentang "
+        "main dari ponsel dinamai soal ponsel. Nama yang sama-sama "
+        "cocok ditempel di baris mana pun berarti tidak menamai "
+        "apa-apa.\n"
+        "Jangan menyalin kalimat barisnya. Yang diminta namanya, "
+        "beberapa kata saja, bukan ringkasannya.\n"
+        "Jangan menulis nomor urut atau awalan apa pun di depan "
+        "jawabanmu - itu sudah diurus di luar, dan kalau kamu ikut "
+        "menuliskannya halaman terbit dengan nomor dobel.\n"
+        + "\n".join(bentuk)
+        + "\n"
+        if bentuk
+        else ""
+    )
+
+    bagian_fungsi = (
+        "\n## Judul Bagian Yang Ditulis Ulang\n"
+        "Nomor ke-N diganti oleh judul ke-N yang kamu tulis. Yang "
+        "dipertahankan di sini BUKAN arti judul lamanya, melainkan "
+        "bagian apa yang dikepalainya. Isi di bawah tiap judul tidak "
+        "ikut berpindah tempat.\n"
+        "Judul yang tadinya mengepalai daftar keunggulan tetap "
+        "menamai daftar keunggulan. Judul blok tanya-jawab tetap "
+        "menamai tanya-jawab. Judul blok ulasan tetap menamai "
+        "ulasan. Yang berganti topiknya, jadi tentang "
+        f"\"{' '.join(x for x in (brand_name, keyword) if x)}\".\n"
+        "Nama brand lama di dalam judul diganti "
+        f"\"{brand_name or '-'}\", bukan dibiarkan.\n"
+        + "\n".join(fungsi)
+        + "\n"
+        if fungsi
+        else ""
+    )
+
+    # Teks yang sudah tertulis di giliran sebelumnya, supaya giliran
+    # ini tidak menulis ulang yang sama.
+    #
+    # Tanpa ini tiap giliran menulis tanpa melihat giliran lain, dan
+    # untuk peran yang jumlahnya ratusan hasilnya halaman yang
+    # ratusan menunya berbunyi sama - terukur di halaman jadi:
+    # "Slot Terdepan", "Slot Terbaik", "Slot Terlaris", "Slot
+    # Terkini", "Slot Terpopuler" berulang sampai keyword density
+    # halaman naik ke 3,25%.
+    bagian_terpakai = ""
+
+    if sudah:
+        terpakai: list[str] = []
+
+        for role in REPEAT_PRONE_ROLES:
+            if role not in spec:
+                continue
+
+            terpakai.extend(
+                str(teks).strip()
+                for teks in (sudah.get(role) or [])
+                if str(teks).strip()
+            )
+
+        # Yang terakhir ditulis yang paling perlu diingat, karena
+        # itulah yang paling mungkin diulang.
+        terpakai = list(dict.fromkeys(reversed(terpakai)))[
+            :MAX_USED_REMINDERS
+        ]
+
+        if terpakai:
+            bagian_terpakai = (
+                "\n## Teks Yang Sudah Terpakai Di Halaman Ini\n"
+                "Jangan menulis satu pun dari daftar ini lagi. Tiap "
+                "teks yang kamu tulis sekarang harus berbeda dari "
+                "daftar ini DAN berbeda satu sama lain.\n"
+                + "\n".join(f"  - {teks}" for teks in terpakai)
+                + "\n"
+            )
+
+    # Halaman yang sudah pernah terbit untuk topik ini.
+    #
+    # Isinya TETAP sepanjang satu run - dibaca sekali dari database
+    # sebelum giliran pertama - jadi aman ditaruh di dalam brief yang
+    # di-cache. Yang berubah tiap giliran adalah bagian_terpakai di
+    # atas, dan itu memang ada di blok permintaan.
+    bagian_riwayat = ""
+
+    if riwayat:
+        lama: list[str] = []
+
+        for role in HISTORY_PROMPT_ORDER:
+            for teks in (riwayat.get(role) or []):
+                bersih = " ".join(str(teks).split())
+
+                if bersih:
+                    lama.append(f"  [{ROLE_LABELS.get(role, role)}] {bersih}")
+
+        lama = list(dict.fromkeys(lama))[:MAX_HISTORY_REMINDERS]
+
+        if lama:
+            bagian_riwayat = (
+                "\n## Halaman Yang Sudah Pernah Kamu Tulis\n"
+                "Teks di bawah SUDAH TERBIT di halaman lain untuk topik "
+                "ini. Halaman yang kamu tulis sekarang berdiri di "
+                "sebelahnya, dan dua halaman yang isinya sama tidak ada "
+                "gunanya bagi siapa pun - pembaca membaca hal yang sama "
+                "dua kali, dan mesin pencari memilih salah satu lalu "
+                "membuang yang lain.\n"
+                "Jadi bukan sekadar 'jangan menyalin'. Yang diminta "
+                "SUDUT YANG LAIN: kalau halaman sebelumnya bicara "
+                "kecepatan deposit, yang ini bicara hal lain - cara "
+                "memilihnya, apa yang terjadi kalau gagal, siapa yang "
+                "memakainya, bandingannya dengan cara lama. Judul, "
+                "heading, pertanyaan, dan ulasan yang kamu tulis harus "
+                "membahas hal yang berbeda, bukan hal yang sama dengan "
+                "kata yang ditukar.\n"
+                + "\n".join(lama)
+                + "\n"
+            )
 
     # Bagian ini SAMA PERSIS di setiap giliran, dan harus tetap
     # begitu. Ollama menyimpan hasil pemrosesan prompt dan memakainya
@@ -417,8 +1967,28 @@ def build_template_content_prompt(
     # ditaruh paling belakang. Menyisipkan apa pun yang berbeda per
     # giliran ke dalam blok ini akan membatalkan cache-nya dan
     # membuat setiap giliran membayar prefill dari nol.
+    blok_tema_serp = blok_daftar(
+        "Tema yang sering muncul di heading kompetitor:",
+        [item["term"] for item in blueprint["heading_topics"]],
+        limit=10,
+    )
+
+    blok_tanya_serp = blok_daftar(
+        "Pertanyaan yang dicari orang:",
+        blueprint["people_also_ask"] + blueprint["competitor_questions"],
+        limit=10,
+    )
+
     brief = f"""
 # MENGISI TEMPLATE HALAMAN
+
+Topik halaman ini: {topik or keyword}
+
+Seluruh halaman membahas satu topik itu saja, dari awal sampai
+akhir. Bukan "{keyword}" sebagai bahasan umum, melainkan
+"{keyword}" milik {brand_name or "situs ini"} - apa yang
+ditawarkannya, bagaimana cara memakainya, apa yang dialami
+pemakainya.
 
 Keyword utama: {keyword}
 Nama brand: {brand_name or "-"}
@@ -433,44 +2003,198 @@ Ringkasan SERP: {insight.get("serp_summary", "-")}
 
 Celah konten yang bisa diambil:
 {format_list(insight.get("content_gaps", []), limit=6)}
-
-Tema yang sering muncul di heading kompetitor:
-{format_list(
-    [item["term"] for item in blueprint["heading_topics"]],
-    limit=10,
-)}
-
-Pertanyaan yang dicari orang:
-{format_list(
-    blueprint["people_also_ask"] + blueprint["competitor_questions"],
-    limit=10,
-)}
-
+{blok_tema_serp}{blok_tanya_serp}{serp_word_bank(analysis)}{format_style_examples(keyword, brand_name, brand.get("variation", ""))}
 # ATURAN
 
-- Semua teks harus tentang "{keyword}" dan tidak boleh melenceng
-  ke topik lain, apa pun bunyi teks lama yang digantikan.
+- Teks artikel — title, meta_description, h1, heading, paragraph,
+  faq_question, faq_answer, review_text, caption, list_item —
+  harus tentang "{topik or keyword}" dan tidak boleh melenceng ke
+  topik lain, apa pun bunyi teks lama yang digantikan.
+- Data SERP di atas adalah bahan KATA, bukan teks untuk disalin.
+  Kosakatanya dipakai - istilah, sebutan, cara orang menamai hal
+  yang dicarinya - tapi kalimatnya tidak. Jangan memindahkan judul,
+  pertanyaan, atau kalimat milik situs lain ke halaman ini. Kalau
+  ada bahan di daftar itu yang tidak nyambung dengan
+  "{keyword}", abaikan bahannya - lebih baik menulis lebih
+  sedikit daripada menempelkan kalimat yang tidak ada
+  hubungannya dengan halaman ini.
+- nav_label, table_cell, dan label BUKAN tempat menaruh
+  "{keyword}". Itu tulisan di menu, tombol, dan sel tabel, dan
+  masing-masing menunjuk ke sesuatu yang benar-benar ada di situs
+  ini. Yang diminta di situ padanan dari teks lamanya: artinya
+  tetap, bahasanya yang menyesuaikan. Halaman dengan ratusan menu
+  yang seluruhnya berbunyi variasi "{keyword}" tidak bisa dipakai
+  siapa pun dan terbaca sebagai spam oleh mesin pencari.
+- Jangan menulis teks yang sama dua kali, dan jangan menulis dua
+  teks yang isinya sama dengan susunan kata berbeda. Yang diperiksa
+  isinya, bukan hurufnya.
 - Tulis ulang dengan kalimatmu sendiri. Jangan menyalin susunan
   kalimat teks lama, karena halaman ini harus berdiri sebagai
   tulisan baru, bukan versi ubahan.
 - Batas karakter itu keras. Teks yang lebih panjang akan merusak
   tata letak halaman, karena kolom dan kartunya sudah dipatok.
-- nav_label, table_cell, dan label mengisi menu, tombol, dan sel
-  tabel. Tulis sesingkat mungkin, tanpa titik di akhir, dan jangan
-  berupa kalimat. Menu yang isinya kalimat akan memecah header
-  halaman ke dua baris.
+- nav_label, table_cell, dan label ditulis sesingkat mungkin,
+  tanpa titik di akhir, dan jangan berupa kalimat. Menu yang
+  isinya kalimat akan memecah header halaman ke dua baris.
+- faq_question harus benar-benar berupa pertanyaan, diakhiri tanda
+  tanya, dan pertanyaan yang wajar diajukan orang yang hendak
+  memakai {brand_name or "situs ini"} - bukan pertanyaan
+  ensiklopedia tentang "{keyword}" pada umumnya.
+- Yang ditanyakan harus hal yang DIJANJIKAN TITLE halaman ini.
+  Orang membuka FAQ karena judulnya menjanjikan sesuatu dan mereka
+  ingin tahu syaratnya. Kalau judulnya tentang deposit sekejap,
+  pertanyaannya soal cara, syarat, batas, dan apa yang terjadi
+  kalau gagal - bukan soal grafis permainan atau sejarah situsnya.
+- Tulis pertanyaan yang PENDEK, di bawah batas karakternya. Pertanyaan
+  yang melewati batas dibuang seluruhnya, bukan dipotong - memotong
+  pertanyaan menghasilkan pertanyaan yang rusak, bukan yang lebih
+  pendek - dan slotnya lalu terbit dengan pertanyaan lama.
+- Tiap faq_question menanyakan HAL YANG BERBEDA. Dua pertanyaan
+  yang menanyakan hal sama dengan susunan kata berbeda dihitung
+  satu dan akan dibuang. "Apa perbedaan A dan B?" dan "Apakah A
+  sama dengan B?" adalah satu pertanyaan, bukan dua.
 - faq_answer ke-N adalah jawaban untuk faq_question ke-N. Jawab
   yang ditanyakan, jangan menulis kalimat lain yang kebetulan
   sama topiknya.
-- Jangan menomori atau memberi awalan seperti "1." di setiap teks.
+- Jangan menambah nomor urut atau awalan seperti "1." yang tidak
+  ada di teks lamanya. Kalau teks lamanya memang diawali nomor,
+  nomor itu tetap ditulis.
 - Setiap teks berdiri sendiri dan langsung berisi, tanpa pembuka.
-- Sebut "{brand_name}" secukupnya saja, tidak di setiap teks.
+- Sebut "{brand_name}" di sekitar separuh paragraf, di sebagian
+  jawaban FAQ, dan di sebagian ulasan. Bukan di setiap kalimat -
+  itu terbaca seperti spam - tapi halaman yang menyebut namanya
+  cuma di judul juga gagal, karena pembacanya selesai membaca
+  tanpa tahu situs apa yang barusan dibacanya.
+- Paragraf yang tidak menyebut namanya pun tetap harus berbicara
+  tentang layanannya, bukan tentang "{keyword}" pada umumnya.
+  Tulis apa yang bisa dilakukan pemakai di sini, bagaimana
+  langkahnya, dan apa bedanya - bukan penjelasan ensiklopedia yang
+  cocok ditempel di situs mana pun.
 - Jangan mengarang data tentang "{brand_name}" seperti jumlah
   member, lisensi, penghargaan, atau tahun berdiri.
 - Nama penulis ulasan tulis sebagai nama orang yang wajar di
   {brand.get("region_label", "Indonesia")}.
 - Jangan menjanjikan hasil, keuntungan, atau kemenangan.
-""".strip()
+
+Aturan paragraf artikel:
+- paragraph BUKAN kalimat tunggal. Tiap paragraf berisi 3 sampai 6
+  kalimat yang saling menyambung: satu kalimat membuka gagasannya,
+  kalimat berikutnya menjelaskan atau memberi contohnya, kalimat
+  terakhir menutup dengan apa artinya buat pemakai. Paragraf satu
+  kalimat terbaca sebagai potongan, bukan sebagai tulisan.
+- ISI jatah panjangnya sampai hampir penuh. Jatah tiap paragraf
+  disebutkan satu per satu di daftar permintaan, dan angka itu bukan
+  plafon yang sebaiknya dijauhi melainkan ukuran yang diminta.
+  Paragraf 90 karakter di slot berjatah 500 meninggalkan empat
+  perlima ruangnya kosong, dan halaman yang seperti itu di seluruh
+  badannya terbaca tipis oleh pembaca maupun mesin pencari.
+- Batas panjang tiap paragraf berbeda-beda dan itu disengaja. Yang
+  jatahnya besar ditulis panjang, yang jatahnya kecil ditulis
+  pendek. Artikel yang seluruh paragrafnya sama panjang terbaca
+  seperti daftar yang disamarkan.
+- Tiap paragraf melanjutkan sudut pandang yang dipilih di title,
+  bukan memulai sudut baru. Kalau titlenya tentang deposit QRIS satu
+  detik, paragrafnya membahas deposit itu dari sisi yang
+  berbeda-beda - caranya, syaratnya, apa yang terjadi kalau gagal,
+  bedanya dengan cara lama - bukan berpindah ke bonus, ke keamanan
+  data, lalu ke tampilan ponsel.
+- Sebut "{brand_name or 'situs ini'}" satu sampai dua kali dalam
+  satu paragraf, bukan di setiap kalimat. Paragraf yang menyebut
+  namanya di tiap kalimat terbaca sebagai spam, dan mesin pencari
+  menghitungnya begitu juga.
+- Tiap paragraf membahas hal yang BERBEDA. Tiga paragraf yang
+  ketiganya berbunyi tentang kecepatan deposit adalah satu paragraf
+  yang ditulis tiga kali.
+
+Aturan ulasan:
+- review_text ISINYA PENGALAMAN, bukan pujian. Tulis satu hal yang
+  benar-benar dipakai orang itu, bagaimana jalannya, dan apa yang
+  dirasakannya sesudah itu. "Situsnya bagus dan cepat" bukan ulasan;
+  "Saya setor lewat QRIS jam dua pagi dan saldonya masuk sebelum
+  aplikasi banknya sempat saya tutup" ulasan.
+- Isi jatah panjangnya. Ulasan dua belas kata terbaca sebagai
+  komentar yang ditulis asal-asalan, dan pembaca memakai ulasan
+  justru untuk mencari tahu hal-hal yang tidak tertulis di iklan.
+- Yang diceritakan harus hal yang DISEBUT DI TITLE halaman ini.
+  Halaman yang judulnya tentang deposit QRIS satu detik tapi
+  ulasannya membicarakan grafis permainan sedang memuji hal yang
+  bukan janjinya sendiri.
+- Setiap ulasan menyoroti hal yang berbeda dan memakai gaya bicara
+  yang berbeda. Lima ulasan yang susunan kalimatnya sama terbaca
+  sebagai lima ulasan yang ditulis satu orang - dan memang begitu
+  adanya.
+- review_tag adalah label dua sampai empat kata yang merangkum
+  ulasan di ATASNYA, bukan slogan halaman. Ulasan yang bercerita
+  tentang setor jam dua pagi ditandai "Proses Malam Hari", bukan
+  "Terbaik Dan Terpercaya". Tag yang cocok ditempel di ulasan mana
+  pun tidak menandai apa-apa.
+
+Aturan judul kartu:
+- card_title menamai keterangan yang berdiri di BAWAHNYA, dan cuma
+  itu tugasnya. Judul yang benar bisa dibaca sendirian dan sudah
+  memberi tahu isi kartunya; judul yang salah adalah kalimat promosi
+  yang sama-sama enak dibaca di kartu mana pun.
+- Panjangnya dua sampai lima kata, tanpa titik di akhir. Ini judul
+  di dalam kotak, bukan kalimat.
+- Keenam judul kartu menyebut hal yang BERBEDA. Enam judul yang
+  semuanya berbunyi tentang kecepatan adalah satu judul yang ditulis
+  enam kali, dan pembaca berhenti membaca di kartu kedua.
+- Nomor urut di depan judul lama tetap ditulis kalau memang ada di
+  situ. Satu kartu tanpa nomor di antara lima kartu bernomor lebih
+  kelihatan daripada enam kartu yang semuanya tidak bernomor.
+
+Aturan title dan meta_description:
+- KEDUANYA BUKAN TEKS YANG SAMA, dan bukan versi panjang-pendek dari
+  satu kalimat. Title adalah papan nama: siapa ini dan tentang apa,
+  dibaca dalam satu tarikan napas. Deskripsi adalah alasan mengklik:
+  apa yang didapat pembaca kalau masuk, hal yang TIDAK muat di
+  judul. Kalau deskripsimu bisa dipotong jadi title, atau titlemu
+  tinggal disambung jadi deskripsi, dua-duanya salah.
+- Contoh title dan contoh deskripsi di bawah ditulis dari dua berkas
+  yang berbeda, dan bedanya sengaja. Tiru yang sesuai peruntukannya,
+  jangan dicampur.
+- Kalau title halaman ini sudah tertulis di bagian "Sudut Pandang
+  Halaman Ini", deskripsinya melanjutkan sudut itu dengan
+  KETERANGAN BARU - cara pakainya, syaratnya, apa yang dirasakan
+  pemakainya - bukan menuliskan ulang kalimat judulnya.
+- Katanya diambil dari "Bahan Kata Untuk Title Dan Deskripsi" di
+  atas. Itu sebabnya halaman pertama Google dianalisis lebih dulu:
+  supaya kedua teks ini ditulis dengan kata yang memang dipakai
+  orang mencari, bukan dengan kata yang kebetulan terpikir.
+- Panjangnya sudah ditentukan di daftar permintaan dan itu bukan
+  saran. Title yang berhenti di 40 karakter membuang separuh baris
+  yang diberikan Google, dan separuh yang terbuang itu justru
+  tempat kata pencarian tambahan seharusnya berdiri. Kalau terasa
+  sudah cukup padahal jatahnya belum penuh, tambahkan satu hal
+  konkret lagi - cara pakainya, siapa yang memakainya, apa yang
+  didapat - bukan kata pengisi seperti "terbaik" atau "terpercaya".
+- Bagian yang paling penting ditulis di DEPAN. Google memotong
+  tampilannya di sekitar 60 karakter untuk title dan 155 untuk
+  deskripsi, jadi nama situs dan janji utamanya harus sudah lewat
+  sebelum titik itu. Sisanya tetap dibaca mesin pencari.
+- Keduanya menentukan nada seluruh halaman, jadi tulis dengan
+  gaya di bagian contoh: langsung, bertenaga, dan memakai satu
+  sudut pandang yang khas. Kalimat serba umum yang cocok untuk
+  situs mana pun adalah kegagalan di sini.
+- BENTUK TITLE SUDAH DIPATOK dan bukan pilihanmu: nama situs
+  "{brand_name}" berdiri PALING DEPAN, sendirian, lalu janjinya.
+  Tanda pisah di antara keduanya dipasang NEIIU sesudah jawabanmu,
+  jadi kamu tidak perlu - dan tidak boleh - menulis tanda pisah
+  sendiri.
+    benar : {brand_name} Update Harian RTP Dengan Pola Paling Baru
+    salah : Rahasia Spin di {brand_name} Yang Membuka Peluang
+    salah : {brand_name} menghadirkan layanan dengan sistem modern
+  Yang kedua salah karena nama situs berdiri di tengah kalimat. Yang
+  ketiga salah karena namanya melebur jadi subjek kalimat. Keduanya
+  membuat pembaca hasil pencarian tidak punya satu titik pun untuk
+  berhenti dan tahu ini situs apa - dan itulah satu-satunya tugas
+  sebuah title.
+- Janjinya ditulis Dengan Huruf Kapital Di Tiap Kata, kecuali kata
+  sambung pendek seperti "dan", "di", "untuk", "dengan". Bentuk itu
+  yang dipakai seluruh contoh title di bawah.
+- Sudut pandang yang dipilih di title dipakai lagi di h1,
+  paragraf, FAQ, dan ulasan. Satu halaman satu sudut pandang.
+{bagian_riwayat}""".strip()
 
     # Mulai dari sini isinya berbeda tiap giliran.
     permintaan = f"""
@@ -480,7 +2204,7 @@ Halamannya memakai template yang sudah jadi, jadi jumlah teksnya
 tidak boleh dikira-kira. Tulis persis sebanyak ini:
 
 {chr(10).join(kebutuhan)}
-{bagian_tanya}{bagian_padanan}""".rstrip()
+{bagian_tema}{bagian_cetakan}{bagian_artikel}{bagian_contoh_tanya}{bagian_tanya}{bagian_fungsi}{bagian_bentuk}{bagian_padanan}{bagian_terpakai}""".rstrip()
 
     return (
         content_planner_system_prompt(language_code),
@@ -533,6 +2257,24 @@ def build_content_plan_prompt(
     language_code = brand.get("region", "id")
     language_name = brand.get("language_name", "Indonesia")
 
+    blok_tema_wajib = blok_daftar(
+        "## Tema Yang Wajib Disinggung",
+        [item["term"] for item in blueprint["heading_topics"]],
+        limit=12,
+    )
+
+    blok_entity = blok_daftar(
+        "## Entity Yang Sering Muncul Di Kompetitor",
+        [item["entity"] for item in blueprint["common_entities"]],
+        limit=12,
+    )
+
+    blok_tanya_faq = blok_daftar(
+        "## Pertanyaan Yang Harus Dijawab Di FAQ",
+        blueprint["people_also_ask"] + blueprint["competitor_questions"],
+        limit=10,
+    )
+
     user_prompt = f"""
 # BRIEF LANDING PAGE BARU
 
@@ -561,42 +2303,34 @@ Strategi menang:
 ## Target Yang Harus Dikejar
 Total kata halaman: sekitar {word_target} kata
 Jumlah section (H2): {section_target} section
-Panjang title: maksimal 60 karakter
-Panjang meta description: 140 sampai 160 karakter
+Panjang title: {TITLE_MIN} sampai {TITLE_MAX} karakter
+Panjang meta description: {META_MIN} sampai {META_MAX} karakter
 Keyword density wajar: 0.8% sampai 2%
+{serp_word_bank(analysis)}
 
 ## Struktur Halaman Acuan Yang Ngerank
 Sumber acuan: {template["source_domain"]}
 {structure_text}
-
-## Tema Yang Wajib Disinggung
-{format_list(
-    [item["term"] for item in blueprint["heading_topics"]],
-    limit=12,
-)}
-
-## Entity Yang Sering Muncul Di Kompetitor
-{format_list(
-    [item["entity"] for item in blueprint["common_entities"]],
-    limit=12,
-)}
-
-## Pertanyaan Yang Harus Dijawab Di FAQ
-{format_list(
-    blueprint["people_also_ask"] + blueprint["competitor_questions"],
-    limit=10,
-)}
-
+{blok_tema_wajib}{blok_entity}{blok_tanya_faq}
 # TUGAS
 
 Susun isi landing page lengkap:
 
 1. title — memuat brand "{brand_name}" DAN keyword "{keyword}",
-   maksimal 60 karakter. Pola yang dianjurkan:
-   "{brand_name}: {keyword.title()} ..." atau
-   "{keyword.title()} di {brand_name} ..."
-2. meta_description — 140 sampai 160 karakter, memuat keyword dan
-   sebutkan brand "{brand_name}" sekali.
+   panjangnya {TITLE_MIN} sampai {TITLE_MAX} karakter dan WAJIB
+   melewati {TITLE_MIN}. Katanya diambil dari "Bahan Kata Untuk
+   Title Dan Deskripsi" di atas, bukan dikarang dari nol.
+   Bentuknya dipatok: "{brand_name}" berdiri PALING DEPAN dan
+   sendirian, lalu janjinya - "{brand_name} {keyword.title()} ...".
+   Tanda pisah di antara keduanya dipasang NEIIU sesudah jawabanmu,
+   jadi jangan menulis tanda pisah sendiri. Nama situs yang berdiri
+   di tengah kalimat, seperti "{keyword.title()} di {brand_name}
+   ...", tidak dipakai: pembaca hasil pencarian jadi tidak punya
+   satu titik pun untuk berhenti dan tahu ini situs apa.
+2. meta_description — {META_MIN} sampai {META_MAX} karakter dan
+   WAJIB melewati {META_MIN}, memuat keyword dan sebutkan brand
+   "{brand_name}" sekali. Bagian terpentingnya ditulis di depan,
+   karena Google memotong tampilannya di sekitar 155 karakter.
 3. slug — huruf kecil, dipisah tanda hubung, memuat keyword.
 4. h1 — berbeda susunan kata dari title, tetap memuat keyword dan
    brand "{brand_name}".

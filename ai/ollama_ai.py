@@ -8,7 +8,10 @@ import requests
 from ai.base_ai import BaseAI
 from config import (
     AI_CONNECT_TIMEOUT_SECONDS,
+    AI_GPU_LAYERS,
     AI_STALL_TIMEOUT_SECONDS,
+    AI_TEMPERATURE,
+    AI_THREADS,
 )
 # Satu perhitungan token dipakai bersama seluruh program. Dulu ada
 # dua salinan - satu di sini untuk batas waktu, satu di
@@ -122,13 +125,24 @@ class OllamaAI(BaseAI):
             "stream": True,
             "think": False,
             "options": {
-                "temperature": 0,
+                # Alasannya panjang di config.py. Ringkasnya: nol
+                # membuat dua run dengan keyword dan brand yang sama
+                # menghasilkan halaman yang sama huruf per huruf,
+                # sehingga membuat ulang halaman tidak ada gunanya.
+                "temperature": AI_TEMPERATURE,
                 "num_predict": self.max_tokens,
                 # Tanpa num_ctx, Ollama memakai context 4096 dan
                 # memotong prompt panjang tanpa peringatan. Prompt
                 # analisis SERP jauh lebih besar dari itu, jadi
                 # context harus muat prompt sekaligus jawabannya.
                 "num_ctx": self.context_length,
+                # Keduanya dijelaskan panjang di config.py. Ringkasnya:
+                # kartu grafis di mesin ini cuma muat 12% model dan
+                # menahan sisanya, dan Ollama memakai core fisik saja
+                # kalau tidak diberi tahu. Dua angka ini terukur
+                # mempercepat pengisian satu template sebelas kali.
+                "num_gpu": AI_GPU_LAYERS,
+                "num_thread": AI_THREADS,
             },
         }
 

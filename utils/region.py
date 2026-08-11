@@ -62,6 +62,43 @@ MONTH_NAMES: dict[str, list[str]] = {
 }
 
 
+# Nama orang untuk baris pengulas, satu daftar per zona.
+#
+# Ditulis di sini, bukan diminta ke model, dengan alasan yang sama
+# seperti nama kota: yang diminta ke model tidak pernah benar-benar
+# berganti. Terukur pada halaman terbit - baris "Mikaela Hyakuya -
+# Malang" milik pemilik template diminta ulang ke model, dan yang
+# kembali "Mikaela Hyakuya". Model diberi teks lama sebagai contoh
+# bentuk, lalu diperintahkan menulis padanan yang artinya sama; untuk
+# sebuah nama, padanan yang artinya sama adalah nama itu juga.
+#
+# Diambil dari daftar, penggantiannya pasti terjadi dan namanya pasti
+# wajar di zona itu - dua hal yang tidak satu pun bisa dijamin waktu
+# nama orang dikarang model 4B.
+PERSON_NAMES: dict[str, list[str]] = {
+    "id": [
+        "Andika Pratama", "Rizky Maulana", "Dwi Lestari",
+        "Bagus Setiawan", "Nurul Hidayah", "Fajar Nugroho",
+        "Siti Rahmawati", "Ahmad Fauzi", "Putri Anggraini",
+        "Hendra Wijaya", "Ratna Sari", "Yusuf Ramadhan",
+        "Intan Permata", "Bayu Saputra", "Dewi Anjani",
+        "Reza Firmansyah", "Lia Kartika", "Agus Salim",
+        "Maya Puspita", "Dimas Aditya", "Wulan Safitri",
+        "Iqbal Hakim", "Novi Handayani", "Teguh Prasetyo",
+    ],
+    "th": [
+        "สมชาย ทองดี", "ปรีชา แสงทอง", "สุดา วงศ์ไทย",
+        "ณัฐพล ศรีสุข", "กัญญา บุญมี", "อนุชา พรมมา",
+        "วิไล จันทร์เพ็ญ", "ธนกฤต ยอดแก้ว", "พิมพ์ใจ สุขสันต์",
+        "ชัยวัฒน์ เรืองศรี", "อรทัย มณีรัตน์", "ภาณุพงศ์ ใจดี",
+        "นภัสสร คำแหง", "ศิริพร ทองใบ", "กิตติศักดิ์ พูลทรัพย์",
+        "มาลี ดวงแก้ว", "วรวุฒิ สายทอง", "เบญจมาศ ปิ่นทอง",
+        "ธีรศักดิ์ นาคเงิน", "จิราพร แก้วมณี", "สุริยา พันธุ์ดี",
+        "อารีย์ ชูเกียรติ", "พงศธร รักษ์ไทย", "ขวัญฤทัย เพชรงาม",
+    ],
+}
+
+
 REGIONS: dict[str, dict] = {
     "id": {
         "code": "id",
@@ -117,10 +154,24 @@ REGIONS: dict[str, dict] = {
         ],
         # Nama kota untuk ditulis DI DALAM halaman, bukan untuk
         # penargetan pencarian.
+        # Daftarnya sengaja panjang. Ia dipakai dua arah: memilih kota
+        # yang ditulis di halaman, DAN mengenali kota lama yang perlu
+        # diganti. Untuk arah kedua, kota yang tidak ada di daftar
+        # tidak akan pernah terganti - dan bekasnya terbaca di halaman
+        # zona Thailand, yang terbit dengan pengulas dari "Malang" dan
+        # "Bogor" karena keduanya tidak tercatat di sini.
         "city_names": [
             "Jakarta", "Surabaya", "Bandung", "Medan", "Semarang",
             "Makassar", "Denpasar", "Palembang", "Yogyakarta",
             "Tangerang", "Bekasi", "Depok", "Batam", "Pekanbaru",
+            "Malang", "Bogor", "Solo", "Surakarta", "Padang",
+            "Bandar Lampung", "Samarinda", "Balikpapan", "Manado",
+            "Pontianak", "Banjarmasin", "Cirebon", "Serang", "Jambi",
+            "Bengkulu", "Kediri", "Sidoarjo", "Gresik", "Cimahi",
+            "Purwokerto", "Tasikmalaya", "Mataram", "Kupang",
+            "Jayapura", "Ambon", "Palu", "Kendari", "Ternate",
+            "Sukabumi", "Pekalongan", "Tegal", "Salatiga", "Madiun",
+            "Probolinggo", "Pasuruan", "Jember", "Banyuwangi",
         ],
     },
     "th": {
@@ -175,7 +226,10 @@ REGIONS: dict[str, dict] = {
         "city_names": [
             "กรุงเทพฯ", "เชียงใหม่", "นนทบุรี", "พัทยา", "ภูเก็ต",
             "ขอนแก่น", "หาดใหญ่", "อุดรธานี", "นครราชสีมา", "ชลบุรี",
-            "สุราษฎร์ธานี", "เชียงราย",
+            "สุราษฎร์ธานี", "เชียงราย", "อยุธยา", "ระยอง", "ลำปาง",
+            "พิษณุโลก", "นครสวรรค์", "สมุทรปราการ", "ปทุมธานี",
+            "นครปฐม", "ราชบุรี", "กาญจนบุรี", "ตรัง", "สงขลา",
+            "อุบลราชธานี", "สกลนคร", "มหาสารคาม", "ร้อยเอ็ด",
         ],
     },
 }
@@ -268,6 +322,21 @@ def get_region(code: str = "") -> dict:
         )
 
     return REGIONS[clean]
+
+
+def person_names(region: str = DEFAULT_REGION) -> list[str]:
+    """
+    Nama orang yang pantas ditulis sebagai pengulas di zona itu.
+
+    Zona yang belum punya daftarnya sendiri memakai daftar Indonesia,
+    bukan daftar kosong: nama Indonesia di halaman zona lain masih
+    jauh lebih baik daripada nama pemilik template yang bertahan
+    karena tidak ada penggantinya.
+    """
+    return PERSON_NAMES.get(
+        get_region(region)["code"],
+        PERSON_NAMES[DEFAULT_REGION],
+    )
 
 
 def strip_marks(text: str) -> str:

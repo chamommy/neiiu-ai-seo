@@ -98,6 +98,36 @@ TEXT_ATTRIBUTES_ANY_TAG = {
 }
 
 
+# Atribut yang isinya ALAMAT BERKAS GAMBAR, bukan teks.
+#
+# Dicatat terpisah dari TEXT_ATTRIBUTES dan tidak pernah masuk
+# self.slots. Pemisahan itu bukan kerapian melainkan pengaman: apa
+# pun yang masuk slots akan melewati classify() lalu bisa kebagian
+# kalimat dari AI, dan kalimat yang ditulis ke dalam src berarti
+# gambarnya hilang dari halaman. Yang boleh menulis ke sini cuma
+# generators/template_assets.py, dan yang ditulisnya cuma URL yang
+# diketikkan pengguna sendiri.
+ASSET_ATTRIBUTES = {
+    ("link", "href"),
+    # Sudah ikut TEXT_ATTRIBUTES juga - og:title dan og:description
+    # memang teks. Yang diambil di sini og:image dan saudaranya, dan
+    # pemilahnya ada di template_assets, bukan di sini.
+    ("meta", "content"),
+    ("img", "src"),
+    ("img", "srcset"),
+    ("img", "data-src"),
+    ("amp-img", "src"),
+    ("amp-img", "srcset"),
+    ("amp-anim", "src"),
+    ("source", "src"),
+    ("source", "srcset"),
+    ("video", "poster"),
+    ("amp-video", "poster"),
+    # src milik <video> sengaja TIDAK ada di sini. Isinya berkas
+    # video, dan menulisi alamat gambar ke situ mematikan videonya.
+}
+
+
 def walk_attributes(raw: str):
     """
     Menyusuri atribut satu tag dari kiri ke kanan.
@@ -221,6 +251,11 @@ class SlotScanner(HTMLParser):
 
         self.stack: list[dict] = []
         self.slots: list[dict] = []
+
+        # Letak nilai atribut yang isinya alamat gambar. Sengaja
+        # daftar sendiri, bukan bagian dari slots - lihat
+        # ASSET_ATTRIBUTES di atas.
+        self.assets: list[dict] = []
         self.elements: list[dict] = []
         self.end_tags: list[dict] = []
         self.pending: int | None = None
@@ -250,6 +285,11 @@ class SlotScanner(HTMLParser):
         self.ad_blocks: list[tuple[int, int]] = []
         self.ad_open: int | None = None
 
+        # Penanda iklan milik tiap blok yang sedang terbuka, sedalam
+        # ad_depth. Dipakai membedakan iklan sungguhan dari elemen
+        # yang cuma kebetulan memakai kata "banner".
+        self.ad_reasons: list[str] = []
+
     # ---------- posisi ----------
 
     def char_offset(self) -> int:
@@ -271,9 +311,19 @@ class SlotScanner(HTMLParser):
     def path(self) -> list[str]:
         return [item["tag"] for item in self.stack]
 
-    def looks_like_ad(self, tag: str, attrs: dict) -> bool:
+    def ad_reason(self, tag: str, attrs: dict) -> str:
+        """
+        Penanda iklan apa yang membuat elemen ini dihitung iklan.
+
+        Dulu ini mengembalikan True/False saja. Alasannya sekarang
+        ikut disimpan karena tidak semua penanda sama kuatnya:
+        "adsbygoogle" dan "data-ad-client" cuma dipakai jaringan
+        iklan sungguhan, sedangkan kata "banner" sama seringnya
+        dipakai untuk gambar sampul milik template itu sendiri.
+        Yang membacanya generators/template_assets.py.
+        """
         if tag in AD_TAGS:
-            return True
+            return f"tag {tag}"
 
         haystack = " ".join(
             [tag]
@@ -282,7 +332,12 @@ class SlotScanner(HTMLParser):
                if key in {"class", "id", "data-ad-client", "type"}]
         )
 
-        return bool(AD_MARKERS.search(haystack))
+        cocok = AD_MARKERS.search(haystack)
+
+        return cocok.group(0) if cocok else ""
+
+    def looks_like_ad(self, tag: str, attrs: dict) -> bool:
+        return bool(self.ad_reason(tag, attrs))
 
     # ---------- simpul teks ----------
 
@@ -340,6 +395,7 @@ class SlotScanner(HTMLParser):
         attrs: list[tuple[str, str | None]],
         tag_start: int,
         element_index: int,
+        text_ok: bool = True,
     ) -> None:
         """
         Mencari letak nilai atribut di dalam sumber tag aslinya.
@@ -347,6 +403,14 @@ class SlotScanner(HTMLParser):
         Nilai dicari di potongan sumber tag itu sendiri, bukan di
         seluruh dokumen, supaya atribut bernilai sama di tempat lain
         tidak ikut tertukar.
+
+        text_ok=False dipakai di dalam blok iklan: atribut teks tidak
+        dicatat sama sekali, sedangkan alamat gambar tetap dicatat
+        dengan penanda in_ad. Alamat itu tidak akan pernah ditulisi -
+        tapi tanpa mencatatnya, gambar utama yang kebetulan berada di
+        dalam <div class="hero-banner"> hilang tanpa jejak dari
+        laporan, dan pengguna cuma melihat posternya tidak berganti
+        tanpa tahu sebabnya.
         """
         raw = self.get_starttag_text()
 
@@ -356,20 +420,55 @@ class SlotScanner(HTMLParser):
         wanted = {
             name.lower()
             for name, value in attrs
-            if value is not None
+            if text_ok
+            and value is not None
             and (
                 (tag, name) in TEXT_ATTRIBUTES
                 or name in TEXT_ATTRIBUTES_ANY_TAG
             )
         }
 
-        if not wanted:
+        wanted_asset = {
+            name.lower()
+            for name, value in attrs
+            if value is not None and (tag, name.lower()) in ASSET_ATTRIBUTES
+        }
+
+        if not wanted and not wanted_asset:
             return
 
         seen: set[str] = set()
 
         for name, value_start, value_end, quote in walk_attributes(raw):
+            if name in wanted_asset and name not in seen and value_end > value_start:
+                self.assets.append(
+                    {
+                        "kind": "attribute",
+                        "start": tag_start + value_start,
+                        "end": tag_start + value_end,
+                        "current": raw[value_start:value_end],
+                        "quote": quote,
+                        "tag": tag,
+                        "attrs": {key: val for key, val in attrs},
+                        "attr": name,
+                        "element_index": element_index,
+                        "path": self.path() + [tag],
+                        "ancestors": [
+                            dict(item["attrs"]) for item in self.stack
+                        ],
+                        "in_ad": self.in_ad(),
+                        "ad_reasons": list(self.ad_reasons),
+                    }
+                )
+
             if name not in wanted:
+                # seen ditandai di bawah supaya atribut kembar hanya
+                # terhitung sekali untuk KEDUA daftar. Kalau ditandai
+                # di sini, atribut yang cuma asset akan menghalangi
+                # pembacaan atribut teks bernama sama sesudahnya.
+                if name in wanted_asset:
+                    seen.add(name)
+
                 continue
 
             # Atribut kembar di satu tag hanya dihitung sekali.
@@ -449,12 +548,19 @@ class SlotScanner(HTMLParser):
         self.close_pending(start)
 
         attr_map = {key: (value or "") for key, value in attrs}
-        is_ad = self.looks_like_ad(tag, attr_map)
+        alasan = self.ad_reason(tag, attr_map)
+        is_ad = bool(alasan)
 
         index = self.record_element(tag, attr_map, start, is_ad)
 
-        if not self.in_opaque() and not self.in_ad():
-            self.attribute_spans(tag, attrs, start, index)
+        if not self.in_opaque():
+            self.attribute_spans(
+                tag,
+                attrs,
+                start,
+                index,
+                text_ok=not self.in_ad(),
+            )
 
         if tag not in VOID_TAGS:
             if len(self.stack) >= MAX_DEPTH:
@@ -499,18 +605,26 @@ class SlotScanner(HTMLParser):
                     self.ad_open = start
 
                 self.ad_depth += 1
+                self.ad_reasons.append(alasan)
 
     def handle_startendtag(self, tag, attrs) -> None:
         start = self.char_offset()
         self.close_pending(start)
 
         attr_map = {key: (value or "") for key, value in attrs}
-        is_ad = self.looks_like_ad(tag, attr_map)
+        alasan = self.ad_reason(tag, attr_map)
+        is_ad = bool(alasan)
 
         index = self.record_element(tag, attr_map, start, is_ad)
 
-        if not self.in_opaque() and not self.in_ad():
-            self.attribute_spans(tag, attrs, start, index)
+        if not self.in_opaque():
+            self.attribute_spans(
+                tag,
+                attrs,
+                start,
+                index,
+                text_ok=not self.in_ad(),
+            )
 
     def handle_endtag(self, tag) -> None:
         offset = self.char_offset()
@@ -546,6 +660,9 @@ class SlotScanner(HTMLParser):
             if item["is_ad"]:
                 self.ad_depth -= 1
 
+                if self.ad_reasons:
+                    self.ad_reasons.pop()
+
                 if self.ad_depth == 0 and self.ad_open is not None:
                     self.ad_blocks.append((self.ad_open, offset))
                     self.ad_open = None
@@ -577,6 +694,7 @@ def scan(html: str) -> dict:
 
     return {
         "slots": scanner.slots,
+        "assets": scanner.assets,
         "elements": scanner.elements,
         "end_tags": scanner.end_tags,
         "opaque": scanner.opaque_blocks,

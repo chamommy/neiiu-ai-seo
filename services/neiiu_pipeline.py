@@ -31,8 +31,14 @@ from utils.region import (
     resolve_location,
     slug_for_url,
 )
+from utils.text import author_name
 from generators.amp_generator import generate_amp_page
 from generators.amp_validator import validate_amp
+from generators.article_block import (
+    reachable_words,
+    stretch_spec,
+    template_article_words,
+)
 from generators.content_planner import (
     check_language,
     count_plan_words,
@@ -45,6 +51,11 @@ from generators.seo_validator import validate_page
 from generators.template_extractor import (
     extract_template_from_url,
     rank_reference_pages,
+)
+from generators.template_assets import (
+    ASSET_LABELS,
+    UnsafeAssetUrl,
+    clean_assets,
 )
 from generators.template_filler import (
     derive_spec,
@@ -109,6 +120,19 @@ def content_failure_hint(error: Exception) -> str:
             "Ollama."
         )
 
+    # Ollama menolak permintaannya sebelum satu token pun ditulis
+    # karena JSON Schema-nya tidak bisa dijadikan grammar. Ollama
+    # sendiri sehat, jadi saran "pastikan Ollama berjalan" di bawah
+    # justru menyuruh orang memeriksa satu-satunya hal yang tidak
+    # rusak.
+    if "parse grammar" in teks or "initialize samplers" in teks:
+        return (
+            "Batas panjang salah satu teks terlalu besar untuk "
+            "dijadikan grammar oleh Ollama. Turunkan kolom Panjang "
+            "artikel, atau pakai template yang slot teksnya tidak "
+            "sepanjang itu."
+        )
+
     if "bukan json" in teks or "json terstruktur" in teks:
         return (
             "Jawaban model berhenti sebelum JSON-nya selesai. "
@@ -118,6 +142,56 @@ def content_failure_hint(error: Exception) -> str:
         )
 
     return "Pastikan Ollama berjalan dan model sudah ter-pull."
+
+
+def susun_kabar(info: dict) -> str:
+    """
+    Menyusun satu baris log dari kabar kemajuan langkah AI.
+
+    Kabarnya datang dalam dua bentuk. Yang berisi "line" adalah catatan
+    apa adanya - misalnya peran mana yang dijawab kependekan lalu
+    diminta lagi. Sisanya adalah hitungan token yang sedang ditulis
+    model.
+
+    Ditulis di tingkat modul supaya bisa diuji tanpa menjalankan
+    pipeline: dua kali kesalahan di sini menghanguskan puluhan menit
+    kerja model, dan keduanya lolos justru karena fungsinya terkubur di
+    dalam run_neiiu dan tidak pernah dipanggil terpisah.
+    """
+    catatan = str(info.get("line") or "").strip()
+
+    if catatan:
+        return f"  {catatan}"
+
+    # Isi template dikerjakan beberapa giliran, karena satu permintaan
+    # tidak muat menampung seluruh teks halaman. Nomor gilirannya ikut
+    # ditampilkan supaya kemajuannya terbaca sebagai maju, bukan
+    # sebagai mengulang.
+    giliran = ""
+
+    try:
+        jumlah = int(info.get("batches", 1))
+    except (TypeError, ValueError):
+        jumlah = 1
+
+    if jumlah > 1:
+        giliran = f"bagian {info.get('batch', '?')}/{jumlah} — "
+
+    if info.get("batch_retry"):
+        giliran += "melengkapi sisa — "
+
+    try:
+        token = int(info.get("tokens", 0))
+    except (TypeError, ValueError):
+        token = 0
+
+    if token == 0:
+        return f"  {giliran}memproses prompt, belum ada token keluar..."
+
+    return (
+        f"  {giliran}menulis... {token} token "
+        f"({info.get('elapsed', '?')} detik)"
+    )
 
 
 def build_brand(
@@ -165,6 +239,18 @@ def build_brand(
         "locale": spec["og_locale"],
         "direction": spec["direction"],
         "disclaimer": SITE_DISCLAIMER,
+        # Penanda run, dipakai memilih contoh gaya mana yang dikirim
+        # ke model.
+        #
+        # Ditaruh di sini karena dict ini sudah sampai ke setiap
+        # generator tanpa satu pun parameter tambahan, dan karena ia
+        # dibuat SEKALI per run. Dua sifat itu yang dibutuhkan: beda
+        # antar run supaya halaman kedua tidak menyalin halaman
+        # pertama, dan sama sepanjang satu run supaya awalan promptnya
+        # tetap identik di semua giliran - kalau berubah di tengah,
+        # cache prompt Ollama batal dan tiap giliran membayar prefill
+        # dari nol.
+        "variation": now.strftime("%Y%m%d%H%M%S%f"),
         # Tahun yang tampil mengikuti kalender setempat, sedangkan
         # tanggal untuk mesin tetap masehi.
         "year": str(now.year + spec["year_offset"]),
@@ -437,12 +523,26 @@ def plan_from_template_content(
     isi template diterjemahkan ke bentuk yang sama supaya bagian
     lain pipeline tidak perlu tahu jalur mana yang dipakai.
     """
+    # Pasangan yang salah satu sisinya kosong tidak ikut.
+    #
+    # Daftar ini bukan cuma laporan: dari sinilah blok FAQPage di
+    # structured data disusun, dan dari sini pula halaman AMP dirakit
+    # kalau pengguna tidak mengunggah berkas AMP sendiri. Pasangan
+    # kosong yang lolos terbit sebagai <Question> bernama string
+    # kosong - rich result yang ditolak Google, dan kartu tanya-jawab
+    # tanpa pertanyaan di halaman AMP.
+    #
+    # Slot kosong SENGAJA dibiarkan kosong sampai di sini, bukan
+    # dibuang lebih awal, karena nomor urutnya yang memasangkan
+    # jawaban ke pertanyaannya. Membuangnya di tengah jalan menggeser
+    # seluruh sisa daftar naik satu posisi.
     faq = [
         {"question": question, "answer": answer}
         for question, answer in zip(
             content.get("faq_question", []),
             content.get("faq_answer", []),
         )
+        if str(question).strip() and str(answer).strip()
     ]
 
     keywords = [
@@ -464,6 +564,11 @@ def plan_from_template_content(
         "slug": slug_for_url(content.get("h1") or keyword, region),
         "h1": content.get("h1", ""),
         "intro": paragraphs[:2],
+        # Artikelnya ada di dalam paragraphs ini, karena memang di situ
+        # tempatnya - slot paragraf milik template. Dua hal di luar
+        # halaman template membaca daftar ini: versi AMP yang dibuat
+        # generator biasa saat pengguna tidak mengunggah berkas AMP,
+        # dan hitungan kata di laporan job.
         "sections": sections_from_parts(
             content.get("heading", []),
             paragraphs[2:],
@@ -471,7 +576,9 @@ def plan_from_template_content(
         "faq": faq,
         "keywords": keywords[:12],
         "reviews": [
-            {"text": text, "author": author}
+            # Namanya saja, tanpa kota dan bintang yang ikut tertulis
+            # di baris pengulas milik template.
+            {"text": text, "author": author_name(author)}
             for text, author in zip(
                 content.get("review_text", []),
                 content.get("review_author", []),
@@ -545,7 +652,10 @@ def run_neiiu(
     template_brand: str = "",
     design_refs: list[str] | None = None,
     cta_url: str = "",
+    assets: dict | None = None,
+    history: dict | None = None,
     color_variant: int | None = None,
+    article_words: int = 0,
     plain: bool = False,
     kit_from_ref: bool = False,
     on_event=None,
@@ -585,6 +695,15 @@ def run_neiiu(
 
     brand = build_brand(brand_name, base_url, region, cta_url)
 
+    # Alamat gambar diperiksa SEKARANG, sebelum satu detik pun dipakai
+    # untuk crawl dan menulis. Alamat yang salah ketik baru ketahuan di
+    # langkah 6 kalau diperiksa belakangan, dan pengguna sudah menunggu
+    # belasan menit untuk kegagalan yang bisa disebutkan di awal.
+    try:
+        clean_assets_map = clean_assets(assets)
+    except UnsafeAssetUrl as error:
+        raise PipelineError(str(error)) from error
+
     # 1. SERP
     emit(1, "start")
 
@@ -597,6 +716,39 @@ def run_neiiu(
         f"lokasi {resolve_location(region, city)}), "
         f"halaman ditulis dalam bahasa {brand['language_name']}",
     )
+
+    if history:
+        emit(
+            1,
+            "info",
+            f"mengingat {sum(len(v) for v in history.values())} teks dari "
+            "halaman yang sudah pernah dibuat untuk topik ini - yang "
+            "mengulangnya akan ditolak dan diminta ulang",
+        )
+
+    if clean_assets_map and user_template:
+        emit(
+            1,
+            "info",
+            "gambar yang diganti: "
+            + ", ".join(
+                f"{ASSET_LABELS[peran]} -> {url}"
+                for peran, url in clean_assets_map.items()
+            ),
+        )
+    elif clean_assets_map:
+        # Alamat gambar hanya berguna kalau ada template yang punya
+        # gambarnya. Halaman yang dirakit NEIIU sendiri tidak memuat
+        # satu pun gambar untuk ditukar, jadi didiamkan di sini berarti
+        # pengguna menunggu belasan menit lalu mendapati logonya tidak
+        # berubah, tanpa satu baris pun yang menyebut sebabnya.
+        emit(
+            1,
+            "info",
+            "alamat logo/favicon/poster diisi tapi Template dikosongkan, "
+            "jadi tidak ada gambar yang ditukar - halaman yang dirakit "
+            "NEIIU sendiri tidak memuat gambar template",
+        )
 
     serp = search_keyword(
         keyword=clean_keyword,
@@ -685,6 +837,19 @@ def run_neiiu(
             "--reference atau daftar kompetitor manual.",
         )
 
+        # Disebut terpisah karena akibatnya terlihat di halaman jadi,
+        # bukan cuma di angka. Isi halaman ini disusun tanpa satu pun
+        # kata dari kompetitor - kalau tidak dikatakan, FAQ dan
+        # headingnya yang lebih tipis terbaca seperti kesalahan lain.
+        emit(
+            2,
+            "info",
+            "  kosakata dari kompetitor tidak dipakai sama sekali "
+            "untuk keyword ini: yang terbaca crawler adalah isi asli "
+            "situs yang dibajak, bukan isi yang ngerank. FAQ dan "
+            "heading disusun tanpa bahan dari SERP.",
+        )
+
     emit(
         2,
         "done",
@@ -705,30 +870,17 @@ def run_neiiu(
         berkala, prosesnya tidak bisa dibedakan dari yang menggantung.
         """
         def report(info: dict) -> None:
-            # Isi template dikerjakan beberapa giliran, karena satu
-            # permintaan tidak muat menampung seluruh teks halaman.
-            # Nomor gilirannya ikut ditampilkan supaya kemajuannya
-            # terbaca sebagai maju, bukan sebagai mengulang.
-            giliran = ""
-
-            if info.get("batches", 1) > 1:
-                giliran = f"bagian {info['batch']}/{info['batches']} — "
-
-            if info["tokens"] == 0:
-                emit(
-                    step,
-                    "info",
-                    f"  {giliran}memproses prompt, "
-                    "belum ada token keluar...",
-                )
-                return
-
-            emit(
-                step,
-                "info",
-                f"  {giliran}menulis... {info['tokens']} token "
-                f"({info['elapsed']} detik)",
-            )
+            # Seluruh isinya dibungkus karena laporan kemajuan tidak
+            # boleh punya kuasa membatalkan pekerjaan yang dilaporkannya.
+            # Ini sudah dua kali terjadi di langkah paling mahal: sekali
+            # karena "batches" berisi teks lalu dibandingkan dengan
+            # angka, sekali lagi karena kabar berbentuk {"line": ...}
+            # dibaca sebagai hitungan token. Keduanya menghanguskan
+            # puluhan menit kerja model demi satu baris log.
+            try:
+                emit(step, "info", susun_kabar(info))
+            except Exception:
+                pass
 
         return report
 
@@ -781,6 +933,42 @@ def run_neiiu(
                 counts[role] = max(counts.get(role, 0), count)
 
         template_spec = merge_specs(*specs)
+
+        # Panjang artikel diatur di sini, sebelum satu permintaan pun
+        # dikirim ke model: jatah tiap slot paragraf dilebarkan supaya
+        # model menulis lebih panjang DI TEMPAT YANG SAMA. Tidak ada
+        # paragraf yang ditambahkan, dan tanpa target apa pun tidak
+        # ada satu jatah yang berubah.
+        muat_di_template = template_article_words(template_spec)
+        tercapai = reachable_words(template_spec, article_words)
+        dilebarkan = stretch_spec(template_spec, article_words)
+
+        if dilebarkan:
+            emit(
+                4,
+                "run",
+                f"panjang artikel: {muat_di_template} kata muat di "
+                f"template, jatah {dilebarkan} paragraf dilebarkan "
+                "- jumlah paragrafnya tetap.",
+            )
+
+        # Target yang di luar jangkauan dikatakan apa adanya.
+        #
+        # Satu template yang cuma punya tujuh slot paragraf tidak bisa
+        # memuat 1.500 kata tanpa menambah paragraf, dan menambah
+        # paragraf justru yang tidak boleh dilakukan. Diam-diam
+        # berhenti di angka yang tercapai berarti membiarkan pengguna
+        # mengira targetnya terpenuhi.
+        if article_words and tercapai < article_words:
+            emit(
+                4,
+                "info",
+                f"  target {article_words} kata tidak tercapai di "
+                f"template ini: paling jauh sekitar {tercapai} kata, "
+                "karena satu paragraf paling banyak dilebarkan tiga "
+                "kali lipat. Pakai template dengan lebih banyak "
+                "paragraf kalau perlu lebih panjang.",
+            )
 
         template = {
             "source_url": f"template: {user_template['name']}",
@@ -861,6 +1049,23 @@ def run_neiiu(
     # 5. Rencana konten
     emit(5, "start")
 
+    # Catatan dari langkah pengisian, disimpan supaya ikut ke
+    # report.json.
+    #
+    # Sebelumnya catatan ini hanya dikirim ke log langsung, dan begitu
+    # run selesai tidak ada jejaknya sama sekali. Akibatnya terasa
+    # persis saat paling dibutuhkan: halaman terbit dengan judul blok
+    # milik pemilik template, dan satu-satunya keterangan yang bisa
+    # menjelaskan kenapa - "hanya 1 dari 9 heading yang terisi" -
+    # sudah hilang bersama prosesnya. Diagnosis jadi menebak-nebak,
+    # dan satu run di mesin ini harganya lebih dari sejam.
+    content_notes: list[str] = []
+
+    # Isi yang terbit, dipakai lagi di luar untuk diingat sebagai
+    # "sudah dipakai". Kosong di jalur tanpa template, karena di situ
+    # halamannya dirakit dari plan, bukan dari peta slot.
+    content: dict = {}
+
     try:
         if user_template:
             # Jumlah teks ditentukan template, jadi yang diminta ke
@@ -875,11 +1080,18 @@ def run_neiiu(
                     "faq_question": blueprint["people_also_ask"]
                     + blueprint["competitor_questions"],
                 },
+                riwayat=history or {},
                 on_progress=ai_progress(5),
             )
 
             for note in fit_notes:
                 emit(5, "info", f"  {note}")
+
+            content_notes = list(fit_notes)
+
+            # Keyword ikut dibawa di dalam isi supaya judul blok yang
+            # ditulis Python punya bahan kalau brandnya kosong.
+            content["_keyword"] = clean_keyword
 
             plan = plan_from_template_content(
                 content,
@@ -897,21 +1109,12 @@ def run_neiiu(
                 on_progress=ai_progress(5),
             )
     except Exception as error:
-        write_analysis_markdown(
-            path=output_dir / "ANALISIS.md",
-            keyword=clean_keyword,
-            serp=serp,
-            insight=insight,
-            blueprint=blueprint,
-            template=template,
-        )
-
         saran = content_failure_hint(error)
 
         raise PipelineError(
             f"Gagal menyusun konten: {error}. "
             + (f"{saran} " if saran else "")
-            + "Analisis SERP tetap tersimpan."
+            + "Hasil crawl SERP tetap tersimpan di cache."
         ) from error
 
     language_warning = check_language(plan, region)
@@ -939,6 +1142,7 @@ def run_neiiu(
             content=content,
             brand=brand,
             old_brand=template_brand,
+            assets=clean_assets_map,
         )
 
         landing_html = landing_result["html"]
@@ -959,6 +1163,8 @@ def run_neiiu(
                 content=content,
                 brand=brand,
                 old_brand=template_brand,
+                is_amp=True,
+                assets=clean_assets_map,
             )
 
             amp_html = amp_result["html"]
@@ -1162,34 +1368,20 @@ def run_neiiu(
     # 8. Simpan
     emit(8, "start")
 
-    write_analysis_markdown(
-        path=output_dir / "ANALISIS.md",
-        keyword=clean_keyword,
-        serp=serp,
-        insight=insight,
-        blueprint=blueprint,
-        template=template,
-    )
-
-    report = {
-        "keyword": clean_keyword,
-        "brand": brand,
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "page_url": page_url,
-        "amp_url": amp_url,
-        "serp": serp,
-        "pages": analysis["pages"],
-        "blueprint": blueprint,
-        "insight": insight,
-        "template": template,
-        "plan": plan,
-        "validation": {
-            "amp": amp_result,
-            "seo": seo_result,
-        },
-    }
-
-    save_json(output_dir / "report.json", report)
+    # Folder hasil hanya berisi dua berkas yang memang dipakai:
+    # index.html dan amp/index.html.
+    #
+    # ANALISIS.md dan report.json dulu ikut ditulis di sini. Keduanya
+    # menyalin ulang seluruh isi SERP, blueprint, insight, peta slot
+    # template, dan rencana konten - berkas beberapa ratus kilobyte
+    # yang tidak pernah diunggah ke mana pun. Ringkasan yang dibaca
+    # antarmuka tidak diambil dari berkas itu melainkan dari nilai
+    # yang dikembalikan fungsi ini, jadi menghapusnya tidak
+    # menghilangkan satu angka pun di layar hasil.
+    #
+    # content_notes tetap dikembalikan lewat nilai balik dan tetap
+    # dikirim ke log job, karena itulah satu-satunya keterangan kenapa
+    # sebuah halaman bisa terbit setengah berganti.
 
     emit(8, "done", str(output_dir))
 
@@ -1208,5 +1400,6 @@ def run_neiiu(
         "amp_valid": amp_result["valid"],
         "amp_result": amp_result,
         "seo_result": seo_result,
-        "report": report,
+        "content_notes": content_notes,
+        "content": content,
     }

@@ -37,6 +37,10 @@ STRUCTURAL_ATTRS = (
 def element_signature(element: dict) -> str:
     """
     Menyusun sidik satu elemen dari hal-hal yang tidak boleh berubah.
+
+    href ikut disidik tanpa pengecualian, termasuk pada <link>. Alamat
+    apa pun yang sudah tertulis di template - canonical, hreflang,
+    stylesheet, preload - dijaga tetap seperti aslinya.
     """
     attrs = element["attrs"]
 
@@ -49,12 +53,30 @@ def element_signature(element: dict) -> str:
     return "|".join(parts)
 
 
-def fingerprint(html: str) -> dict:
+def fingerprint(html: str, swaps: list[dict] | None = None) -> dict:
     """
     Merekam bentuk dokumen dalam ukuran yang bisa dibandingkan.
+
+    swaps menyebutkan penukaran alamat gambar yang memang disengaja,
+    satu per satu: {"element": nomor, "attr": "src", "value": alamat}.
+    Yang disebutkan diterapkan ke sidik template ASLI, jadi sidiknya
+    jadi sidik yang SEHARUSNYA terbit - bukan sidik yang dilonggarkan.
+
+    Bentuk itu dipilih supaya izinnya tetap sempit. Melewatkan
+    pemeriksaan src seluruhnya juga membuat penggantian logo lolos,
+    tapi sekalian membuat gambar yang hilang karena bug ikut lolos.
+    Di sini yang boleh berbeda hanya atribut yang namanya disebut, di
+    elemen yang nomornya disebut, dan hanya kalau nilainya persis
+    yang diminta pengguna.
     """
     result = scan(html)
     elements = result["elements"]
+
+    for item in swaps or []:
+        nomor = int(item["element"])
+
+        if 0 <= nomor < len(elements):
+            elements[nomor]["attrs"][str(item["attr"])] = str(item["value"])
 
     tag_counts: dict[str, int] = {}
 
@@ -193,6 +215,7 @@ def verify(
     filled: str,
     edits: list[dict] | None = None,
     allow_added_tags: dict[str, int] | None = None,
+    asset_swaps: list[dict] | None = None,
 ) -> dict:
     """
     Membandingkan template asli dengan hasil isian.
@@ -203,9 +226,13 @@ def verify(
     tidak disebutkan tetap dianggap pelanggaran, jadi bug yang
     menyisipkan tag tak terduga tidak ikut lolos.
 
+    asset_swaps menyebutkan penukaran alamat gambar yang diminta
+    pengguna - logo, favicon, poster - dengan bentuk yang sama-sama
+    tertutup. Lihat fingerprint().
+
     Mengembalikan {"ok": bool, "violations": [...], "stats": {...}}.
     """
-    before = fingerprint(original)
+    before = fingerprint(original, asset_swaps)
     after = fingerprint(filled)
 
     allowance = dict(allow_added_tags or {})

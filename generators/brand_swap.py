@@ -106,6 +106,56 @@ def swap_brand(text: str, pattern: re.Pattern, new_brand: str) -> str:
     )
 
 
+# Kata depan yang boleh berdiri di antara dua sebutan nama brand
+# yang sebenarnya satu sebutan.
+BRAND_JOINERS = (
+    "di", "ke", "dari", "pada", "untuk", "dengan", "oleh", "adalah",
+    "yaitu", "yakni", "in", "at", "on", "of", "for", "is",
+)
+
+
+def collapse_repeats(text: str, new_brand: str) -> str:
+    """
+    Merapikan nama brand yang tertulis dua kali berturut-turut.
+
+    Sejak model diminta menyebut nama brand di sekitar separuh
+    paragraf, sesekali ia menempelkannya dua kali dalam satu napas.
+    Terukur di halaman jadi: "ASOKASLOT di ASOKASLOT dirancang khusus
+    untuk memudahkan akses" - sebutan keduanya bukan penekanan,
+    melainkan tempelan yang membuat kalimatnya berhenti masuk akal.
+
+    Yang dibuang sebutan kedua beserta kata depan yang menyambungnya,
+    sehingga kalimatnya kembali utuh: "ASOKASLOT dirancang khusus
+    untuk memudahkan akses".
+    """
+    nama = " ".join((new_brand or "").split())
+
+    if not nama:
+        return text
+
+    pola = re.compile(
+        r"(?<![0-9A-Za-z])"
+        + re.escape(nama)
+        + r"(\s+(?:"
+        + "|".join(BRAND_JOINERS)
+        + r"))?\s+"
+        + re.escape(nama)
+        + r"(?![0-9A-Za-z])",
+        re.IGNORECASE,
+    )
+
+    sebelum = None
+    hasil = text
+
+    # Diulang karena tiga sebutan berturut-turut menyisakan pasangan
+    # baru sesudah pasangan pertamanya dirapikan.
+    while hasil != sebelum:
+        sebelum = hasil
+        hasil = pola.sub(lambda m: m.group(0)[: len(nama)], hasil)
+
+    return hasil
+
+
 def normalize(text: str) -> str:
     return " ".join((text or "").split()).strip().casefold()
 
@@ -147,6 +197,18 @@ def brand_edits(
         # Alasan melewatinya adalah "belum tentu ini isi artikel",
         # bukan "boleh menyebut brand orang lain". Blok iklan dan
         # atribut tanpa kutip tetap tidak disentuh.
+        #
+        # Yang sudah terisi dilewati, sama seperti perulangan di atas.
+        # Tanpa syarat ini satu teks bisa kebagian dua penggantian
+        # sekaligus - terukur pada template pengguna: 34 atribut alt
+        # yang isinya judul lama menerima judul baru dari lapis gema
+        # DAN nama brand baru dari lapis ini, lalu seluruh pengisian
+        # gagal dengan "dua penggantian saling bertumpang tindih".
+        # Dulu tidak pernah kelihatan karena slot semacam itu selalu
+        # berakhir di roles, bukan di skipped.
+        if (slot["start"], slot["end"]) in sudah:
+            continue
+
         if slot.get("in_ad"):
             continue
 
@@ -197,6 +259,13 @@ def echo_edits(
             continue
 
         if slot.get("in_ad"):
+            continue
+
+        # Menu dan footer memakai kata-kata template, jadi teks
+        # kembar di dalamnya tidak ikut disamakan dengan kalimat
+        # baru. Kalau ikut, judul baru halaman menyalin dirinya ke
+        # menu dan bagian yang sengaja dibekukan berubah juga.
+        if slot.get("frozen"):
             continue
 
         if slot["kind"] == "attribute" and not slot.get("quote"):

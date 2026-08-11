@@ -51,6 +51,48 @@ function hideNotice() {
     formNotice.hidden = true;
 }
 
+// ---------- Konfirmasi ----------
+
+// confirm() bawaan browser muncul menempel di tepi atas jendela,
+// jauh dari tombol yang baru ditekan, dan tampilannya tidak ikut
+// tema halaman. Penggantinya memakai <dialog> supaya latar gelap,
+// kunci fokus, dan tombol Esc tetap ditangani browser. Tampilannya
+// meminjam kelas .popup-* dari halaman chat, jadi kedua halaman
+// memakai bentuk konfirmasi yang sama.
+
+const askDialog = document.getElementById("askDialog");
+const askTitle = document.getElementById("askTitle");
+const askText = document.getElementById("askText");
+const askOk = document.getElementById("askOk");
+
+function tanya({ judul, pesan, tombol = "Hapus", bahaya = true }) {
+    // Browser lama tanpa showModal tetap dapat konfirmasi, meski
+    // kembali ke bentuk bawaan. Lebih baik daripada tombol hapus
+    // yang jalan tanpa bertanya sama sekali.
+    if (!askDialog || typeof askDialog.showModal !== "function") {
+        return Promise.resolve(window.confirm(pesan));
+    }
+
+    askTitle.textContent = judul;
+    askText.textContent = pesan;
+    askOk.textContent = tombol;
+    askOk.classList.toggle("danger", bahaya);
+    askOk.classList.toggle("primary", !bahaya);
+
+    return new Promise((resolve) => {
+        askDialog.addEventListener(
+            "close",
+            () => resolve(askDialog.returnValue === "ya"),
+            { once: true }
+        );
+
+        // Dikosongkan dulu supaya nilai dari dialog sebelumnya tidak
+        // terbawa kalau kali ini ditutup lewat Esc.
+        askDialog.returnValue = "";
+        askDialog.showModal();
+    });
+}
+
 async function api(url, options) {
     const response = await fetch(url, {
         headers: { "Content-Type": "application/json" },
@@ -182,12 +224,6 @@ function renderJobCard(job) {
             </a>
             <a href="/neiiu/jobs/${job.id}/download/amp.html">
                 amp.html
-            </a>
-            <a href="/neiiu/jobs/${job.id}/download/analisis.md">
-                ANALISIS.md
-            </a>
-            <a href="/neiiu/jobs/${job.id}/download/report.json">
-                report.json
             </a>
         `;
     } else if (isDone && analyzeOnly) {
@@ -433,6 +469,13 @@ form.addEventListener("submit", async (event) => {
             .getElementById("designRefs")
             .value.trim(),
         cta_url: document.getElementById("ctaUrl").value.trim(),
+        logo_url: document.getElementById("logoUrl").value.trim(),
+        favicon_url: document.getElementById("faviconUrl").value.trim(),
+        poster_url: document.getElementById("posterUrl").value.trim(),
+        // Kosong berarti 0, dan 0 berarti mengikuti panjang contoh
+        // artikel apa adanya - bukan artikel sepanjang nol kata.
+        article_words:
+            Number(document.getElementById("articleWords").value) || 0,
     };
 
     try {
@@ -468,7 +511,23 @@ jobList.addEventListener("click", async (event) => {
         return;
     }
 
-    if (!confirm("Hapus job ini dari riwayat?")) {
+    const keyword = button
+        .closest(".job")
+        ?.querySelector(".job-keyword")
+        ?.textContent?.trim();
+
+    // Yang dihapus cuma barisnya di riwayat; berkas hasil di folder
+    // output tidak ikut terhapus. Itu disebutkan supaya tidak terbaca
+    // seolah halaman yang sudah jadi ikut hilang.
+    const lanjut = await tanya({
+        judul: "Hapus job ini?",
+        pesan:
+            (keyword ? `Job "${keyword}" ` : "Job ini ") +
+            "akan hilang dari riwayat. Berkas landing page dan AMP " +
+            "yang sudah jadi tetap ada di folder output.",
+    });
+
+    if (!lanjut) {
         return;
     }
 
@@ -648,7 +707,22 @@ templateList.addEventListener("click", async (event) => {
         return;
     }
 
-    if (!confirm("Hapus template ini?")) {
+    const nama = button
+        .closest(".job-card")
+        ?.querySelector("strong")
+        ?.textContent?.trim();
+
+    // Berbeda dengan job: delete_template() ikut menghapus folder
+    // berkasnya, jadi HTML yang diunggah benar-benar hilang.
+    const lanjut = await tanya({
+        judul: "Hapus template ini?",
+        pesan:
+            (nama ? `Template "${nama}" ` : "Template ini ") +
+            "beserta berkas HTML yang diunggah akan dihapus permanen. " +
+            "Job yang sudah terlanjur memakainya tidak terpengaruh.",
+    });
+
+    if (!lanjut) {
         return;
     }
 

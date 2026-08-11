@@ -174,10 +174,13 @@ async function togglePin(
     const data = await response.json();
 
     if (!response.ok) {
-        alert(
-            data.detail
-            || "Gagal mengubah pin chat."
-        );
+        await showPopup({
+            title: "Gagal mengubah pin",
+            message:
+                data.detail
+                || "Gagal mengubah pin chat.",
+            confirmText: "Tutup",
+        });
         return;
     }
 
@@ -374,7 +377,11 @@ async function loadChat(chatId) {
     const data = await response.json();
 
     if (!response.ok) {
-        alert(data.detail || "Chat gagal dibuka.");
+        await showPopup({
+            title: "Chat gagal dibuka",
+            message: data.detail || "Chat gagal dibuka.",
+            confirmText: "Tutup",
+        });
         return;
     }
 
