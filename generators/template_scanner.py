@@ -16,8 +16,24 @@ tetap sama byte demi byte, termasuk iklan, skrip pihak ketiga,
 komentar, dan atribut yang ditulis tanpa tanda kutip.
 """
 
+import html as html_module
 import re
 from html.parser import HTMLParser
+
+# Lambang mata uang, satu-satunya entitas yang membuka rentang teks
+# sendiri. Alasannya di open_for_currency().
+#
+# Ditulis sebagai tuple, bukan frozenset dari satu string: ditulis
+# begitu, "R$" terpecah jadi "R" dan "$", dan huruf R sendirian jadi
+# terhitung lambang mata uang.
+CURRENCY_SIGNS = frozenset(
+    ("$", "€", "£", "¥", "฿", "₹", "₩", "₱", "₫", "₦")
+)
+
+# Entitas mata uang yang diikuti angka. Yang tidak diikuti angka bukan
+# harga, dan tidak boleh membuka rentang teks sendiri - alasannya di
+# open_for_currency().
+CURRENCY_THEN_DIGIT = re.compile(r"^&(?:#\w+|\w+);\s*\d")
 
 
 # Isi tag ini bukan teks yang tampil ke pembaca. Menggantinya akan
@@ -386,6 +402,56 @@ class SlotScanner(HTMLParser):
 
         if self.pending is None:
             self.pending = self.char_offset()
+
+    # ---------- entitas ----------
+    #
+    # Entitas TIDAK diubah jadi hurufnya (convert_charrefs=False),
+    # karena yang dicatat berkas ini adalah rentang sumber apa adanya.
+    # Akibat sampingannya: entitas yang berdiri di TENGAH teks ikut
+    # terbawa - rentangnya tidak pernah ditutup di situ - sedangkan
+    # entitas yang berdiri PALING DEPAN tertinggal di luar, karena
+    # rentangnya baru dibuka di huruf pertama sesudahnya.
+    #
+    # Untuk hampir semua entitas itu tidak jadi soal. Untuk lambang
+    # mata uang, itu justru satu-satunya bentuk yang dipakai template
+    # sungguhan: template toko jersey yang dipakai menguji menulis
+    # "&euro;90,00", dan yang tercatat cuma "90,00" - tanpa lambangnya,
+    # teks itu tidak lagi terbaca sebagai harga, dan seluruh harga euro
+    # di halaman lolos tanpa ditukar sementara "$1" di baris
+    # sebelahnya tertukar. Satu tabel, dua mata uang.
+    #
+    # Jadi yang dibuka rentangnya di sini HANYA lambang mata uang.
+    # Entitas lain dibiarkan persis seperti sebelumnya - "&nbsp;" yang
+    # berdiri di depan teks tetap di luar rentang, dan spasi yang
+    # dipasang perancang template tidak ikut tertimpa.
+
+    def open_for_currency(self, sign: str) -> None:
+        if self.in_opaque() or self.in_ad():
+            return
+
+        if self.pending is not None or sign not in CURRENCY_SIGNS:
+            return
+
+        # Harus diikuti angka. Lambang yang berdiri sendiri bukan harga
+        # melainkan markup toko yang paling lazim -
+        # <span class="currency">&euro;</span> dengan angkanya di
+        # elemen sebelah - dan membukakan rentang untuknya melahirkan
+        # slot teks yang sebelumnya tidak pernah ada. Slot itu lalu
+        # ikut antre peran biasa dan bisa kebagian teks dari AI,
+        # sehingga lambang mata uangnya terbit sebagai sepotong
+        # kalimat.
+        mulai = self.char_offset()
+
+        if not CURRENCY_THEN_DIGIT.match(self.source[mulai : mulai + 24]):
+            return
+
+        self.pending = mulai
+
+    def handle_entityref(self, name: str) -> None:
+        self.open_for_currency(html_module.unescape(f"&{name};"))
+
+    def handle_charref(self, name: str) -> None:
+        self.open_for_currency(html_module.unescape(f"&#{name};"))
 
     # ---------- atribut ----------
 

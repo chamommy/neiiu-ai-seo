@@ -7,10 +7,76 @@ jauh berbeda dari keyword lain, jadi acuannya diambil dari
 halaman yang sedang menang di keyword itu sendiri.
 """
 
+import json
 import re
 
 from ai.schemas import META_MAX, META_MIN, TITLE_MAX, TITLE_MIN
 from parser.html_parser import parse_html
+
+
+# Blok data terstruktur beserta isinya, dipetik apa adanya dari HTML.
+JSONLD_BLOCK = re.compile(
+    r'<script[^>]+type\s*=\s*["\']application/ld\+json["\'][^>]*>'
+    r"(.*?)</script\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Perintah yang menahan halaman ini keluar dari indeks.
+BLOCKING_ROBOTS = re.compile(r"\bno(?:index|follow)\b", re.IGNORECASE)
+
+
+def check_crawl(html: str, page: dict, problems: list, passed: list) -> None:
+    """
+    Pemeriksaan yang menentukan halaman ini terbaca mesin atau tidak.
+
+    Dipisah dari pemeriksaan isi karena beda akibatnya. Title yang
+    kependekan membuat halaman kalah bersaing; noindex membuatnya
+    tidak ikut bersaing sama sekali, dan satu kata itu membatalkan
+    seluruh isi yang ditulis di atasnya.
+    """
+    robots = page.get("robots_meta", "")
+
+    if BLOCKING_ROBOTS.search(robots):
+        problems.append(
+            f'Meta robots berisi "{robots}", jadi halaman ini tidak '
+            "akan diindeks. Hapus noindex/nofollow sebelum diunggah."
+        )
+    else:
+        passed.append("Meta robots tidak menahan halaman dari indeks.")
+
+    # Bahasa halaman. Tanpa lang, mesin pencari menebaknya sendiri,
+    # dan halaman berbahasa Indonesia rutin ditebak Melayu - cukup
+    # untuk membuatnya disajikan ke negara yang salah.
+    if re.search(r"<html[^>]+\blang\s*=\s*[\"'][^\"']+", html, re.I):
+        passed.append("Atribut lang terpasang di <html>.")
+    else:
+        problems.append("Atribut lang belum ada di <html>.")
+
+    # Data terstruktur yang tidak bisa diurai sama saja dengan tidak
+    # ada. Diperiksa dengan mengurai sungguhan, bukan dengan mencari
+    # kata "ld+json" di HTML: blok yang koma penutupnya berlebih tetap
+    # lolos pencarian kata, dan tetap dibuang Google tanpa pesan
+    # apa pun.
+    blok = JSONLD_BLOCK.findall(html)
+    rusak = 0
+
+    for isi in blok:
+        try:
+            json.loads(isi)
+        except (ValueError, TypeError):
+            rusak += 1
+
+    if not blok:
+        problems.append("Structured data belum terpasang.")
+    elif rusak:
+        problems.append(
+            f"{rusak} dari {len(blok)} blok structured data tidak bisa "
+            "diurai, jadi tidak akan dibaca mesin pencari."
+        )
+    else:
+        passed.append(
+            f"{len(blok)} blok structured data terpasang dan sah."
+        )
 
 
 def check_length(
@@ -161,10 +227,7 @@ def validate_page(
     else:
         problems.append("Link rel=amphtml belum terpasang.")
 
-    if "application/ld+json" in html:
-        passed.append("Structured data JSON-LD terpasang.")
-    else:
-        problems.append("Structured data belum terpasang.")
+    check_crawl(html, page, problems, passed)
 
     if '"FAQPage"' in html:
         passed.append("Schema FAQPage terpasang.")

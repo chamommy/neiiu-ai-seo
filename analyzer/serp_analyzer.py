@@ -20,6 +20,7 @@ from analyzer.cloak_detector import inspect_url, keyword_tokens
 from analyzer.content_analyzer import analyze_content
 from analyzer.entity_analyzer import analyze_entities
 from analyzer.heading_analyzer import analyze_headings
+from analyzer.page_digest import build_digest
 from analyzer.page_signals import extract_signals
 from analyzer.seo_score import analyze_seo
 from config import (
@@ -28,6 +29,7 @@ from config import (
     CRAWL_TOP_N,
     ENTITY_FILE,
     RULES_FILE,
+    SERP_DIGEST_DEEP_N,
 )
 from crawler.crawler import fetch_page
 from knowledge.knowledge_loader import load_json
@@ -183,9 +185,24 @@ def crawl_serp_pages(
                 entity_database=entity_database,
             )
 
+            # Bahan bacaan disimpan di sini, dan ini yang dulu hilang.
+            # Sampai baris ini halamannya sudah diunduh utuh, dibaca,
+            # dan dihitung; sesudahnya html-nya keluar dari jangkauan
+            # dan tidak ada lagi yang bisa mengambil kalimatnya.
+            #
+            # deep dipatok dari peringkat, bukan dari urutan crawl,
+            # supaya halaman yang dilewati karena satu domain muncul
+            # dua kali tidak menggeser jatah halaman di bawahnya.
+            digest = build_digest(
+                html=html,
+                keyword=keyword,
+                deep=position <= SERP_DIGEST_DEEP_N,
+            )
+
             entry.update(
                 {
                     "status": "ok",
+                    "digest": digest,
                     "final_url": final_url,
                     "title": page["title"],
                     "title_length": page["title_length"],

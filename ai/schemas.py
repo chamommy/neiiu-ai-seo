@@ -103,6 +103,15 @@ SERP_INSIGHT_SCHEMA = {
                         "type": "string",
                         "maxLength": 450,
                     },
+                    # Sudut pembahasan halaman itu: menjual apa,
+                    # menjawab kebutuhan apa. Dipisah dari
+                    # why_ranking supaya tidak tenggelam - selama
+                    # ini why_ranking selalu terisi angka, karena
+                    # angka memang satu-satunya yang dikirim.
+                    "angle": {
+                        "type": "string",
+                        "maxLength": 300,
+                    },
                     "strengths": {
                         "type": "array",
                         "maxItems": 4,
@@ -124,9 +133,43 @@ SERP_INSIGHT_SCHEMA = {
                     "position",
                     "domain",
                     "why_ranking",
+                    "angle",
                     "strengths",
                     "weaknesses",
                 ],
+            },
+        },
+        # Bukti tekstual yang membuat intent disimpulkan begitu.
+        # Tanpa ini search_intent bisa diisi tebakan yang terdengar
+        # masuk akal, dan tidak ada cara membedakannya dari
+        # kesimpulan yang benar-benar dibaca dari halaman.
+        "intent_evidence": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+                "type": "string",
+                "maxLength": 200,
+            },
+        },
+        # Topik yang wajib dibahas halaman baru. Inilah yang
+        # menyeberang ke tahap penulisan: hasil membaca berubah jadi
+        # perintah, bukan berhenti sebagai laporan.
+        "must_cover": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "maxLength": 120,
+                    },
+                    "reason": {
+                        "type": "string",
+                        "maxLength": 200,
+                    },
+                },
+                "required": ["topic", "reason"],
             },
         },
         "content_gaps": {
@@ -149,7 +192,9 @@ SERP_INSIGHT_SCHEMA = {
     "required": [
         "serp_summary",
         "search_intent",
+        "intent_evidence",
         "ranking_analysis",
+        "must_cover",
         "content_gaps",
         "winning_strategy",
     ],
@@ -183,6 +228,24 @@ CONTENT_PLAN_SCHEMA = {
         "h1": {
             "type": "string",
             "maxLength": 90,
+        },
+        # Jalur breadcrumb, dari yang paling umum ke halaman ini.
+        #
+        # Dipesan ke model, bukan disusun dari template, karena
+        # breadcrumb menyatakan halaman ini berdiri di mana dalam
+        # topiknya. Milik template menyatakan letak halaman LAIN:
+        # remah "Slot Online > Deposit QRIS 1 Detik" ikut terbit di
+        # hasil pencarian halaman yang topiknya sudah lain sama
+        # sekali, karena perannya nav_label dan nav_label sengaja
+        # dipertahankan sebagai perkakas situs.
+        "breadcrumb": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 4,
+            "items": {
+                "type": "string",
+                "maxLength": 60,
+            },
         },
         "intro": {
             "type": "string",
@@ -320,6 +383,7 @@ CONTENT_PLAN_SCHEMA = {
         "meta_description",
         "slug",
         "h1",
+        "breadcrumb",
         "intro",
         "sections",
         "faq",

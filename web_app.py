@@ -1224,11 +1224,20 @@ async def read_upload(
 
     raw = b"".join(chunks)
 
+    # utf-8-sig lebih dulu, bukan sebagai cadangan.
+    #
+    # Dulu utf-8 biasa yang dicoba duluan, dan itu tidak pernah gagal
+    # untuk berkas ber-BOM: BOM-nya sah sebagai UTF-8 dan ikut terurai
+    # jadi U+FEFF di awal teks. Cadangannya jadi tidak pernah jalan,
+    # dan BOM itu terbawa ke berkas hasil - tepat sebelum <!doctype>,
+    # yang membuat validator AMP menolak seluruh dokumen. Terukur di
+    # run 12 Agustus: AMP invalid dengan satu-satunya error "Dokumen
+    # harus diawali <!doctype html>", padahal doctype-nya ada.
     try:
-        return raw.decode("utf-8")
+        return raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         try:
-            return raw.decode("utf-8-sig")
+            return raw.decode("utf-8")
         except UnicodeDecodeError as error:
             raise HTTPException(
                 status_code=400,

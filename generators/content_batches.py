@@ -35,6 +35,11 @@ ROLE_PRIORITY = (
     "meta_description",
     "meta_keywords",
     "h1",
+    # Remah navigasi ikut giliran awal meski isinya cuma beberapa
+    # kata. Ia menyatakan halaman ini berdiri di mana, dan kalau
+    # prosesnya berhenti di tengah, remah yang belum terisi terbit
+    # menunjuk topik - bahkan situs - milik pemilik template.
+    "breadcrumb",
     # Isi halaman didahulukan atas perkakas situsnya. Kalau prosesnya
     # berhenti di tengah, yang sudah jadi harus artikel dan ulasannya,
     # bukan label menunya.

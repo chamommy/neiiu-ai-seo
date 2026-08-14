@@ -21,6 +21,7 @@ lebarnya tetap muat di tata letak yang sudah ada.
 import re
 
 from generators.brand_swap import variants as brand_variants
+from generators.page_prices import looks_like_price
 from utils.region import REGIONS
 from utils.text import display_width
 
@@ -61,6 +62,19 @@ ROLES = (
     "label",
     "city",
     "brand",
+    # Remah navigasi. Dipisah dari nav_label meski bentuknya mirip -
+    # sama-sama tautan pendek di dalam <nav> - karena isinya beda
+    # jenis. Menu menyebut bagian-bagian SITUS, dan itu milik
+    # template. Breadcrumb menyebut letak HALAMAN INI di dalam
+    # topiknya, jadi ia harus ikut berganti setiap kali topiknya
+    # berganti.
+    #
+    # Selama ikut nav_label, dua kebijakan sekaligus membekukannya:
+    # nav_label ada di KEPT_ROLES, dan <nav> ada di FROZEN_TAGS.
+    # Akibatnya remah "Slot Online > Deposit QRIS 1 Detik" terbit
+    # apa adanya di halaman yang topiknya sudah lain, lengkap di
+    # hasil pencarian tepat di bawah judul.
+    "breadcrumb",
 )
 
 # Bagian halaman yang isinya menu, bukan artikel. Teksnya tetap
@@ -215,6 +229,13 @@ def in_chrome(slot: dict) -> bool:
 FROZEN_TAGS = {"footer", "header", "nav", "menu"}
 
 
+def frozen_tags(slot: dict) -> set:
+    """
+    Bagian beku mana saja yang menaungi slot ini.
+    """
+    return {tag for tag in slot.get("path", []) if tag in FROZEN_TAGS}
+
+
 def in_frozen(slot: dict) -> bool:
     """
     Apakah slot ini berada di bagian yang dibekukan.
@@ -238,6 +259,149 @@ def in_never(slot: dict) -> bool:
         return True
 
     return any(tag in NEVER_TAGS for tag in slot.get("path", []))
+
+
+# Penanda yang dipakai template untuk remah navigasi. Dicari di
+# class, id, aria-label, dan itemtype, karena tidak ada satu bentuk
+# baku - sebagian template menandainya lewat CSS, sebagian lewat
+# aksesibilitas, sebagian lewat microdata schema.org.
+BREADCRUMB_MARKS = ("breadcrumb", "bread-crumb", "bread_crumb", "crumb")
+
+BREADCRUMB_ATTRS = ("class", "id", "aria-label", "itemtype", "typeof")
+
+
+# Pemisah yang lazim dipakai memisahkan nama pengulas dari kotanya.
+AUTHOR_SEPARATORS = ("—", "–", "-", "•", "|", ",", "·", "@")
+
+# Bintang penilaian, dalam bentuk yang bisa ditulis sebagai teks.
+RATING_MARKS = "★☆⭐"
+
+# Akhir kalimat. Dipakai memisahkan tulisan dari keterangan.
+SENTENCE_END = re.compile(r"[.!?。！？]")
+
+
+def looks_like_sentence(text: str) -> bool:
+    """
+    Apakah teks ini berbentuk kalimat, bukan keterangan.
+
+    Keterangan menamai sesuatu - "Ulasan Pengguna Terbaru", "Kolom
+    Seksi Review" - dan berhenti tanpa titik. Tulisan yang dibaca
+    orang hampir selalu punya penutup kalimat di dalamnya.
+
+    Yang sangat panjang tetap dianggap tulisan meski tanpa titik,
+    karena keterangan sepanjang itu praktis tidak ada.
+    """
+    bersih = str(text or "").strip()
+
+    if len(bersih) >= 120:
+        return True
+
+    return bool(SENTENCE_END.search(bersih))
+
+
+# Isi yang seluruhnya berupa penilaian: bintang, angka, pemisahnya.
+# "★★★★★", "4.8", "4.8/5", "5,0 dari 5" semuanya masuk sini.
+RATING_ONLY = re.compile(
+    rf"^[\s{RATING_MARKS}0-9.,/|·•\-]*$"
+)
+
+
+def is_rating_text(text: str) -> bool:
+    """
+    Apakah teks ini cuma penilaian, bukan nama orang.
+
+    Dipakai saat menelusuri mundur mencari baris nama pengulas.
+    Banyak template menaruh bintang di antara nama dan isi
+    ulasannya, dan tanpa pemeriksaan ini barisan bintang itulah yang
+    terangkat jadi nama - lalu ditimpa nama orang, sehingga
+    bintangnya hilang dan nama aslinya tetap tertinggal.
+    """
+    bersih = " ".join(str(text or "").split())
+
+    if not bersih:
+        return True
+
+    if RATING_ONLY.match(bersih):
+        return True
+
+    # "Rating 4.8 dari 5" dan sejenisnya: ada kata, tapi tidak ada
+    # satu pun huruf di luar kosakata penilaian.
+    tanpa_angka = re.sub(r"[\d.,/|·•\-\s]", "", bersih).lower()
+
+    return tanpa_angka in {
+        "rating", "dari", "of", "ratingdari", "ratingof", "nilai",
+        "skor", "score", "bintang", "stars", "star",
+    }
+
+
+def looks_like_author_line(text: str) -> bool:
+    """
+    Apakah teks ini baris identitas pengulas.
+
+    Bentuknya khas dan berulang di hampir semua template ulasan:
+    nama orang, satu pemisah, lalu kotanya - kadang ditutup bintang.
+    Contoh yang terbaca di template pengguna:
+
+        Mikaela Hyakuya — Malang • ★★★★★
+
+    Dikenali dari bentuk, bukan dari nama class, supaya template yang
+    tidak menamai elemennya tetap kebagian. Tanpa ini barisnya jatuh
+    ke aturan panjang teks dan terbit sebagai komentar - dan nama
+    beserta kota pengulasnya tidak pernah berganti.
+    """
+    bersih = " ".join(str(text or "").split())
+
+    if not bersih or len(bersih) > 80:
+        return False
+
+    # Kalimat penuh bukan baris identitas.
+    if SENTENCE_END.search(bersih):
+        return False
+
+    if any(tanda in bersih for tanda in RATING_MARKS):
+        return True
+
+    if not any(tanda in bersih for tanda in AUTHOR_SEPARATORS):
+        return False
+
+    # Harus ada nama kota yang dikenali di salah satu sisi
+    # pemisahnya. Tanpa syarat ini, "Deposit - Cepat dan Aman" ikut
+    # tertangkap.
+    for tanda in AUTHOR_SEPARATORS:
+        if tanda not in bersih:
+            continue
+
+        for bagian in bersih.split(tanda):
+            if is_city_name(bagian.strip(" •|,·")):
+                return True
+
+    return False
+
+
+def in_breadcrumb(slot: dict) -> bool:
+    """
+    Apakah slot ini bagian dari remah navigasi.
+
+    Diperiksa sampai ke seluruh leluhur, karena penandanya berdiri
+    di wadahnya - <nav class="breadcrumb"> atau <ol
+    itemtype="https://schema.org/BreadcrumbList"> - sedangkan
+    teksnya beberapa tingkat di dalam, di <a> atau <span> yang
+    tidak bertanda apa-apa.
+    """
+    daftar = list(slot.get("ancestors") or [])
+    daftar.append(slot.get("attrs") or {})
+
+    for attrs in daftar:
+        if not isinstance(attrs, dict):
+            continue
+
+        for kunci in BREADCRUMB_ATTRS:
+            nilai = str(attrs.get(kunci) or "").lower()
+
+            if any(tanda in nilai for tanda in BREADCRUMB_MARKS):
+                return True
+
+    return False
 
 
 def in_label(slot: dict) -> bool:
@@ -373,14 +537,38 @@ def classify(slot: dict) -> str:
     if tag == "h1":
         return "h1"
 
-    # Angka, harga, jam, dan persentase dibiarkan. Bentuknya memang
-    # bukan kalimat, dan menimpanya dengan tulisan merusak tabel
-    # harga atau daftar jam operasional tanpa menambah apa pun.
+    # Harga diperiksa SEBELUM bail-out di bawah.
+    #
+    # Ia memang bukan kalimat, jadi tanpa baris ini ia ikut dilewati
+    # bersama jam operasional dan nomor urut. Bedanya, harga menyatakan
+    # zona - dan halaman berbahasa Indonesia yang harganya masih euro
+    # terbaca sebagai halaman orang lain yang tulisannya ditimpa.
+    # Terukur pada halaman terbit: dua belas harga euro milik toko
+    # jersey asal template bertahan utuh di halaman slot.
+    #
+    # Pengguna sudah menyatakannya boleh diubah, dan ini satu-satunya
+    # angka yang boleh: "currency dan harga barang itu tidak apa-apa
+    # di ubah". Yang menulis penggantinya Python, bukan AI - lihat
+    # generators/page_prices.py.
+    if current and looks_like_price(current):
+        return "price"
+
+    # Angka, jam, dan persentase dibiarkan. Bentuknya memang bukan
+    # kalimat, dan menimpanya dengan tulisan merusak tabel ukuran atau
+    # daftar jam operasional tanpa menambah apa pun.
     if not current or NOT_PROSE.match(current):
         return ""
 
     if tag == "time":
         return "review_date" if nearest_hint(slot, REVIEW_HINT) else "date"
+
+    # Diperiksa sebelum in_label dan sebelum kebijakan beku, karena
+    # kalau tidak, remah navigasi jatuh ke nav_label dan berhenti di
+    # situ: tautannya pendek dan berdiri di <nav>, persis seperti
+    # menu. Bedanya bukan pada bentuk, melainkan pada apa yang
+    # dinyatakannya - dan itu cuma terbaca dari penanda wadahnya.
+    if in_breadcrumb(slot):
+        return "breadcrumb"
 
     # Nama kota diganti dengan kota di zona tujuan, bukan diminta ke
     # AI. Model kecil sering mengarang nama kota yang tidak ada, dan
@@ -445,22 +633,66 @@ def classify(slot: dict) -> str:
         if own_hint(slot, DATE_HINT):
             return "review_date"
 
-        if tag == "h2":
-            # Judul blok ulasan, sama seperti judul blok FAQ: satu
-            # baris yang memperkenalkan blocknya, bukan isi ulasan.
-            # Kalau dibiarkan tanpa peran, halaman berbahasa Thai
-            # terbit dengan satu baris berbahasa lama di tengahnya.
-            # Nama pengulas tidak pernah ditulis sebagai h2, dan yang
-            # ditandai review-author sudah tertangkap di atas.
+        # Judul blok ulasan, sama seperti judul blok FAQ: satu baris
+        # yang memperkenalkan blocknya, bukan isi ulasan.
+        #
+        # SELURUH tingkat heading diperiksa, bukan h2 saja. Dulu cuma
+        # h2, dan akibatnya terbaca di halaman jadi: template yang
+        # menulis judul bloknya sebagai <h3> atau <h4> jatuh ke aturan
+        # di bawah, panjangnya melewati 40 karakter, lalu terbit
+        # sebagai review_text - keterangan "ini blok apa" diganti
+        # sebuah komentar pengguna. Keterangan dan isi memang beda
+        # jenis, dan tingkat headingnya tidak pernah jadi pembeda.
+        if tag in HEADING_TAGS:
             return "heading"
 
-        if tag in {"p", "blockquote", "q"} or len(current) >= MIN_PARAGRAPH_CHARS:
+        # Baris pengulas yang tidak bertanda class apa pun.
+        #
+        # own_hint di atas cuma menangkap template yang menamai
+        # elemennya - class="reviewer-name" dan sejenisnya. Banyak
+        # template tidak menamainya sama sekali, dan barisnya jatuh ke
+        # aturan di bawah: kalau panjangnya lewat 40 karakter ia
+        # terbit sebagai komentar, kalau tidak sebagai label. Dua-duanya
+        # membuat nama dan kota pengulas tidak pernah berganti.
+        #
+        # Yang dipakai bentuknya: nama, pemisah, kota, kadang bintang.
+        if looks_like_author_line(current):
+            return "review_author"
+
+        # Isi ulasan harus BERBENTUK kalimat, bukan sekadar panjang.
+        #
+        # Ambang 40 karakter sendirian terlalu longgar untuk elemen
+        # yang bukan <p>: keterangan blok seperti "Apa kata pengguna
+        # kami selama ini" ikut melewatinya, lalu terbit sebagai
+        # komentar orang. Untuk <p> ambang lama tetap dipakai, karena
+        # di situ penulisnya sendiri sudah menyatakan itu paragraf.
+        # Panjang minimum tetap ditegakkan, termasuk untuk <p>.
+        #
+        # Kelonggaran <p> sempat tanpa syarat panjang sama sekali,
+        # dengan alasan penulisnya sendiri sudah menyatakan itu
+        # paragraf. Yang terlewat: blok ulasan juga memakai <p> untuk
+        # LABEL. Terukur di template 298, "TRUST MEMBER" - dua belas
+        # huruf di dalam <p> - terbit sebagai isi ulasan, lalu diisi
+        # kalimat 180 karakter. Kotaknya selebar satu kata, jadi yang
+        # tampil di halaman satu kata per baris dari atas ke bawah.
+        if tag in {"p", "blockquote", "q"}:
+            if len(current) >= MIN_PARAGRAPH_CHARS:
+                return "review_text"
+
+            return "label"
+
+        if len(current) >= MIN_PARAGRAPH_CHARS and looks_like_sentence(current):
             return "review_text"
 
         return "label"
 
     if nearest_hint(slot, FAQ_HINT):
-        if tag in {"h2", "h3", "h4", "h5", "dt"}:
+        # h6 ikut, sama seperti tingkat lainnya. Ia sempat tertinggal
+        # dari daftar tanpa alasan, dan template yang menulis
+        # pertanyaannya sebagai <h6> menerbitkannya sebagai heading
+        # artikel - satu pertanyaan hilang, dan pasangan tanya-jawab
+        # sesudahnya bergeser.
+        if tag in {"h2", "h3", "h4", "h5", "h6", "dt"}:
             return "faq_question"
 
         # <strong> dan <b> dipakai untuk dua hal yang sama sekali
@@ -505,7 +737,7 @@ def classify(slot: dict) -> str:
 # teks lama di template.
 HEAD_BUDGET = {
     "title": 70,
-    "meta_description": 200,
+    "meta_description": 180,
     "meta_keywords": 200,
 }
 
@@ -526,13 +758,16 @@ HEAD_BUDGET = {
 # piksel, kira-kira 60 karakter - jadi sebagian besar judul terbaca
 # utuh di layar, dan yang melewatinya cuma kehilangan ekornya.
 #
-# Deskripsi tetap 160-200. Google memotong tampilannya di sekitar
-# 155-160 karakter di layar ponsel, dan yang lewat batas itu tetap
-# terbaca mesin pencari - jadi bagian terpenting ditulis di depan.
+# Deskripsi sempat 160-200, lalu diturunkan ke 140-180 atas permintaan
+# pengguna. Rentang yang sekarang duduk di sekitar titik potong
+# tampilan Google - sekitar 155-160 karakter di layar ponsel - jadi
+# sebagian besar deskripsi terbaca utuh, sementara yang di bawah 140
+# masih membuang ruang yang sudah diberikan. Yang lewat batas tetap
+# terbaca mesin pencari, jadi bagian terpenting tetap ditulis di depan.
 # Aturannya ada di brief.
 HEAD_FLOOR = {
     "title": 50,
-    "meta_description": 160,
+    "meta_description": 140,
 }
 
 
@@ -600,8 +835,20 @@ def length_floor(role: str = "", budget: int = 0) -> int:
 # Peran yang isinya memang pendek. Batas bawah 40 karakter milik
 # MIN_LENGTH_BUDGET tidak berlaku di sini: tombol "Daftar" yang
 # diganti kalimat 40 karakter akan melebar keluar dari kotaknya.
+# Remah navigasi terbit di satu baris bersama pemisahnya, dan baris
+# itu tidak boleh membungkus. Diberi sedikit lebih lega daripada menu
+# karena remah menyebut topik - "Panduan Belajar Python" - sedangkan
+# menu cuma menyebut bagian situs.
+#
+# Diberi nama supaya pipeline bisa memakai angka yang sama saat
+# memesan remah ke AI untuk template yang menyimpannya di JSON-LD
+# saja, yaitu template yang tidak punya slot remah sama sekali.
+BREADCRUMB_WIDTH = 34
+
+
 SHORT_BUDGET = {
     "nav_label": 24,
+    "breadcrumb": BREADCRUMB_WIDTH,
     "label": 80,
     "table_cell": 40,
     "list_item": 90,
@@ -852,27 +1099,70 @@ def promote_review_authors(scanned: dict, roles: dict, skipped: list) -> int:
     diangkat: list[dict] = []
 
     for ulasan in isi_ulasan:
-        sebelum = None
+        # Slot sebelum isi ulasan, dari yang terdekat ke yang terjauh.
+        #
+        # Dulu yang diambil cuma SATU yang terdekat, dan itu salah
+        # untuk kartu yang menaruh bintang di antara nama dan
+        # ulasannya:
+        #
+        #     <strong>Jeongmin Choi</strong>
+        #     <span>★★★★★</span>          <- yang terdekat
+        #     <p>isi ulasannya...</p>
+        #
+        # Yang terangkat jadi nama pengulas adalah barisan bintangnya,
+        # lalu ditimpa nama orang - sehingga bintangnya lenyap - dan
+        # nama aslinya di <strong> tidak pernah tersentuh. Terbaca di
+        # halaman jadi: "Jeongmin Choi | Intan Permata", nama lama
+        # berdampingan dengan nama baru.
+        #
+        # Sekarang penelusurannya mundur melewati apa pun yang jelas
+        # bukan nama. Dibatasi beberapa langkah supaya tidak menyeret
+        # teks milik kartu sebelumnya.
+        kandidat = []
 
         for posisi, slot in teks:
             if posisi >= ulasan["start"]:
                 break
 
+            kandidat.append(slot)
+
+        sebelum = None
+
+        for slot in reversed(kandidat[-4:]):
+            teks_slot = str(slot["current"]).strip()
+
+            # HANYA penilaian yang dilewati. Sisanya menghentikan
+            # penelusuran, bukan dilompati.
+            #
+            # Bedanya penting, dan sempat salah: begitu apa pun boleh
+            # dilompati, kartu yang slot terdekatnya sudah dipakai
+            # membuat penelusuran jalan terus sampai menabrak baris
+            # "Tag: Cepat & Praktis" milik kartu di atasnya, lalu
+            # baris tag itu terbit sebagai nama orang. Yang dicari
+            # berdiri TEPAT sebelum ulasannya - paling jauh dipisahkan
+            # bintang.
+            if is_rating_text(teks_slot):
+                continue
+
+            if (slot["start"], slot["end"]) in sudah_berperan:
+                break
+
+            if slot.get("frozen") or slot.get("in_ad"):
+                break
+
+            if slot.get("tag") in HEADING_TAGS:
+                break
+
+            if TAG_HINT.match(teks_slot):
+                break
+
+            if display_width(teks_slot) > MAX_AUTHOR_WIDTH:
+                break
+
             sebelum = slot
+            break
 
         if sebelum is None:
-            continue
-
-        if (sebelum["start"], sebelum["end"]) in sudah_berperan:
-            continue
-
-        if sebelum.get("frozen") or sebelum.get("in_ad"):
-            continue
-
-        if sebelum.get("tag") in HEADING_TAGS:
-            continue
-
-        if display_width(str(sebelum["current"]).strip()) > MAX_AUTHOR_WIDTH:
             continue
 
         diangkat.append(sebelum)
@@ -1299,7 +1589,27 @@ def build_slot_map(scanned: dict, old_brand: str = "") -> dict:
         # memang menyapu slot yang dilewati kebijakan. Jadi menu dan
         # footer terbit dengan kata-kata template dan nama brand
         # yang baru.
-        if in_frozen(slot):
+        # Dua pengecualian dari kebijakan beku, keduanya karena yang
+        # dibekukan ternyata bukan perkakas situs.
+        #
+        # Remah navigasi tinggal di dalam <nav> sambil menyatakan hal
+        # yang sepenuhnya berbeda dari menu: bukan bagian-bagian
+        # situs, melainkan letak halaman INI.
+        #
+        # Judul yang berdiri di dalam <header> juga bukan menu. Di
+        # situlah banyak template menaruh h1 dan tagline halamannya,
+        # dan membekukannya berarti menerbitkan judul milik pemilik
+        # template di halaman yang seluruh isinya sudah berganti -
+        # inilah sebab "H1 kadang tidak berubah". Judul di dalam
+        # <footer>, <nav>, dan <menu> tetap beku, karena di sana ia
+        # memang menamai kolom menu.
+        beku = frozen_tags(slot)
+
+        boleh_lewat = role == "breadcrumb" or (
+            role in {"h1", "heading"} and beku == {"header"}
+        )
+
+        if beku and not boleh_lewat:
             slot["frozen"] = True
             skipped.append(slot)
             continue
@@ -1330,7 +1640,9 @@ def build_slot_map(scanned: dict, old_brand: str = "") -> dict:
         roles.setdefault(role, []).append(slot)
 
     demote_block_title(roles)
+    demote_faq_lead(roles)
     label_block_headings(roles)
+    demote_split_prose(scanned, roles, skipped)
 
     # Keduanya dijalankan sesudah seluruh slot dikelompokkan, karena
     # yang menentukan bukan slotnya sendiri melainkan apa yang berdiri
@@ -1367,6 +1679,122 @@ BLOCK_MARKERS = (
     ("faq_question", "faq"),
     ("review_text", "review"),
 )
+
+
+# Peran yang isinya tulisan utuh, jadi tidak boleh jatuh ke potongan
+# kalimat.
+PROSE_ROLES = ("paragraph", "faq_answer", "review_text")
+
+
+def demote_split_prose(scanned: dict, roles: dict, skipped: list) -> int:
+    """
+    Melepas peran tulisan dari potongan kalimat.
+
+    Satu <p> yang memuat penanda di tengahnya terbaca sebagai
+    beberapa slot terpisah, karena yang dipotong scanner adalah
+    simpul teks, bukan kalimat. Terukur di template pengguna:
+
+        <p>Rating Keseluruhan: <strong>4.7 / 5.0</strong>
+           dari 1.800+ ulasan. Kelengkapan pasaran...</p>
+
+    Tiga slot lahir dari satu kalimat. Yang pertama dapat peran
+    label, angkanya dilewati karena bukan prosa, dan yang KETIGA
+    dapat peran paragraph - lalu ikut dilebarkan jatah panjangnya
+    oleh pengatur panjang artikel. Yang terbit: kotak pemberitahuan
+    peringkat yang isinya paragraf artikel, menyambung dari
+    "4.7 / 5.0" ke kalimat yang tidak ada hubungannya.
+
+    Potongan seperti ini dikembalikan jadi label - teksnya
+    dipertahankan, nama brand lama di dalamnya tetap diganti
+    belakangan. Menuliskannya ulang sebagai tulisan bebas tidak
+    mungkin benar: yang dipegang cuma ekor kalimat, sedangkan
+    kepalanya berdiri di slot lain yang diisi terpisah.
+
+    Yang tidak terpecah tidak tersentuh sama sekali.
+    """
+    per_elemen: dict[int, list] = {}
+
+    for slot in scanned.get("slots", []):
+        if slot.get("kind") != "text" or not slot.get("current", "").strip():
+            continue
+
+        per_elemen.setdefault(slot.get("element_index", -1), []).append(slot)
+
+    diturunkan = 0
+
+    for peran in PROSE_ROLES:
+        daftar = roles.get(peran)
+
+        if not daftar:
+            continue
+
+        tetap = []
+
+        for slot in daftar:
+            rekan = per_elemen.get(slot.get("element_index", -1), [])
+
+            if len(rekan) < 2:
+                tetap.append(slot)
+                continue
+
+            slot["role"] = "label"
+            slot["kept"] = True
+            slot["split"] = True
+
+            skipped.append(slot)
+            diturunkan += 1
+
+        if tetap:
+            roles[peran] = tetap
+        else:
+            roles.pop(peran, None)
+
+    return diturunkan
+
+
+def demote_faq_lead(roles: dict) -> None:
+    """
+    Melepas peran jawaban dari paragraf pembuka blok FAQ.
+
+    Jawaban selalu berdiri SESUDAH pertanyaannya. Paragraf yang
+    berdiri sebelum pertanyaan pertama - "Berikut pertanyaan umum
+    seputar OSB99" - bukan jawaban apa pun; ia keterangan blok.
+
+    Selama ia terhitung jawaban, jumlah jawaban melebihi jumlah
+    pertanyaan dan SELURUH pasangan bergeser satu langkah: jawaban
+    pertama masuk ke keterangan blok, jawaban kedua masuk ke slot
+    jawaban pertama, dan seterusnya sampai ujung. Yang terbaca
+    pengguna adalah pertanyaan yang dijawab hal lain - terukur di
+    halaman jadi, "What Sets ASG Apart?" dijawab keterangan cara
+    login lewat HP.
+
+    Diturunkan jadi paragraf, bukan dibuang: teksnya memang tampil
+    di halaman dan tetap perlu diganti supaya tidak menyebut brand
+    lama. Yang dilepas cuma pasangannya dengan pertanyaan.
+    """
+    tanya = roles.get("faq_question") or []
+    jawab = roles.get("faq_answer") or []
+
+    if not tanya or not jawab:
+        return
+
+    tanya_pertama = min(slot["start"] for slot in tanya)
+
+    sebelum = [slot for slot in jawab if slot["start"] < tanya_pertama]
+
+    if not sebelum:
+        return
+
+    for slot in sebelum:
+        slot["role"] = "paragraph"
+        slot["budget"] = length_budget(slot["current"], "paragraph")
+        roles.setdefault("paragraph", []).append(slot)
+
+    roles["faq_answer"] = [
+        slot for slot in jawab if slot["start"] >= tanya_pertama
+    ]
+
+    roles["paragraph"].sort(key=lambda slot: slot["start"])
 
 
 def label_block_headings(roles: dict) -> None:

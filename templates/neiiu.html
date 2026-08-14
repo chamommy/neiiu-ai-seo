@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>NEIIU — Generator Landing Page</title>
     <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v=4">
-    <link rel="stylesheet" href="{{ url_for('static', path='/neiiu.css') }}?v=2">
+    <link rel="stylesheet" href="{{ url_for('static', path='/neiiu.css') }}?v=3">
 </head>
 <body class="neiiu-body">
 
@@ -433,12 +433,32 @@
         </div>
     </section>
 
-    <section class="card" id="progressCard" hidden>
-        <h2>Sedang Berjalan</h2>
+    <!--
+        Tampilan saat job berjalan.
+
+        Angka persen dan lingkaran berputar berdiri berdampingan
+        dengan sengaja. Lingkaran berputar menyatakan "masih hidup",
+        persen menyatakan "sudah sampai mana" - dan pada proses yang
+        satu langkahnya bisa belasan menit, keduanya menjawab
+        pertanyaan yang berbeda.
+    -->
+    <section class="card run-card" id="progressCard" hidden>
+        <div class="run-head">
+            <span class="spinner" id="runSpinner" aria-hidden="true"></span>
+
+            <div class="run-title">
+                <div class="step-now" id="stepNow">Menunggu giliran...</div>
+                <div class="step-count" id="stepCount"></div>
+            </div>
+
+            <div class="run-percent" id="runPercent">0%</div>
+        </div>
+
+        <div class="run-bar">
+            <div class="run-bar-fill" id="runBar"></div>
+        </div>
 
         <div class="steps" id="stepDots"></div>
-        <div class="step-now" id="stepNow">Menunggu giliran...</div>
-        <div class="step-count" id="stepCount"></div>
 
         <div class="log" id="jobLog"></div>
     </section>
@@ -489,6 +509,6 @@
 </dialog>
 
 <script id="regionData" type="application/json">{{ regions | tojson }}</script>
-<script src="{{ url_for('static', path='/neiiu.js') }}?v=5"></script>
+<script src="{{ url_for('static', path='/neiiu.js') }}?v=6"></script>
 </body>
 </html>

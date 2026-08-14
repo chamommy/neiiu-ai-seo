@@ -7,6 +7,7 @@ callback `on_event`, jadi logika yang sama dipakai CLI
 """
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from config import (
     SITE_BASE_URL,
     SITE_CTA_URL,
     SITE_DISCLAIMER,
+    SITE_LICENSE,
     SITE_NAME,
 )
 from utils.region import (
@@ -45,6 +47,7 @@ from generators.content_planner import (
     generate_content_plan,
     generate_serp_insight,
     generate_template_content,
+    normalize_breadcrumb,
 )
 from generators.landing_generator import generate_landing_page
 from generators.seo_validator import validate_page
@@ -63,8 +66,9 @@ from generators.template_filler import (
     merge_specs,
 )
 from generators.inspiration import build_design_dna
+from generators.jsonld_filler import breadcrumb_levels
 from generators.template_scanner import scan
-from generators.template_slots import build_slot_map
+from generators.template_slots import BREADCRUMB_WIDTH, build_slot_map
 from generators.theme import build_theme
 from serp.serp_search import search_keyword, slugify
 
@@ -194,6 +198,60 @@ def susun_kabar(info: dict) -> str:
     )
 
 
+CANONICAL_TAG = re.compile(
+    r"<link\b[^>]*\brel\s*=\s*[\"']?canonical[\"']?[^>]*>",
+    re.IGNORECASE,
+)
+
+HREF_VALUE = re.compile(
+    r"\bhref\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'>]+))",
+    re.IGNORECASE,
+)
+
+
+def template_canonical(html: str) -> str:
+    """
+    Alamat kanonik yang sudah tertulis di template.
+
+    Dipakai versi AMP yang dibuat NEIIU sendiri karena template AMP
+    tidak diunggah. Tanpa ini, berkas AMP-lah satu-satunya yang tetap
+    memuat SITE_BASE_URL - bawaannya "https://example.com" - padahal
+    berkas landing di sebelahnya sudah bersih dari alamat karangan.
+    Satu berkas beralamat contoh sama merepotkannya dengan dua.
+
+    Dibaca dengan regex, bukan diurai bs4, karena yang dibutuhkan cuma
+    satu nilai dan halamannya tidak boleh disusun ulang.
+    """
+    tag = CANONICAL_TAG.search(html or "")
+
+    if not tag:
+        return ""
+
+    nilai = HREF_VALUE.search(tag.group(0))
+
+    if not nilai:
+        return ""
+
+    return (nilai.group(1) or nilai.group(2) or nilai.group(3) or "").strip()
+
+
+def site_origin(url: str) -> str:
+    """
+    Akar situs dari satu alamat, tanpa garis miring di ujung.
+
+    Kosong kalau alamatnya relatif atau tidak ada. Kosong di sini
+    berarti pemakainya menulis "/" dan "#organization" - pengenal
+    relatif yang sah di JSON-LD dan benar di domain mana pun berkas
+    itu nanti berdiri. Yang tidak boleh terjadi cuma satu: memilih
+    domain karangan supaya kolomnya terisi.
+    """
+    bersih = str(url or "").strip()
+
+    cocok = re.match(r"^(https?://[^/?#]+)", bersih, re.IGNORECASE)
+
+    return cocok.group(1) if cocok else ""
+
+
 def build_brand(
     brand_name: str = "",
     base_url: str = "",
@@ -239,6 +297,7 @@ def build_brand(
         "locale": spec["og_locale"],
         "direction": spec["direction"],
         "disclaimer": SITE_DISCLAIMER,
+        "license": SITE_LICENSE,
         # Penanda run, dipakai memilih contoh gaya mana yang dikirim
         # ke model.
         #
@@ -304,8 +363,30 @@ def write_analysis_markdown(
     lines.append("## Intent Pencarian\n")
     lines.append(f"{insight.get('search_intent', '-')}\n")
 
+    bukti = insight.get("intent_evidence") or []
+
+    if bukti:
+        lines.append("**Bukti dari halaman yang dibaca:**\n")
+        lines.extend(f"- {value}" for value in bukti)
+        lines.append("")
+
     lines.append("## Ringkasan Halaman Pertama\n")
     lines.append(f"{insight.get('serp_summary', '-')}\n")
+
+    wajib = insight.get("must_cover") or []
+
+    if wajib:
+        lines.append("## Topik Yang Wajib Dibahas\n")
+        lines.append(
+            "Diambil dari isi halaman yang sedang ngerank, dan daftar "
+            "inilah yang diteruskan ke tahap penulisan.\n"
+        )
+
+        for item in wajib:
+            lines.append(f"- **{item.get('topic', '-')}**")
+            lines.append(f"  - {item.get('reason', '-')}")
+
+        lines.append("")
 
     lines.append("## Kenapa Mereka Bisa Naik\n")
 
@@ -314,6 +395,9 @@ def write_analysis_markdown(
             f"### Peringkat {item['position']} — {item['domain']}\n"
         )
         lines.append(f"{item['why_ranking']}\n")
+
+        if item.get("angle"):
+            lines.append(f"**Sudut pembahasan:** {item['angle']}\n")
 
         if item.get("strengths"):
             lines.append("**Kekuatan:**\n")
@@ -563,6 +647,17 @@ def plan_from_template_content(
         "meta_description": content.get("meta_description", ""),
         "slug": slug_for_url(content.get("h1") or keyword, region),
         "h1": content.get("h1", ""),
+        # Remah navigasi ikut dibawa supaya halaman AMP yang dirakit
+        # generator - dipakai kalau pengguna tidak mengunggah berkas
+        # AMP sendiri - memasang jalur yang sama dengan halaman
+        # landingnya, bukan jalur bawaan "Beranda > judul".
+        "breadcrumb": normalize_breadcrumb(
+            content.get("breadcrumb"),
+            keyword=keyword,
+            h1=content.get("h1", ""),
+            brand_name=brand.get("site_name", ""),
+            region=region,
+        ),
         "intro": paragraphs[:2],
         # Artikelnya ada di dalam paragraphs ini, karena memang di situ
         # tempatnya - slot paragraf milik template. Dua hal di luar
@@ -934,6 +1029,38 @@ def run_neiiu(
 
         template_spec = merge_specs(*specs)
 
+        # Remah navigasi dipesan ke AI walau template tidak punya
+        # slot terlihat untuknya.
+        #
+        # Ini yang dulu terlewat. Peran breadcrumb hanya lahir dari
+        # slot HTML, sedangkan banyak template menyimpan remahnya
+        # cuma di JSON-LD - termasuk template pengguna, yang remah
+        # "Home > OSB99"-nya beralamat www.ilpompiere.it. Tanpa slot,
+        # peran itu tidak pernah masuk spec, tidak pernah masuk
+        # schema, dan model tidak pernah ditanya. Yang mengisi
+        # akhirnya Python, dengan menyalin keyword dan memotong h1 -
+        # benar secara topik, tapi bukan jalur yang dipikirkan.
+        tingkat, contoh_remah = breadcrumb_levels(
+            scan(user_template["landing"]),
+            user_template["landing"],
+        )
+
+        if tingkat and "breadcrumb" not in template_spec:
+            template_spec["breadcrumb"] = {
+                "count": tingkat,
+                "max_length": BREADCRUMB_WIDTH,
+                "max_length_any": BREADCRUMB_WIDTH,
+                "budgets": [BREADCRUMB_WIDTH] * tingkat,
+                "samples": contoh_remah,
+            }
+
+            emit(
+                4,
+                "info",
+                f"remah navigasi: {tingkat} tingkat diminta ke AI "
+                f"(template menyimpannya di JSON-LD, bukan di halaman)",
+            )
+
         # Panjang artikel diatur di sini, sebelum satu permintaan pun
         # dikirim ke model: jatah tiap slot paragraf dilebarkan supaya
         # model menulis lebih panjang DI TEMPAT YANG SAMA. Tidak ada
@@ -1082,6 +1209,7 @@ def run_neiiu(
                 },
                 riwayat=history or {},
                 on_progress=ai_progress(5),
+                old_brand=template_brand,
             )
 
             for note in fit_notes:
@@ -1099,6 +1227,23 @@ def run_neiiu(
                 brand,
                 region,
             )
+
+            # Jalur remah dikembalikan ke isi supaya JSON-LD ikut
+            # kebagian, termasuk pada template yang TIDAK punya
+            # remah terlihat.
+            #
+            # Template pengguna adalah contohnya: remahnya cuma ada
+            # di JSON-LD, jadi tidak ada satu slot pun yang
+            # mengisinya, dan tanpa baris ini rewrite_breadcrumb
+            # menerima jalur kosong lalu tidak berbuat apa-apa.
+            # Yang terbit adalah remah bawaan template - "Home >
+            # OSB99" beralamat www.ilpompiere.it, situs Italia asal
+            # template itu di-scrape.
+            #
+            # Kalau slot remah memang ada, nilai dari slot yang
+            # menang: published_content menimpa kunci ini dengan
+            # teks yang benar-benar terbit.
+            content["breadcrumb"] = plan["breadcrumb"]
         else:
             plan = generate_content_plan(
                 analysis=analysis,
@@ -1147,6 +1292,27 @@ def run_neiiu(
 
         landing_html = landing_result["html"]
 
+        # Alamat yang DILAPORKAN ikut mengikuti template.
+        #
+        # Berkasnya sudah tidak memuat alamat karangan, tapi layar
+        # hasil masih menampilkan "https://example.com/slug/" sebagai
+        # URL halaman - alamat yang tidak ada di berkas mana pun dan
+        # tidak pernah jadi alamat halaman ini. Yang dilaporkan
+        # sekarang alamat yang benar-benar tertulis di canonical
+        # berkasnya.
+        asal_template = template_canonical(landing_html)
+
+        if asal_template:
+            page_url = asal_template
+            amp_url = f"{asal_template.rstrip('/')}/amp/"
+        else:
+            # Tidak ada canonical berarti tidak ada yang bisa
+            # dilaporkan. Dikosongkan, bukan ditebak: kolom kosong
+            # menyuruh orang membuka berkasnya, sedangkan alamat
+            # karangan menyuruh orang mempercayainya.
+            page_url = ""
+            amp_url = ""
+
         emit(
             6,
             "info",
@@ -1185,19 +1351,55 @@ def run_neiiu(
         else:
             # Tanpa template AMP, versi AMP dibuat generator biasa
             # supaya halamannya tetap punya pasangan AMP yang sah.
+            #
+            # Alamatnya diambil dari canonical milik template landing,
+            # bukan dari SITE_BASE_URL. Berkas landing sudah memakai
+            # alamat template apa adanya; kalau berkas AMP di
+            # sebelahnya memakai alamat lain, keduanya menunjuk dua
+            # situs berbeda - dan yang satu itu selalu
+            # "https://example.com" selama pengguna belum mengisi
+            # .env, yang justru alamat karangan yang harus dihindari.
+            asal = asal_template
+
+            # Tanpa canonical di template, dipakai alamat relatif.
+            # Berkas AMP tinggal di subfolder "amp/", jadi "../"
+            # menunjuk halaman landing di sebelahnya - benar di domain
+            # mana pun berkas itu nanti diunggah, dan tidak menyebut
+            # satu domain pun.
+            amp_canonical = asal or "../"
+            amp_sendiri = f"{asal.rstrip('/')}/amp/" if asal else "./"
+
+            # base_url ikut diturunkan dari canonical template, bukan
+            # cuma canonical-nya.
+            #
+            # Ini yang sempat terlewat waktu perbaikan ini ditulis
+            # pertama kali: canonical dan og:url sudah bersih, tapi
+            # build_schema_graph memakai brand["base_url"] langsung
+            # untuk WebSite dan Organization, jadi berkas AMP-nya tetap
+            # memuat "https://example.com#website" dan
+            # "https://example.com#organization". Terukur pada berkas
+            # jadi: enam kali dalam satu berkas.
+            brand_amp = {**brand, "base_url": site_origin(asal)}
+
             amp_html = generate_amp_page(
                 plan=plan,
                 design={},
-                brand=brand,
-                page_url=page_url,
-                amp_url=amp_url,
+                brand=brand_amp,
+                page_url=amp_canonical,
+                amp_url=amp_sendiri,
             )
 
             emit(
                 6,
                 "info",
                 "  template AMP tidak diunggah, versi AMP dibuat "
-                "NEIIU dari isi yang sama",
+                "NEIIU dari isi yang sama; canonical-nya "
+                + (
+                    f"mengikuti template ({amp_canonical})"
+                    if asal
+                    else "memakai alamat relatif karena template "
+                    "tidak punya canonical"
+                ),
             )
     else:
         design = template["design"]

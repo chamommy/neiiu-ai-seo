@@ -29,6 +29,8 @@ from generators.brand_swap import (
     swap_brand,
 )
 from generators.jsonld_filler import has_reviews, jsonld_edits
+from generators.page_numbers import FIGURE_FREE_ROLES, strip_figures
+from generators.page_prices import localize_price, price_edits
 from generators.script_text import script_edits
 from generators.template_assets import asset_edits
 from generators.template_guard import verify
@@ -113,6 +115,11 @@ LIST_ROLES = (
     "list_item",
     "table_cell",
     "label",
+    # Berupa daftar dan URUTANNYA bermakna: tingkat pertama beranda,
+    # tingkat terakhir halaman ini. published_content menyusunnya
+    # menurut urutan dokumen, yang untuk remah navigasi memang sama
+    # dengan urutan jalurnya.
+    "breadcrumb",
 )
 
 # Peran yang jumlah isiannya dibatasi oleh pasangannya, DAN ARAHNYA
@@ -148,6 +155,12 @@ GENERATED_ROLES = (
     # (utils/region.py): yang diminta ke model adalah padanan dari
     # teks lama, dan padanan sebuah nama adalah nama itu juga.
     "review_author",
+    # Harga dihitung, bukan dikarang. Model kecil yang diminta
+    # menuliskan harga dalam rupiah menjawab nominal yang tidak ada
+    # hubungannya dengan angka aslinya, dan tabel harga yang isinya
+    # acak lebih buruk daripada tabel harga berbahasa asing.
+    # Perhitungannya di generators/page_prices.py.
+    "price",
 )
 
 
@@ -206,11 +219,236 @@ def block_heading_text(
     return pola.format(brand=nama, keyword=keyword).strip()
 
 
+# Tanya-jawab cadangan, ditulis Python, untuk kartu FAQ yang tidak
+# kebagian jawaban model.
+#
+# Ini keluhan pengguna, dan kalimatnya persis: "untuk bagian FAQ
+# terdapat banyak bug, terdapat banyak 'What Sets ASG Apart?', ini
+# bukanlah FAQ perihal slot yang aku inginkan".
+#
+# Kartu yang tidak terisi memang sengaja jatuh ke teks asli template -
+# lihat drop_broken_pairs. Untuk template yang sebelumnya milik situs
+# sekolah dan toko jersey, "yang asli" itu berarti "What Sets ASG
+# Apart?" dan "Need help finding something?" berdiri di halaman slot,
+# dalam bahasa Inggris, menyebut brand yang bukan milik pengguna.
+# Jatuh ke teks lama lebih baik daripada pasangan yang tidak nyambung,
+# tapi keduanya kalah dari pertanyaan yang memang tentang slot.
+#
+# Ditulis di sini, bukan diminta ke model, dengan alasan yang sama
+# seperti BLOCK_HEADINGS di atas: yang dibutuhkan adalah jawaban yang
+# PASTI ada. Kartu cadangan yang gagal dijawab akan kembali jadi
+# kartu berbahasa Inggris milik orang lain.
+#
+# Urutan daftarnya sengaja tidak dipakai apa adanya; pemilihnya
+# menggilir dari benih nama brand, supaya dua halaman tidak menambal
+# lubangnya dengan pertanyaan yang sama.
+FAQ_BANK = {
+    "id": (
+        (
+            "Apa itu slot gacor di {brand}?",
+            "Slot gacor adalah permainan yang sedang sering "
+            "mengeluarkan kombinasi menang. Di {brand} kamu bisa "
+            "melihat permainan mana yang lagi ramai lewat data yang "
+            "diperbarui berkala, jadi tidak perlu menebak sendiri.",
+        ),
+        (
+            "Bagaimana cara mulai main slot online di {brand}?",
+            "Daftar dulu dengan nomor aktif, lalu masuk ke daftar "
+            "permainan. Pilih satu slot, atur nilai taruhan per putaran, "
+            "baru mulai spin. Semua langkahnya bisa dikerjakan dari HP.",
+        ),
+        (
+            "Apakah bisa main slot lewat HP tanpa aplikasi?",
+            "Bisa. Halaman {brand} berjalan langsung di browser HP, jadi "
+            "kamu tidak perlu memasang apa pun. Kalau sinyal sedang pelan, "
+            "tutup tab lain supaya putarannya tidak tersendat.",
+        ),
+        (
+            "Berapa modal awal untuk main slot di {brand}?",
+            "Tidak ada patokan yang wajib. Kebanyakan pemain mulai dari "
+            "nominal kecil dulu untuk mengenali pola permainannya, baru "
+            "menaikkan taruhan kalau sudah paham iramanya.",
+        ),
+        (
+            "Jam berapa slot paling ramai dimainkan?",
+            "Ramainya berpindah-pindah tiap hari. Yang bisa kamu pegang "
+            "bukan jam tetap, melainkan data yang tampil di halaman "
+            "{brand} - lihat dulu permainan mana yang sedang aktif "
+            "sebelum menentukan waktu main.",
+        ),
+        (
+            "Apa bedanya slot online dengan mesin slot biasa?",
+            "Mesin lama memakai gulungan fisik, slot online memakai "
+            "putaran acak yang dihitung server. Karena itu di {brand} "
+            "kamu bisa melihat riwayat dan data tiap permainan, hal yang "
+            "tidak ada di mesin lama.",
+        ),
+        (
+            "Bagaimana cara deposit di {brand}?",
+            "Pilih menu deposit, tentukan cara bayarnya - transfer bank, "
+            "e-wallet, atau QRIS - lalu ikuti nominal yang tertera. "
+            "Saldonya masuk sendiri begitu pembayaran terbaca.",
+        ),
+        (
+            "Berapa lama proses penarikan dana?",
+            "Sebagian besar penarikan selesai dalam hitungan menit selama "
+            "nama rekening sama dengan nama akun. Kalau lewat dari itu, "
+            "biasanya karena bank tujuan sedang dalam jam pemeliharaan.",
+        ),
+        (
+            "Apakah pemain baru dapat bonus?",
+            "Ada promo untuk pemain baru, dan syaratnya ditulis di "
+            "halaman promo {brand}. Baca dulu ketentuan putarannya "
+            "sebelum diambil, karena tiap promo punya aturan sendiri.",
+        ),
+        (
+            "Apa arti RTP di daftar permainan slot?",
+            "RTP adalah ukuran seberapa besar taruhan yang kembali ke "
+            "pemain dalam jangka panjang. Angkanya bukan janji menang, "
+            "tapi berguna untuk membandingkan satu permainan dengan "
+            "permainan lain.",
+        ),
+        (
+            "Apakah pola slot benar-benar bisa dibaca?",
+            "Yang bisa dibaca adalah kecenderungannya, bukan hasil tiap "
+            "putaran. Hasil satu spin tetap acak, jadi pola apa pun "
+            "sebaiknya dipakai sebagai bahan pertimbangan, bukan patokan "
+            "mati.",
+        ),
+        (
+            "Apa yang harus dilakukan kalau permainan tidak mau terbuka?",
+            "Coba muat ulang halamannya dulu, lalu bersihkan cache "
+            "browser. Kalau masih sama, hubungi layanan bantuan {brand} "
+            "dan sebutkan nama permainannya supaya bisa dicek langsung.",
+        ),
+        (
+            "Apakah akun dan data saya aman?",
+            "Data akun disimpan terenkripsi dan tidak dipakai untuk "
+            "keperluan lain. Yang tetap jadi tanggung jawab kamu adalah "
+            "menjaga kata sandi dan tidak membagikan kode masuk ke siapa "
+            "pun.",
+        ),
+        (
+            "Bisakah main slot sambil coba permainan lain?",
+            "Bisa. Selain slot, {brand} juga memuat permainan lain di "
+            "menu yang sama, dan saldonya dipakai bersama - jadi kamu "
+            "tidak perlu pindah akun untuk mencoba.",
+        ),
+    ),
+    "th": (
+        (
+            "สล็อตแตกง่ายที่ {brand} คืออะไร",
+            "คือเกมที่กำลังออกรางวัลบ่อยในช่วงนั้น ที่ {brand} "
+            "คุณดูได้จากข้อมูลที่อัปเดตเป็นระยะว่าเกมไหนกำลังมาแรง "
+            "จึงไม่ต้องเดาเอง",
+        ),
+        (
+            "เริ่มเล่นสล็อตออนไลน์ที่ {brand} อย่างไร",
+            "สมัครด้วยเบอร์ที่ใช้งานจริง จากนั้นเข้าไปที่รายการเกม "
+            "เลือกเกมที่ต้องการ ตั้งค่าเดิมพันต่อรอบ แล้วเริ่มหมุนได้เลย "
+            "ทุกขั้นตอนทำผ่านมือถือได้",
+        ),
+        (
+            "เล่นผ่านมือถือโดยไม่ติดตั้งแอปได้ไหม",
+            "ได้ หน้าเว็บ {brand} เปิดผ่านเบราว์เซอร์บนมือถือได้ทันที "
+            "ไม่ต้องติดตั้งอะไรเพิ่ม หากสัญญาณช้าให้ปิดแท็บอื่นก่อน",
+        ),
+        (
+            "เริ่มเล่นสล็อตต้องใช้เงินเท่าไร",
+            "ไม่มีจำนวนตายตัว ผู้เล่นส่วนใหญ่เริ่มจากจำนวนน้อยก่อน "
+            "เพื่อทำความรู้จักจังหวะของเกม แล้วค่อยปรับเพิ่มทีหลัง",
+        ),
+        (
+            "ฝากเงินที่ {brand} ทำอย่างไร",
+            "เลือกเมนูฝากเงิน เลือกช่องทางที่สะดวก ทั้งโอนผ่านธนาคาร "
+            "วอลเล็ต หรือคิวอาร์โค้ด แล้วทำตามยอดที่ระบุ "
+            "ยอดจะเข้าอัตโนมัติเมื่อระบบอ่านรายการเจอ",
+        ),
+        (
+            "ถอนเงินใช้เวลานานไหม",
+            "ส่วนใหญ่เสร็จภายในไม่กี่นาที หากชื่อบัญชีตรงกับชื่อผู้ใช้ "
+            "ถ้านานกว่านั้นมักเป็นช่วงที่ธนาคารปลายทางปิดปรับปรุง",
+        ),
+        (
+            "ผู้เล่นใหม่ได้รับโบนัสหรือไม่",
+            "มีโปรโมชันสำหรับผู้เล่นใหม่ เงื่อนไขระบุไว้ที่หน้าโปรโมชัน "
+            "ของ {brand} ควรอ่านเงื่อนไขการหมุนก่อนรับทุกครั้ง",
+        ),
+        (
+            "RTP ในรายการเกมสล็อตหมายถึงอะไร",
+            "คือสัดส่วนเงินเดิมพันที่คืนสู่ผู้เล่นในระยะยาว "
+            "ไม่ใช่คำรับประกันว่าจะชนะ แต่ใช้เปรียบเทียบระหว่างเกมได้",
+        ),
+        (
+            "เปิดเกมไม่ได้ต้องทำอย่างไร",
+            "ลองรีเฟรชหน้าเว็บก่อน จากนั้นล้างแคชเบราว์เซอร์ "
+            "หากยังเหมือนเดิมให้ติดต่อฝ่ายช่วยเหลือของ {brand} "
+            "พร้อมแจ้งชื่อเกมที่มีปัญหา",
+        ),
+        (
+            "ข้อมูลบัญชีปลอดภัยหรือไม่",
+            "ข้อมูลบัญชีถูกเข้ารหัสและไม่ถูกนำไปใช้กับเรื่องอื่น "
+            "สิ่งที่ผู้ใช้ต้องดูแลเองคือรหัสผ่าน "
+            "และอย่าบอกรหัสเข้าใช้งานกับใคร",
+        ),
+    ),
+}
+
+
+def faq_bank_cards(brand: dict, keyword: str = "") -> list[tuple[str, str]]:
+    """
+    Tanya-jawab cadangan untuk zona ini, sudah diisi nama brand.
+
+    Urutannya digilir dari nama brand supaya dua halaman yang
+    lubangnya sama tidak menambalnya dengan pertanyaan yang sama.
+    """
+    region = brand.get("region", "id")
+    kartu = FAQ_BANK.get(region) or FAQ_BANK["id"]
+
+    nama = str(brand.get("site_name", "")).strip() or str(keyword or "").strip()
+
+    benih = int.from_bytes(
+        hashlib.sha1(
+            "{}|{}|faq".format(
+                brand.get("site_name", ""),
+                brand.get("variation", ""),
+            ).encode("utf-8")
+        ).digest()[:4],
+        "big",
+    )
+
+    mulai = benih % len(kartu)
+
+    return [
+        (
+            tanya.format(brand=nama).strip(),
+            jawab.format(brand=nama).strip(),
+        )
+        for tanya, jawab in (
+            kartu[(mulai + urutan) % len(kartu)]
+            for urutan in range(len(kartu))
+        )
+    ]
+
+
 # Peran yang teks barunya harus berarti sama dengan teks lamanya,
 # bukan tulisan baru yang bebas. Menu, tombol, dan sel tabel menunjuk
 # ke sesuatu yang nyata di situs itu; menggantinya dengan kata lain
 # membuat tautannya menyesatkan meskipun alamatnya tidak berubah.
 KEEP_MEANING_ROLES = ("nav_label", "table_cell", "label")
+
+# Tingkat pertama breadcrumb SELALU beranda, dalam bahasa apa pun.
+#
+# Jadi "Beranda" yang dijawab "Beranda" adalah jawaban yang benar,
+# bukan salinan malas - satu-satunya jawaban yang benar, malah.
+# Menolaknya membuang satu giliran model untuk meminta sesuatu yang
+# sudah betul, lalu melaporkannya sebagai "1 belum dijawab model"
+# padahal Python tetap memasang berandanya sendiri di
+# normalize_breadcrumb. Terukur di uji 12 Agustus: 16 dari 17 jawaban
+# lolos, dan satu-satunya yang ditolak adalah kata "Beranda".
+HOME_LABELS = frozenset(
+    {"beranda", "home", "หน้าแรก", "halaman utama", "utama"}
+)
 
 # Peran yang teks lamanya dikirim bukan untuk dipertahankan artinya,
 # melainkan untuk memberi tahu bagian apa yang dikepalainya.
@@ -1392,6 +1630,7 @@ def fit_content_to_spec(
             items = [
                 ""
                 if index < len(contoh)
+                and normalize(teks) not in HOME_LABELS
                 and copies_sample(teks, contoh[index], role)
                 else teks
                 for index, teks in enumerate(items)
@@ -1597,9 +1836,9 @@ def drop_broken_pairs(content: dict) -> list[str]:
 
         catatan.append(
             f"{len(rusak)} pasang {kiri} dan {kanan} cuma terisi "
-            "sebelah, jadi keduanya dibiarkan memakai teks asli "
-            "template - pertanyaan baru di atas jawaban lama terbaca "
-            "sebagai halaman rusak."
+            "sebelah, jadi keduanya dilepas - pertanyaan baru di atas "
+            "jawaban lama terbaca sebagai halaman rusak. Kartunya "
+            "diisi ulang sebagai satu kesatuan di faq_card_edits."
         )
 
     return catatan
@@ -1743,6 +1982,329 @@ def drop_repeats(content: dict, roles=None) -> tuple[dict, int]:
     return hasil, dibatalkan
 
 
+# Pertanyaan sependek ini bukan pertanyaan.
+#
+# Bukan aturan gaya melainkan penjaga: slot pertanyaan yang sempit
+# meloloskan jawaban model sependek "Aman?" atau bahkan satu huruf,
+# dan kartu FAQ yang pertanyaannya satu kata tidak menanyakan apa pun.
+# Kalau kena, kartunya diambil dari FAQ_BANK - yang di situ sudah
+# pasti berupa pertanyaan utuh.
+MIN_QUESTION_WORDS = 3
+MIN_QUESTION_WIDTH = 14
+
+
+def is_real_question(teks: str) -> bool:
+    """
+    Apakah teks ini masih terbaca sebagai pertanyaan yang utuh.
+
+    Jumlah katanya dihitung HANYA untuk aksara yang memakai spasi.
+    Bahasa Thai ditulis tanpa spasi antar kata, jadi setiap pertanyaan
+    Thai - sepanjang apa pun - terhitung satu kata; dihitung dengan
+    cara yang sama, seluruh pertanyaan zona Thailand akan ditolak dan
+    diganti kartu cadangan, termasuk yang ditulis model dengan benar.
+    """
+    bersih = str(teks or "").strip()
+
+    if display_width(bersih) < MIN_QUESTION_WIDTH:
+        return False
+
+    kata = bersih.rstrip("?？").split()
+
+    if len(kata) < 2:
+        # Satu potong tanpa spasi. Lebarnya yang menentukan, karena di
+        # aksara tanpa spasi itulah satu-satunya ukuran yang ada - dan
+        # ambangnya sudah lewat di baris atas. Terukur pada pertanyaan
+        # Thai yang benar: "ถอนเงินใช้เวลานานไหม" 18 kolom,
+        # "ฝากเงินทำอย่างไร" 14 kolom, sedangkan "สล็อต" - satu kata
+        # yang bukan pertanyaan - cuma 4.
+        return True
+
+    return len(kata) >= MIN_QUESTION_WORDS
+
+
+def fitting_bank_card(
+    cadangan: list[tuple[str, str]],
+    slot_t: dict,
+    slot_j: dict,
+    urutan: int,
+    terpakai: set,
+) -> tuple[str, str]:
+    """
+    Kartu cadangan pertama yang muat di slotnya TANPA dipotong.
+
+    Dicari, bukan diambil yang nomor urutnya kebetulan sama, karena
+    pertanyaan yang dipotong berhenti menanyakan apa pun. Terukur:
+    "Apakah akun dan data saya aman?" yang dipaksa masuk slot 30 kolom
+    terbit sebagai "Apakah akun dan data saya?" - kata kerjanya hilang,
+    tanda tanyanya dipasang balik, dan hasilnya tampak utuh sekilas
+    padahal tidak menanyakan apa-apa.
+
+    "terpakai" berisi pertanyaan yang SUDAH berdiri di halaman ini,
+    baik dari model maupun dari kartu cadangan sebelumnya. Tanpa itu,
+    kartu cadangan bisa mengulang pertanyaan yang barusan ditulis
+    model - terukur di zona Thailand: model menulis "ฝากเงินที่ NEONWIN
+    ทำอย่างไร" di kartu pertama, dan kartu ketiga menambal lubangnya
+    dengan kalimat yang sama persis dari bank.
+
+    Jawabannya boleh dipotong; ia kalimat, dan kalimat sebelumnya
+    tetap berdiri sendiri.
+    """
+    sidik = [sidik_isi(x, "faq_question") for x in terpakai]
+
+    for langkah in range(len(cadangan)):
+        tanya_bank, jawab_bank = cadangan[(urutan + langkah) % len(cadangan)]
+
+        # Dibandingkan ISINYA, bukan hurufnya - ambang yang sama dengan
+        # yang dipakai drop_repeats untuk seluruh halaman.
+        #
+        # Kecocokan persis tidak cukup, dan itu sudah terbukti di
+        # tempat lain di berkas ini: "Bagaimana cara deposit di X?" dan
+        # "Bagaimana cara melakukan deposit di X?" adalah satu
+        # pertanyaan yang ditulis dua kali, dan keduanya lolos kalau
+        # yang dibandingkan cuma hurufnya.
+        if mirip_isinya(
+            normalize(tanya_bank.rstrip("?？")),
+            sidik,
+            "faq_question",
+        ):
+            continue
+
+        tanya = clean_line(tanya_bank, slot_t["budget"], "faq_question")
+
+        # Tanda tanya di ujung tidak ikut dibandingkan. clean_line
+        # memasangnya sendiri untuk peran ini, dan kalimat tanya bahasa
+        # Thai memang ditulis tanpa tanda tanya - dibandingkan apa
+        # adanya, SELURUH kartu cadangan zona Thailand tertolak sebagai
+        # "berubah waktu dirapikan", dan halamannya terbit dengan
+        # pertanyaan berbahasa Inggris milik template.
+        if not tanya or normalize(tanya.rstrip("?？")) != normalize(
+            tanya_bank.rstrip("?？")
+        ):
+            continue
+
+        jawab = clean_line(jawab_bank, slot_j["budget"], "faq_answer")
+
+        if jawab:
+            return tanya, jawab
+
+    return "", ""
+
+
+def faq_windows(tanya_slot: list, jawab_slot: list) -> list:
+    """
+    Slot jawaban milik tiap pertanyaan, ditentukan LETAKNYA di dokumen.
+
+    Bukan nomor urut. Nomor urut benar selama satu pertanyaan punya
+    tepat satu slot jawaban, dan itu tidak selalu benar: jawaban
+    panjang lazim ditulis dua paragraf, sehingga template punya lebih
+    banyak slot jawaban daripada slot pertanyaan. Dipasangkan per
+    nomor urut, jawaban kedua milik kartu pertama terbit di kartu
+    kedua, dan seluruh sisa daftarnya bergeser - persis cacat yang
+    faq_card_edits ada untuk mencegahnya.
+
+    Yang dipakai di sini satu-satunya hubungan yang selalu benar:
+    jawaban sebuah pertanyaan berdiri SESUDAH pertanyaan itu dan
+    SEBELUM pertanyaan berikutnya.
+    """
+    hasil = []
+
+    for urutan, slot_t in enumerate(tanya_slot):
+        batas = (
+            tanya_slot[urutan + 1]["start"]
+            if urutan + 1 < len(tanya_slot)
+            else None
+        )
+
+        milik = [
+            slot
+            for slot in jawab_slot
+            if slot["start"] > slot_t["start"]
+            and (batas is None or slot["start"] < batas)
+        ]
+
+        hasil.append((slot_t, milik))
+
+    return hasil
+
+
+def faq_card_edits(
+    roles: dict,
+    content: dict,
+    brand: dict,
+) -> tuple[list[dict], list[str]]:
+    """
+    Mengisi kartu FAQ sebagai satu kesatuan, bukan dua daftar terpisah.
+
+    Ini perbaikan untuk cacat yang dilaporkan pengguna sebagai "FAQ
+    banyak bug", dan sebabnya ada di cara membagikan teksnya. Selama
+    pertanyaan dan jawaban dibagikan sebagai dua daftar yang berdiri
+    sendiri, kartu ke-N bisa mendapat pertanyaan ke-N dari satu daftar
+    dan jawaban ke-M dari daftar lain - dan tidak ada satu pun tahap
+    sesudahnya yang bisa melihat bahwa keduanya tidak saling kenal.
+
+    Dua jalan yang terukur di halaman terbit:
+
+    1. Pertanyaan yang tidak muat di slotnya dikembalikan kosong -
+       memotong pertanyaan menghasilkan pertanyaan yang rusak, jadi
+       itu memang disengaja. Slot itu lalu dilewati, TAPI teks
+       berikutnya di antrean maju mengisi slot berikutnya, sementara
+       daftar jawaban tidak ikut bergeser.
+    2. Pertanyaan kembar dikosongkan drop_repeats di titik penulisan,
+       sesudah penjaga pasangan lewat.
+
+    Keduanya menerbitkan gejala yang sama: "What Sets ASG Apart?" -
+    pertanyaan milik pemilik template - berdiri di atas jawaban baru
+    berbahasa Indonesia tentang slot.
+
+    Di sini kartunya diisi berpasangan. Satu kartu mendapat pertanyaan
+    dan jawaban dari nomor urut yang sama, dan kalau salah satunya
+    tidak bisa dipasang, KEDUANYA diambil dari FAQ_BANK - bukan
+    dibiarkan jatuh ke teks asli template, karena teks asli template
+    di halaman slot berbunyi tentang sekolah dan kaus bola.
+    """
+    edits: list[dict] = []
+    notes: list[str] = []
+
+    tanya_slot = roles.get("faq_question") or []
+    jawab_slot = roles.get("faq_answer") or []
+
+    if not tanya_slot or not jawab_slot:
+        return edits, notes
+
+    tanya_slot = sorted(tanya_slot, key=lambda slot: slot["start"])
+    jawab_slot = sorted(jawab_slot, key=lambda slot: slot["start"])
+
+    tanya_isi = [str(x) for x in (content.get("faq_question") or [])]
+    jawab_isi = [str(x) for x in (content.get("faq_answer") or [])]
+
+    cadangan = faq_bank_cards(brand, content.get("_keyword", ""))
+
+    # Pertanyaan yang sudah berdiri di halaman ini, supaya kartu
+    # cadangan tidak mengulang salah satunya. Diisi duluan dengan
+    # SELURUH pertanyaan dari model - termasuk yang berdiri di kartu
+    # yang belum dilewati - karena lubang di kartu kedua bisa saja
+    # ditambal dengan kalimat yang baru akan dipakai kartu kelima.
+    terpakai = {
+        normalize(str(teks).rstrip("?？"))
+        for teks in tanya_isi
+        if str(teks).strip()
+    }
+
+    # Pertanyaan yang sudah terbit di HALAMAN LAIN ikut dihitung
+    # terpakai.
+    #
+    # Bank pertanyaannya digilir dari nama brand, dan nama brand tidak
+    # berubah antar halaman - jadi tanpa daftar ini halaman kedua untuk
+    # brand yang sama menambal lubang FAQ-nya dengan pertanyaan yang
+    # sama persis, di urutan yang sama pula. Pengguna menyebutnya
+    # "topik yang udah dipakai jangan dipakai lagi".
+    terpakai.update(
+        normalize(str(teks).rstrip("?？"))
+        for teks in (content.get("_faq_lama") or [])
+        if str(teks).strip()
+    )
+
+    ditambal = 0
+
+    # Nomor slot jawaban yang sudah terpakai, karena satu kartu bisa
+    # punya lebih dari satu slot jawaban dan daftarnya dibagikan urut.
+    ambil_jawab = 0
+
+    for urutan, (slot_t, milik) in enumerate(
+        faq_windows(tanya_slot, jawab_slot)
+    ):
+        if not milik:
+            # Pertanyaan tanpa slot jawaban di bawahnya. Tidak ada
+            # kartu yang bisa dijaga keutuhannya di sini, jadi
+            # dilewati - slotnya memakai teks asli template.
+            continue
+
+        slot_j = milik[0]
+
+        tanya = clean_line(
+            tanya_isi[urutan] if urutan < len(tanya_isi) else "",
+            slot_t["budget"],
+            "faq_question",
+        )
+
+        jawab = clean_line(
+            jawab_isi[ambil_jawab] if ambil_jawab < len(jawab_isi) else "",
+            slot_j["budget"],
+            "faq_answer",
+        )
+
+        if copies_sample(tanya, slot_t["current"], "faq_question"):
+            tanya = ""
+
+        if copies_sample(jawab, slot_j["current"], "faq_answer"):
+            jawab = ""
+
+        if not is_real_question(tanya):
+            tanya = ""
+
+        # Satu sisi kosong berarti kartu ini tidak punya pasangan yang
+        # saling menjawab. Yang dipakai kartu cadangan UTUH - dua sisi
+        # sekaligus - supaya yang terbaca tetap tanya-jawab, bukan
+        # pertanyaan baru di atas jawaban lama.
+        if not tanya or not jawab:
+            tanya, jawab = fitting_bank_card(
+                cadangan,
+                slot_t,
+                slot_j,
+                urutan,
+                terpakai,
+            )
+
+            if not tanya or not jawab:
+                # Slot yang bahkan kartu cadangannya tidak muat
+                # dibiarkan apa adanya, dua-duanya, supaya tidak ada
+                # sisi yang berganti sendirian.
+                continue
+
+            ditambal += 1
+
+        terpakai.add(normalize(tanya.rstrip("?？")))
+        ambil_jawab += 1
+
+        edits.append({**slot_t, "text": tanya})
+        edits.append({**slot_j, "text": jawab})
+
+        # Slot jawaban tambahan di kartu yang sama - paragraf kedua
+        # dari satu jawaban - kebagian teks berikutnya di antrean.
+        # Kartunya tetap utuh: yang menentukan pasangannya adalah slot
+        # jawaban PERTAMA di jendela ini, dan itu sudah terisi.
+        for lanjutan in milik[1:]:
+            teks = clean_line(
+                jawab_isi[ambil_jawab] if ambil_jawab < len(jawab_isi) else "",
+                lanjutan["budget"],
+                "faq_answer",
+            )
+
+            if not teks or copies_sample(
+                teks, lanjutan["current"], "faq_answer"
+            ):
+                continue
+
+            ambil_jawab += 1
+            edits.append({**lanjutan, "text": teks})
+
+    if ditambal:
+        notes.append(
+            f"{ditambal} kartu FAQ tidak terjawab model dan diisi "
+            "tanya-jawab seputar slot yang ditulis NEIIU, supaya "
+            "pertanyaan milik pemilik template tidak ikut terbit."
+        )
+
+    if len(jawab_slot) != len(tanya_slot):
+        notes.append(
+            f"Template punya {len(tanya_slot)} tempat pertanyaan dan "
+            f"{len(jawab_slot)} tempat jawaban; pasangannya ditentukan "
+            "letak di dokumen, bukan nomor urut."
+        )
+
+    return edits, notes
+
+
 def build_edits(
     slot_map: dict,
     content: dict,
@@ -1765,9 +2327,52 @@ def build_edits(
             "dibatalkan, slotnya memakai teks asli template."
         )
 
+    # Pasangan diperiksa LAGI di sini, sesudah drop_repeats.
+    #
+    # Ini bug yang dilaporkan pengguna sebagai "FAQ banyak bug", dan
+    # inilah jalan masuknya. drop_broken_pairs sudah berjalan waktu
+    # jawaban model diterima, jadi waktu itu pasangannya memang utuh.
+    # Yang memutuskannya justru baris di ATAS: pertanyaan kembar
+    # dikosongkan di sini, di titik penulisan, sesudah penjaga pasangan
+    # lewat - dan jawabannya, yang tidak kembar, tetap ditulis.
+    #
+    # Yang terbit persis seperti yang dilaporkan. Halaman WAYANGPLAY
+    # menerbitkan tujuh kartu FAQ, tiga di antaranya masih berbunyi
+    # "What Sets ASG Apart?" dan "Why Study at ASG??" - pertanyaan
+    # milik template - dengan jawaban baru berbahasa Indonesia tentang
+    # RTP di bawahnya. Lebih buruk lagi, karena yang kosong cuma sisi
+    # pertanyaan, SELURUH sisa daftarnya bergeser: pertanyaan tentang
+    # pembaruan tiap jam terbit di atas jawaban tentang cara memilih
+    # slot.
+    #
+    # Diperiksa ulang di sini, kartu yang pertanyaannya batal ikut
+    # mengosongkan jawabannya, dan kartu itu ditambal utuh oleh
+    # faq_card_edits di bawah.
+    for catatan in drop_broken_pairs(content):
+        notes.append(catatan)
+
     roles = slot_map["roles"]
 
+    # Kartu FAQ diisi berpasangan, di luar antrean per peran di bawah.
+    # Alasannya di faq_card_edits.
+    faq_edits, faq_notes = faq_card_edits(roles, content, brand)
+
+    edits.extend(faq_edits)
+    notes.extend(faq_notes)
+
+    # Hanya template yang punya KEDUA sisinya yang dikeluarkan dari
+    # antrean biasa. Template yang cuma punya sisi pertanyaan - blok
+    # tanya-jawab yang jawabannya dimuat lewat skrip, misalnya - tidak
+    # punya pasangan yang bisa dijaga, dan mengeluarkannya dari antrean
+    # berarti slotnya tidak diisi siapa pun.
+    berpasangan = bool(roles.get("faq_question")) and bool(
+        roles.get("faq_answer")
+    )
+
     for role, slots in roles.items():
+        if berpasangan and role in ("faq_question", "faq_answer"):
+            continue
+
         if role == "lang":
             for slot in slots:
                 edits.append(
@@ -1832,6 +2437,32 @@ def build_edits(
                         # selisih nama.
                         "text": baris,
                     }
+                )
+
+            continue
+
+        if role == "price":
+            # Harga template ditukar ke mata uang zona, angkanya
+            # dikonversi dari nilai yang memang tertulis di situ.
+            # Yang tidak bisa ditukar - mata uangnya sudah benar, atau
+            # angkanya tidak terbaca - dilewati, dan slotnya terbit
+            # apa adanya.
+            ditukar = 0
+
+            for slot in slots:
+                teks = localize_price(
+                    slot["current"],
+                    brand.get("region", "id"),
+                )
+
+                if teks:
+                    edits.append({**slot, "text": teks})
+                    ditukar += 1
+
+            if ditukar:
+                notes.append(
+                    f"{ditukar} harga ditukar ke mata uang "
+                    f"{brand.get('region_label', 'Indonesia')}."
                 )
 
             continue
@@ -2014,6 +2645,19 @@ def build_edits(
         if not text:
             continue
 
+        # Angka persen dibuang dari judul di titik penulisan juga,
+        # bukan cuma waktu isinya disusun.
+        #
+        # Ia sudah dibuang enforce_title_shape dan
+        # enforce_content_numbers, dan tetap diulang di sini dengan
+        # alasan yang sama seperti drop_repeats: ini satu-satunya titik
+        # yang PASTI dilewati setiap teks yang terbit, dari jalur mana
+        # pun ia datang. Pengguna memintanya dengan jelas - "rtp 96,4%
+        # bisa diganti rtp saja" - dan judul adalah satu-satunya teks
+        # halaman yang dibaca orang sebelum memutuskan mengklik.
+        if role in FIGURE_FREE_ROLES:
+            text = strip_figures(text)
+
         for slot in slots:
             edits.append(
                 {
@@ -2111,7 +2755,49 @@ def published_content(edits: list[dict], content: dict) -> dict:
             # itu yang paling aman dipakai.
             hasil[peran] = max(daftar, key=len)
 
+    align_faq_pairs(urut, hasil)
+
     return hasil
+
+
+def align_faq_pairs(urut: list[dict], hasil: dict) -> None:
+    """
+    Menyamakan pasangan FAQ di data terstruktur dengan yang di halaman.
+
+    rewrite_faq memasang questions[N] dan answers[N] ke kartu schema
+    ke-N, jadi kedua daftar itu harus sejajar satu-satu. Diratakan per
+    peran seperti di atas, kesejajarannya putus begitu satu pertanyaan
+    punya lebih dari satu slot jawaban - jawaban paragraf kedua milik
+    kartu pertama masuk ke kartu kedua, dan seluruh sisanya bergeser.
+
+    Google membandingkan teks FAQ di schema dengan teks yang terbaca di
+    halaman; yang tidak sama diabaikan, atau lebih buruk, dianggap
+    schema yang menjanjikan sesuatu yang tidak ada di halaman.
+
+    Jawaban paragraf kedua ikut disambung ke jawaban kartunya, bukan
+    dibuang: yang dibaca pembaca di kartu itu memang kedua paragrafnya.
+    """
+    tanya = [x for x in urut if x.get("role") == "faq_question"]
+    jawab = [x for x in urut if x.get("role") == "faq_answer"]
+
+    if not tanya or not jawab:
+        return
+
+    pasangan_tanya: list[str] = []
+    pasangan_jawab: list[str] = []
+
+    for slot_t, milik in faq_windows(tanya, jawab):
+        if not milik:
+            continue
+
+        pasangan_tanya.append(str(slot_t["text"]))
+        pasangan_jawab.append(
+            " ".join(str(x["text"]).strip() for x in milik).strip()
+        )
+
+    if pasangan_tanya:
+        hasil["faq_question"] = pasangan_tanya
+        hasil["faq_answer"] = pasangan_jawab
 
 
 def build_review_block(
@@ -2334,6 +3020,27 @@ def fill_template(
         notes.append(
             f"Nama brand lama '{old_brand}' diganti di "
             f"{jumlah_brand} tempat yang tidak kebagian teks baru."
+        )
+
+    # Harga yang tertinggal ikut pindah zona, dengan alasan yang sama
+    # seperti nama brand di atas: slot yang dilewati dilewati karena
+    # "belum tentu ini isi artikel", bukan karena isinya boleh tetap
+    # milik toko asal template. Halaman berbahasa Indonesia yang
+    # tabelnya berharga euro terbaca sebagai halaman yang tulisannya
+    # ditimpa, dan pengguna sudah menyatakan harga boleh diubah.
+    harga, jumlah_harga = price_edits(
+        slot_map,
+        sudah,
+        brand.get("region", "id"),
+    )
+
+    if harga:
+        edits.extend(harga)
+        sudah.update({(x["start"], x["end"]): x for x in harga})
+
+        notes.append(
+            f"{jumlah_harga} harga yang tertinggal ditukar ke mata uang "
+            f"{brand.get('region_label', 'Indonesia')}."
         )
 
     # Data terstruktur ditulis ulang dari isi yang sama dengan yang

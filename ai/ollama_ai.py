@@ -377,6 +377,8 @@ class OllamaAI(BaseAI):
             "elapsed_seconds": int(time.monotonic() - started_at),
         }
 
+    # Catatan: salvage_json didefinisikan di bawah kelas ini.
+
     @staticmethod
     def _parse_structured(content: str) -> dict | None:
         """
@@ -387,11 +389,98 @@ class OllamaAI(BaseAI):
         yang kebetulan diawali kurung kurawal tidak diperlakukan
         sebagai JSON yang rusak.
         """
+        teks = content.strip()
+
         try:
-            parsed = json.loads(content.strip())
+            parsed = json.loads(teks)
         except json.JSONDecodeError as error:
-            raise RuntimeError(
-                f"Jawaban AI bukan JSON yang valid: {error}"
-            ) from error
+            parsed = salvage_json(teks)
+
+            if parsed is None:
+                raise RuntimeError(
+                    f"Jawaban AI bukan JSON yang valid: {error}"
+                ) from error
 
         return parsed if isinstance(parsed, dict) else None
+
+
+def salvage_json(teks: str) -> dict | None:
+    """
+    Menyelamatkan apa yang sempat ditulis dari JSON yang terpotong.
+
+    Jawaban model berhenti di tengah begitu jatah tokennya habis, dan
+    yang tersisa adalah objek yang tidak pernah ditutup - biasanya
+    dengan satu string menggantung di ujungnya. Sebelum ini seluruh
+    jawaban dibuang, dan satu jawaban yang dibuang membatalkan
+    seluruh run: terukur pada job #52, halaman gagal di menit ke-21
+    dengan pesan "Unterminated string starting at char 1753",
+    padahal tujuh belas dari delapan belas teks sudah selesai
+    ditulis.
+
+    Yang diselamatkan cuma butir yang SUDAH LENGKAP. Butir terakhir
+    yang terpotong dibuang, bukan ditambal, karena kalimat yang
+    berhenti di tengah lebih buruk daripada slot yang diminta ulang -
+    dan mesin permintaan ulang sudah ada di content_planner.
+
+    Mengembalikan None kalau tidak ada satu pun yang bisa dibaca,
+    supaya pemanggilnya tetap melapor apa adanya.
+    """
+    if not teks.startswith("{"):
+        return None
+
+    # Ditutup bertahap dari ujung: potong satu karakter, coba urai,
+    # ulangi. Cara ini tidak perlu tahu apa pun tentang bentuk
+    # jawabannya, dan berhenti di potongan terpanjang yang sah.
+    #
+    # Yang dicoba cuma titik potong yang masuk akal - sesudah tanda
+    # kutip penutup, kurung siku, atau kurung kurawal - supaya
+    # percobaannya tidak sebanyak jumlah karakternya.
+    penutup: dict[str, str] = {}
+
+    for ujung in range(len(teks) - 1, 0, -1):
+        if teks[ujung] not in '"]}':
+            continue
+
+        potongan = teks[: ujung + 1]
+
+        # Kurung yang masih terbuka ditutup, dari yang terdalam.
+        tumpukan: list[str] = []
+        dalam_string = False
+        lolos = False
+
+        for huruf in potongan:
+            if lolos:
+                lolos = False
+                continue
+
+            if huruf == "\\" and dalam_string:
+                lolos = True
+                continue
+
+            if huruf == '"':
+                dalam_string = not dalam_string
+                continue
+
+            if dalam_string:
+                continue
+
+            if huruf in "{[":
+                tumpukan.append(huruf)
+            elif huruf in "}]" and tumpukan:
+                tumpukan.pop()
+
+        if dalam_string:
+            continue
+
+        ekor = "".join("}" if x == "{" else "]" for x in reversed(tumpukan))
+
+        try:
+            hasil = json.loads(potongan + ekor)
+        except json.JSONDecodeError:
+            continue
+
+        if isinstance(hasil, dict) and hasil:
+            penutup = hasil
+            break
+
+    return penutup or None

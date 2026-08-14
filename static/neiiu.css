@@ -186,6 +186,77 @@
 
 /* progres */
 
+.run-card {
+    border-color: var(--green-dark);
+}
+
+.run-head {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 14px;
+}
+
+.run-title {
+    flex: 1;
+    min-width: 0;
+}
+
+.run-percent {
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--green);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Lingkaran berputar.
+   Dimatikan untuk pengguna yang meminta gerak dikurangi: putaran
+   tanpa henti memicu pusing pada sebagian orang, dan di sini ia
+   cuma penegas - keterangan langkahnya sudah tertulis di sebelahnya. */
+.spinner {
+    width: 22px;
+    height: 22px;
+    flex: none;
+    border-radius: 50%;
+    border: 2px solid var(--border);
+    border-top-color: var(--green);
+    animation: spin 0.9s linear infinite;
+}
+
+.spinner.idle {
+    animation: none;
+    border-top-color: var(--muted);
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .spinner {
+        animation: none;
+    }
+}
+
+.run-bar {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    overflow: hidden;
+    margin-bottom: 14px;
+}
+
+.run-bar-fill {
+    height: 100%;
+    width: 0;
+    background: var(--green);
+    border-radius: 4px;
+    transition: width 0.4s ease;
+}
+
 .steps {
     display: flex;
     gap: 5px;
@@ -208,6 +279,19 @@
 .step-dot.active {
     background: var(--green-dark);
     border-color: var(--green);
+    animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    50% {
+        opacity: 0.35;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .step-dot.active {
+        animation: none;
+    }
 }
 
 .step-now {
@@ -285,6 +369,7 @@
     border-color: #7a5c1e;
 }
 
+/* Dipakai daftar template, bukan lagi kartu job. */
 .job-meta {
     margin-top: 8px;
     font-size: 13px;
@@ -292,16 +377,13 @@
     line-height: 1.7;
 }
 
-.job-stats {
-    display: flex;
-    gap: 18px;
-    flex-wrap: wrap;
+/* Sebab kegagalan. Satu-satunya keterangan yang tetap ditampilkan
+   di kartu job, karena tanpanya kegagalan tidak bisa ditindaklanjuti. */
+.job-error {
     margin-top: 10px;
     font-size: 13px;
-}
-
-.job-stats b {
-    color: var(--text);
+    line-height: 1.7;
+    color: var(--danger);
 }
 
 .job-actions {
@@ -336,14 +418,6 @@
     border-color: var(--green-dark);
     color: var(--green);
     font-weight: 600;
-}
-
-.job-problems {
-    margin: 10px 0 0;
-    padding-left: 18px;
-    font-size: 13px;
-    color: var(--muted);
-    line-height: 1.7;
 }
 
 .empty {

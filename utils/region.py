@@ -421,7 +421,15 @@ def slug_for_url(text: str, region: str = DEFAULT_REGION) -> str:
 
     # Yang dibuang hanya karakter yang benar-benar bermasalah di URL,
     # bukan semua yang bukan ASCII.
-    clean = re.sub(r"[\s/\\?#\[\]@!$&'()*+,;=%\"<>{}|^`~]+", "-", clean)
+    #
+    # Titik dua ikut dibuang walaupun sah di dalam path. Slug diambil
+    # dari h1, dan h1 lazimnya berbentuk "BRAND: Judul Halaman", jadi
+    # titik duanya jatuh di segmen PERTAMA - "wayangplay:-slot-gacor".
+    # Segmen pertama yang memuat titik dua terbaca sebagai skema URL
+    # oleh pengurai yang mengikuti RFC 3986, sehingga tautan relatif
+    # ke halaman itu menunjuk ke protokol "wayangplay:" alih-alih ke
+    # halamannya.
+    clean = re.sub(r"[\s/\\?#\[\]@!$&'()*+,;:=%\"<>{}|^`~]+", "-", clean)
     clean = re.sub(r"[.]+", "-", clean)
     clean = re.sub(r"-{2,}", "-", clean).strip("-")
 

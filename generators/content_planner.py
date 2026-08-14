@@ -11,14 +11,19 @@ dirender jadi HTML tanpa parsing teks bebas.
 
 import hashlib
 import re
+import time
 from datetime import datetime, timedelta
 
 from ai.manager import AIManager
 from ai.neiiu_prompts import (
+    TITLE_ANGLE_MARK,
+    TITLE_FRAME_MARK,
     build_content_plan_prompt,
     build_serp_insight_prompt,
     build_template_content_prompt,
     pick_style_examples,
+    pick_title_angle,
+    pick_title_frame,
 )
 from generators.content_batches import (
     answer_chars,
@@ -26,6 +31,12 @@ from generators.content_batches import (
     plan_batches,
 )
 from generators.brand_swap import normalize
+from generators.page_numbers import (
+    build_number_set,
+    enforce_content_numbers,
+    strip_figures,
+)
+from generators.page_text import PAGE_TEXT
 from generators.template_filler import (
     LIST_ROLES,
     balance_paired_roles,
@@ -44,9 +55,15 @@ from config import (
     AI_MAX_TOKENS_INSIGHT,
     AI_MAX_TOKENS_PLAN,
     AI_MODEL,
+    AI_MODEL_INSIGHT,
     AI_PROVIDER,
 )
 from utils.region import format_date, get_region, iso_date, slug_for_url
+from utils.spelling import (
+    fix_content_terms,
+    fix_terms,
+    protected_words,
+)
 from utils.text import (
     THAI_RANGE,
     content_shingles,
@@ -55,6 +72,7 @@ from utils.text import (
     display_width,
     drop_dangling,
     estimate_tokens,
+    menggantung,
     thai_share,
     trim_to_width,
 )
@@ -100,6 +118,36 @@ SHORT_ANSWER_RETRIES = 2
 SHORT_TEXT_SHARE = 0.5
 
 
+# Kegagalan yang PENYEBABNYA sambungan putus, bukan jawaban salah.
+#
+# Runner model Ollama sesekali mati di tengah permintaan panjang dan
+# menutup soketnya. Yang sampai ke sini bentuknya RuntimeError berisi
+# pesan jaringan, dan kalau dibiarkan lewat, satu permintaan gagal
+# membatalkan seluruh run - terukur 12 Agustus: giliran 5 dari 5 mati
+# di menit ke-21 dan dua puluh menit crawl serta penulisan sebelumnya
+# ikut terbuang.
+#
+# Yang dicocokkan cuma pesan transportasi. Jawaban yang bukan JSON,
+# schema yang tidak terpenuhi, atau prompt kosong TIDAK ikut diulang:
+# mengirim permintaan yang sama untuk kesalahan yang sama cuma
+# menghabiskan waktu.
+TRANSPORT_ERROR = re.compile(
+    r"forcibly closed|connection reset|connection aborted|"
+    r"broken pipe|wsarecv|wsasend|eof occurred|"
+    r"remote end closed|connection refused|"
+    r"error was encountered while running the model",
+    re.IGNORECASE,
+)
+
+# Berapa kali permintaan yang putus sambungannya dicoba lagi.
+ASK_RETRIES = 2
+
+# Jeda sebelum mencoba lagi. Runner yang barusan mati butuh waktu
+# dimuat ulang; menembaknya seketika cuma menghasilkan kegagalan
+# kedua yang sama.
+ASK_RETRY_DELAY = 5.0
+
+
 def round_up(value: int, step: int) -> int:
     return ((value + step - 1) // step) * step
 
@@ -111,6 +159,7 @@ def ask_structured(
     max_tokens: int,
     on_progress=None,
     context_length: int = 0,
+    model: str = "",
 ) -> dict:
     """
     Mengirim prompt ke AI dan mengembalikan objek JSON hasilnya.
@@ -120,6 +169,9 @@ def ask_structured(
     num_ctx membuat Ollama memuat ulang model dan membuang cache
     prompt, sehingga awalan yang sengaja dibuat identik justru
     diproses ulang dari nol setiap giliran.
+
+    model dikosongkan berarti memakai AI_MODEL. Yang memakai jalur
+    ini cuma tahap insight, dan alasannya ada di config.py.
     """
     needed = (
         estimate_tokens(system_prompt)
@@ -145,17 +197,37 @@ def ask_structured(
 
     ai = AIManager(
         provider=AI_PROVIDER,
-        model=AI_MODEL,
+        model=model or AI_MODEL,
         max_tokens=max_tokens,
         context_length=context_length,
     )
 
-    result = ai.ask(
-        prompt=user_prompt,
-        system_prompt=system_prompt,
-        response_schema=schema,
-        on_progress=on_progress,
-    )
+    result = None
+
+    for percobaan in range(ASK_RETRIES + 1):
+        try:
+            result = ai.ask(
+                prompt=user_prompt,
+                system_prompt=system_prompt,
+                response_schema=schema,
+                on_progress=on_progress,
+            )
+            break
+
+        except (RuntimeError, ConnectionError, OSError) as error:
+            putus = TRANSPORT_ERROR.search(str(error))
+
+            if not putus or percobaan >= ASK_RETRIES:
+                raise
+
+            catat(
+                on_progress,
+                f"sambungan ke model putus ({putus.group(0)}), "
+                f"dicoba lagi {percobaan + 1}/{ASK_RETRIES} "
+                f"setelah {int(ASK_RETRY_DELAY)} detik.",
+            )
+
+            time.sleep(ASK_RETRY_DELAY)
 
     structured = result.get("structured_content")
 
@@ -190,7 +262,13 @@ def generate_serp_insight(
 
     try:
         if verbose:
-            print("  Meminta analisis ranking ke AI...")
+            catatan = (
+                f" (model {AI_MODEL_INSIGHT})"
+                if AI_MODEL_INSIGHT != AI_MODEL
+                else ""
+            )
+
+            print(f"  Meminta analisis ranking ke AI{catatan}...")
 
         insight = ask_structured(
             system_prompt=system_prompt,
@@ -198,6 +276,7 @@ def generate_serp_insight(
             schema=SERP_INSIGHT_SCHEMA,
             max_tokens=AI_MAX_TOKENS_INSIGHT,
             on_progress=on_progress,
+            model=AI_MODEL_INSIGHT,
         )
 
         insight["status"] = "success"
@@ -274,6 +353,22 @@ def build_fallback_insight(analysis: dict) -> dict:
         else:
             weaknesses.append("Tidak memakai structured data.")
 
+        # Sudut pembahasan diambil dari heading halamannya sendiri.
+        # Ini fallback tanpa AI, jadi tidak ada yang menyimpulkan
+        # apa pun di sini - yang bisa dilakukan cuma menunjukkan
+        # kerangka aslinya dan membiarkannya bicara sendiri.
+        outline = [
+            item.get("heading", "")
+            for item in (page.get("digest") or {}).get("outline", [])
+            if item.get("heading")
+        ]
+
+        angle = (
+            "Kerangka pembahasannya: " + "; ".join(outline[:5])
+            if outline
+            else "Belum dianalisis AI."
+        )
+
         ranking_analysis.append(
             {
                 "position": page["position"],
@@ -283,6 +378,7 @@ def build_fallback_insight(analysis: dict) -> dict:
                     f"dengan {page['headings']['h2_count']} H2 dan "
                     f"{page['links']['internal_count']} internal link."
                 ),
+                "angle": angle[:300],
                 "strengths": strengths[:4],
                 "weaknesses": weaknesses[:3],
             }
@@ -299,6 +395,25 @@ def build_fallback_insight(analysis: dict) -> dict:
             "Belum dianalisis AI. Ditentukan dari pola SERP: "
             "mayoritas halaman bersifat informasional dan komersial."
         ),
+        "intent_evidence": [
+            f"{item['heading']} — dipakai {item['count']} domain"
+            for item in blueprint.get("common_headings", [])[:4]
+        ],
+        # Tanpa AI, topik wajib diambil dari heading yang paling
+        # sering berulang di halaman pertama. Itu bukan pemahaman,
+        # tapi pengulangan lintas domain memang bukti yang sah:
+        # kalau tujuh dari sepuluh halaman membahasnya, halaman baru
+        # yang melewatinya berangkat dengan kekurangan.
+        "must_cover": [
+            {
+                "topic": item["heading"],
+                "reason": (
+                    f"Dipakai {item['count']} domain di halaman pertama."
+                ),
+            }
+            for item in blueprint.get("common_headings", [])[:8]
+            if item.get("count", 0) >= 2
+        ],
         "ranking_analysis": ranking_analysis,
         "content_gaps": [
             f"Belum semua halaman punya FAQ "
@@ -370,6 +485,7 @@ def generate_template_content(
     fallbacks: dict | None = None,
     riwayat: dict | None = None,
     on_progress=None,
+    old_brand: str = "",
 ) -> tuple[dict, list[str]]:
     """
     Menghasilkan potongan teks sebanyak slot di template pengguna.
@@ -396,6 +512,16 @@ def generate_template_content(
     zona = get_region(brand.get("region", "id"))
 
     spec = scale_spec(spec, zona.get("chars_per_column", 1.0))
+
+    # Angka halaman dipilih SEBELUM giliran pertama berangkat, karena
+    # daftarnya ikut masuk ke prompt tiap giliran. Benihnya tetap,
+    # jadi seluruh giliran melihat daftar yang sama persis dan cache
+    # prompt Ollama tidak batal di tengah jalan.
+    angka_halaman = build_number_set(
+        analysis["keyword"],
+        brand.get("site_name", "").strip(),
+        brand.get("variation", ""),
+    )
 
     # Berapa karakter yang muat dalam satu token sangat berbeda antar
     # aksara. Tokenizer byte-level memecah aksara Thai hampir satu
@@ -520,6 +646,7 @@ def generate_template_content(
             brand=brand,
             sudah=terkumpul if sudah is None else sudah,
             riwayat=riwayat,
+            angka=angka_halaman,
         )
 
         needed_chars = answer_chars(bagian)
@@ -533,6 +660,28 @@ def generate_template_content(
             - estimate_tokens(user_prompt)
             - CONTEXT_MARGIN
         )
+
+        # Kekurangan ruang dikatakan, bukan didiamkan.
+        #
+        # Kalau sisa context lebih kecil daripada panjang jawaban yang
+        # diminta, jawabannya PASTI terpotong - bukan mungkin. Dulu
+        # keadaan ini lewat tanpa jejak dan yang terlihat pengguna cuma
+        # "Jawaban AI bukan JSON yang valid" di menit ke-21 (job #52).
+        # Sekarang potongannya masih diselamatkan di ollama_ai dan
+        # sisanya diminta ulang, tapi sebabnya tetap perlu tercatat
+        # supaya kelihatan bahwa templatenya yang kebesaran untuk
+        # context yang dipasang.
+        perlu = int(needed_chars / per_token) + 400
+
+        if tersisa < perlu:
+            catat(
+                on_progress,
+                f"Giliran {nomor}: sisa context {tersisa} token, "
+                f"sedangkan jawabannya butuh sekitar {perlu}. "
+                "Jawaban akan terpotong dan sisanya diminta ulang. "
+                "Naikkan AI_CONTEXT_LENGTH atau kurangi jumlah "
+                "halaman yang di-crawl.",
+            )
 
         return ask_structured(
             system_prompt=system_prompt,
@@ -663,14 +812,14 @@ def generate_template_content(
 
         def judul_buruk(teks) -> float:
             """
-            Dua alasan judul ditolak, dinyatakan dalam satu angka.
+            Alasan judul ditolak, semuanya dinyatakan dalam satu angka.
 
-            Keduanya kelipatan ambangnya masing-masing, jadi 1.0
-            berarti "tepat di batas" untuk alasan apa pun dan satu
-            putaran ulang menutup dua-duanya sekaligus. Sebelumnya
-            keduanya butuh putaran sendiri-sendiri, dan itu berarti
-            judul yang kena dua-duanya membayar dua kali giliran
-            model untuk satu baris teks.
+            Tiap alasan adalah kelipatan ambangnya masing-masing, jadi
+            1.0 berarti "tepat di batas" untuk alasan apa pun dan satu
+            putaran ulang menutup semuanya sekaligus. Sebelumnya tiap
+            alasan butuh putaran sendiri-sendiri, dan itu berarti judul
+            yang kena dua-duanya membayar dua kali giliran model untuk
+            satu baris teks.
             """
             mengulang = max(
                 (echo_score(teks, lama) for lama in judul_lama),
@@ -679,6 +828,32 @@ def generate_template_content(
 
             return max(
                 mengulang / TITLE_REPEAT_LIMIT,
+                # Judul yang ekornya tumpukan penyangat diminta lagi
+                # SEBELUM tumpukannya disapu Python.
+                #
+                # Menyapunya saja sudah menghasilkan judul yang
+                # berbahasa Indonesia, tapi selalu judul yang lebih
+                # pendek daripada yang diminta - kata yang dibuang
+                # tidak ada yang menggantikan. Diminta ulang, model
+                # punya kesempatan mengisi ruang yang sama dengan
+                # keterangan yang benar-benar menerangkan sesuatu, dan
+                # penyapu tinggal jaring terakhir kalau ketiga
+                # percobaannya menumpuk lagi.
+                len(title_tail_pile(teks, analysis["keyword"]))
+                / (TITLE_TAIL_ALLOWED + 1),
+                # Judul halaman sebelumnya diadu dengan ukuran yang
+                # sama seperti contoh gaya, dan alasannya sama: dua
+                # judul yang kata-katanya sama tapi urutannya ditukar
+                # lolos dari perbandingan per frasa, padahal itulah
+                # bentuk pengulangan yang paling sering terjadi -
+                # model menulis ulang judulnya sendiri dengan kata
+                # yang digeser. Pengguna menyebutnya "samaan, apalagi
+                # mirip mirip".
+                style_copy_score(
+                    teks,
+                    judul_lama,
+                    brand.get("site_name", ""),
+                ),
                 style_copy_score(
                     teks,
                     contoh_gaya.get("title") or [],
@@ -697,8 +872,9 @@ def generate_template_content(
                 catat(
                     on_progress,
                     f"Giliran {nomor}: judulnya mengulang judul halaman "
-                    "sebelumnya atau menyalin contoh gayanya; diminta "
-                    f"lagi ({putaran + 1}/{TITLE_REPEAT_RETRIES}).",
+                    "sebelumnya, menyalin contoh gayanya, atau ekornya "
+                    "menumpuk kata penyangat; diminta lagi "
+                    f"({putaran + 1}/{TITLE_REPEAT_RETRIES}).",
                 )
 
                 ulangan = minta({"title": bagian["title"]}, nomor, ulang=True)
@@ -724,10 +900,12 @@ def generate_template_content(
 
             if nilai_terbaik >= 1.0:
                 warnings.append(
-                    "Judul masih mirip judul halaman sebelumnya atau "
-                    "contoh gayanya walau sudah diminta "
+                    "Judul masih mirip judul halaman sebelumnya, mirip "
+                    "contoh gayanya, atau ekornya masih menumpuk kata "
+                    f"penyangat walau sudah diminta "
                     f"{TITLE_REPEAT_RETRIES + 1} kali; yang dipakai "
-                    "yang paling sedikit mengulang."
+                    "yang paling sedikit bermasalah, dan tumpukan yang "
+                    "tersisa dibuang."
                 )
 
         judul = (terkumpul.get("title") or [""])[0]
@@ -877,7 +1055,94 @@ def generate_template_content(
 
     warnings.extend(balance_paired_roles(content))
 
+    # Salah ketik istilah dibetulkan sesudah semua giliran disatukan.
+    #
+    # Satu titik untuk seluruh halaman, bukan per peran, karena salah
+    # ketiknya tidak memilih peran: "deposit qrisk" bisa jatuh di
+    # title, di kartu fitur, di jawaban FAQ, atau di ulasan, dan yang
+    # dilaporkan pengguna kebetulan yang di keyword.
+    #
+    # Dua nama brand dilindungi, bukan satu. Nama brand LAMA ikut
+    # karena sebagian sisanya masih berdiri di isi ini, dan nama brand
+    # di ranah ini rutin berjarak satu huruf dari istilahnya sendiri -
+    # "GACORR" jadi "gacor", "MAXWINS" jadi "maxwin". Membetulkan nama
+    # situs orang adalah kerusakan yang jauh lebih sulit dilihat
+    # daripada salah ketik yang diperbaikinya.
+    content, salah_ketik = fix_content_terms(
+        content,
+        analysis["keyword"],
+        " ".join(
+            bagian
+            for bagian in (brand.get("site_name", ""), old_brand)
+            if str(bagian or "").strip()
+        ),
+    )
+
+    if salah_ketik:
+        warnings.append(
+            f"{salah_ketik} teks memuat salah ketik istilah dan sudah "
+            "dibetulkan ke ejaan bakunya."
+        )
+
+    # Angka disatukan SESUDAH semua giliran selesai, bukan per giliran.
+    #
+    # Tabrakan angka justru terjadi ANTAR giliran - ulasan ditulis di
+    # giliran lima, paragrafnya di giliran tiga, dan keduanya tidak
+    # pernah saling melihat. Merapikannya per giliran berarti tiap
+    # giliran konsisten dengan dirinya sendiri dan tetap bertabrakan
+    # dengan giliran lain, yaitu persis keadaan yang mau dibereskan.
+    sebelum = dict(content)
+    content = enforce_content_numbers(content, angka_halaman)
+
+    diperbaiki = sum(
+        1
+        for peran, nilai in content.items()
+        if not peran.startswith("_")
+        and nilai != sebelum.get(peran)
+    )
+
+    if diperbaiki:
+        warnings.append(
+            f"Angka di {diperbaiki} peran disamakan dengan angka "
+            "yang dipakai halaman ini, supaya satu hal tidak disebut "
+            "dengan dua angka berbeda."
+        )
+
     content["_metadata"] = metadata
+
+    # Sudut dan cara bercerita judul dititipkan di dalam isi supaya ikut
+    # tercatat sebagai "sudah dipakai" sesudah halamannya terbit.
+    #
+    # Dihitung ulang di sini, bukan dibawa keluar dari prompt: ketiga
+    # bahannya - nama brand, keyword, penanda run - dan riwayatnya sudah
+    # tetap sejak sebelum giliran pertama, jadi hasilnya pasti sama
+    # dengan yang dilihat model. Argumennya harus PERSIS sama dengan
+    # yang dipakai build_template_content_prompt, alasannya sama seperti
+    # contoh_gaya di atas.
+    content[TITLE_ANGLE_MARK] = pick_title_angle(
+        brand.get("site_name", "").strip(),
+        analysis["keyword"],
+        brand.get("variation", ""),
+        (riwayat or {}).get(TITLE_ANGLE_MARK) or (),
+    )
+
+    content[TITLE_FRAME_MARK] = pick_title_frame(
+        brand.get("site_name", "").strip(),
+        analysis["keyword"],
+        brand.get("variation", ""),
+        (riwayat or {}).get(TITLE_FRAME_MARK) or (),
+    )
+
+    # Pertanyaan FAQ halaman-halaman sebelumnya dibawa serta ke tahap
+    # pengisian template. Kartu cadangan dipilih di sana, dan tanpa
+    # daftar ini halaman kedua menambal lubangnya dengan pertanyaan yang
+    # sama persis - bank pertanyaannya digilir dari nama brand, dan nama
+    # brandnya memang tidak berubah antar halaman.
+    content["_faq_lama"] = [
+        str(teks)
+        for teks in ((riwayat or {}).get("faq_question") or [])
+        if str(teks).strip()
+    ]
 
     return content, warnings
 
@@ -960,8 +1225,13 @@ def ensure_template_identity(
 
         batas = spec[role].get("max_length_any") or spec[role]["max_length"]
 
+        # Angka dibuang sebelum penambalan, dengan alasan yang sama
+        # seperti di normalize_plan: ensure_identity memotong judul
+        # untuk memberi tempat pada nama brand, dan memotong sambil
+        # menghitung angka yang kemudian dibuang berarti ekor judulnya
+        # tercabut demi ruang yang tidak dipakai siapa pun.
         hasil[role] = ensure_identity(
-            teks,
+            strip_title_pile(strip_figures(teks), keyword),
             keyword,
             brand_name,
             int(batas),
@@ -1102,29 +1372,80 @@ def bare_style(teks: str, brand: str) -> str:
     return normalize(" ".join(bersih.split()))
 
 
+# Seberapa besar irisan KATA dengan contoh gaya sebelum dihitung
+# menyalin.
+#
+# Ukuran kedua, dan ia yang menutup lubang yang dikeluhkan pengguna:
+# "title kata katanya udah pernah dipakai, jangan dipakai lagi biar
+# ga samaan apalagi mirip mirip".
+#
+# Terukur pada judul yang terbit di job 55:
+#
+#   terbit : WAYANGPLAY # Slot Gacor Update Harian RTP 96,3% Terbaru
+#   contoh : [ BRAND ] | Update Harian RTP Slot dengan Pola Gacor
+#            Terbaik
+#
+#   irisan per frasa tiga kata : 0,11   <- lolos ambang 0,3
+#   irisan per kata            : 0,62
+#
+# Keduanya jelas judul yang sama bagi pembaca - kata yang sama persis,
+# cuma urutannya ditukar - dan justru penukaran urutan itu yang
+# membuat perbandingan per frasa buta: satu kata bergeser, seluruh
+# frasa tiga katanya ikut bergeser.
+#
+# Perbandingan per frasa TIDAK dibuang, karena ia yang menangkap
+# salinan panjang yang kosakatanya tidak seberapa mirip. Yang dipakai
+# nilai tertinggi di antara keduanya.
+#
+# Ambangnya lebih longgar daripada ambang frasa, dan memang harus:
+# dua judul untuk topik yang sama wajar berbagi "slot", "gacor", dan
+# nama brandnya. Yang tidak wajar adalah berbagi hampir seluruhnya.
+STYLE_TOKEN_LIMIT = 0.5
+
+
 def style_copy_score(teks, contoh: list[str], brand: str) -> float:
     """
     Seberapa jauh sebuah jawaban menyalin contoh gaya yang dilihatnya.
 
     Dinyatakan sebagai KELIPATAN AMBANG, sama seperti echo_score, jadi
     dua ukuran yang berbeda satuannya bisa diadu di satu tempat.
-    """
-    badan = content_shingles(bare_style(teks, brand))
 
-    if not badan or not contoh:
+    Diukur dua cara sekaligus - per frasa tiga kata dan per kata -
+    lalu yang paling memberatkan yang dipakai. Alasannya di
+    STYLE_TOKEN_LIMIT.
+    """
+    bersih = bare_style(teks, brand)
+
+    badan = content_shingles(bersih)
+    kata = content_tokens(bersih)
+
+    if not contoh or (not badan and not kata):
         return 0.0
 
     tertinggi = 0.0
 
     for satu in contoh:
-        lain = content_shingles(bare_style(satu, brand))
+        lawan = bare_style(satu, brand)
 
-        if not lain:
-            continue
+        lain = content_shingles(lawan)
 
-        tertinggi = max(tertinggi, len(badan & lain) / len(badan | lain))
+        if badan and lain:
+            tertinggi = max(
+                tertinggi,
+                len(badan & lain) / len(badan | lain) / STYLE_COPY_LIMIT,
+            )
 
-    return tertinggi / STYLE_COPY_LIMIT
+        lain_kata = content_tokens(lawan)
+
+        if kata and lain_kata:
+            tertinggi = max(
+                tertinggi,
+                len(kata & lain_kata)
+                / len(kata | lain_kata)
+                / STYLE_TOKEN_LIMIT,
+            )
+
+    return tertinggi
 
 
 def echo_score(teks, acuan: str) -> float:
@@ -1277,6 +1598,12 @@ def gap_spec(spec: dict, kurang: dict[str, list[int]]) -> dict:
         potongan = dict(rule)
         potongan["count"] = len(lubang)
         potongan["positions"] = list(lubang)
+
+        # Posisi ini kosong karena jawabannya dibuang, dan sebab
+        # paling sering adalah model menyalin balik teks lamanya.
+        # Contohnya tetap dikirim - bentuk dan fungsinya masih perlu
+        # diketahui - tapi sebagai larangan, bukan sebagai cetakan.
+        potongan["forbid_samples"] = True
 
         for kunci in ("samples", "budgets", "floors", "partners"):
             nilai = rule.get(kunci)
@@ -1533,6 +1860,180 @@ def title_separator(brand: str, keyword: str) -> str:
     return TITLE_MARKS[int(benih[:8], 16) % len(TITLE_MARKS)]
 
 
+# Kata yang boleh berdiri di dalam judul tapi tidak menambah satu
+# keterangan pun kalau ditumpuk di ekornya.
+#
+# Ini keluhan pengguna, dan contohnya judul yang benar-benar terbit:
+#
+#   DINAR33 | Update Pola Slot Gacor Tiap Pagi 2026 Akurat 24 Jam Hari
+#
+# Enam kata pertama sudah judul yang utuh. "Akurat 24 Jam Hari" bukan
+# kelanjutannya melainkan empat kata yang didempetkan di belakangnya,
+# dan susunan itu tidak berbunyi seperti bahasa Indonesia sama sekali -
+# tidak ada kata sambung, tidak ada yang diterangkan, dan "24 Jam"
+# berdiri tanpa menyebut apa yang berlangsung 24 jam.
+#
+# Sebabnya bukan model kehabisan ide melainkan lantai panjang.
+# TITLE_MIN 50 karakter ditegakkan grammar llama.cpp, yang menahan
+# tanda kutip penutup sampai jatahnya terpenuhi. "DINAR33 | Update
+# Pola Slot Gacor Tiap Pagi" cuma 41 karakter, jadi model dipaksa
+# meneruskan - dan yang paling murah diteruskan adalah kata sifat.
+#
+# Lantainya tidak diturunkan: 50-70 sudah diputuskan pengguna, dan
+# judul sependek 41 karakter memang membuang separuh baris yang
+# diberikan Google. Yang diperbaiki caranya diisi - brief memesan
+# manfaat, bukan kata sifat (lihat ai/neiiu_prompts.py), dan
+# tumpukan yang tetap lolos disapu di sini.
+TITLE_FILLER_TAIL = frozenset(
+    {
+        # penyangat mutu
+        "akurat", "terakurat", "terbaik", "terpercaya", "terjamin",
+        "dijamin", "resmi", "asli", "official", "original", "valid",
+        "terverifikasi", "terlengkap", "lengkap", "mantap", "wajib",
+        "pasti", "jitu", "ampuh", "parah", "banget", "aman", "nyaman",
+        "cepat", "mudah", "gampang", "lancar", "stabil",
+        # penyangat waktu. "harian", "setiap", dan "tiap" sengaja
+        # TIDAK ikut: ketiganya menerangkan kata di sebelahnya dengan
+        # sungguhan - "Pola Slot Gacor Harian" bukan tumpukan - dan
+        # membuangnya membuang keterangan, bukan pengisi ruang.
+        "terbaru", "terkini", "terupdate", "update", "hari", "ini",
+        "sekarang", "juga", "nonstop",
+        "jam", "menit", "detik", "realtime", "live",
+        # penyangat khas halaman slot
+        "gacor", "maxwin", "jackpot", "rungkad", "boncos", "anti",
+        "no", "nomor", "satu",
+    }
+)
+
+# Angka yang lazim ikut tumpukan sebagai satuan waktu, bukan sebagai
+# keterangan. Tahun sengaja tidak masuk - "2026" hampir selalu bagian
+# keywordnya, dan membuangnya berarti membuang kata yang dicari orang.
+TITLE_FILLER_NUMBER = re.compile(r"^\d{1,3}$")
+
+# Kata penyangat yang menuntut kata SIFAT sesudahnya.
+#
+# Dipisah dari kata sambung biasa karena nasibnya berkebalikan. Kata
+# sambung menuntut kata benda, jadi yang di belakangnya keterangan
+# sungguhan dan tumpukannya batal. Penyangat menuntut kata sifat, jadi
+# yang di belakangnya penyangat lagi - "Paling Akurat" adalah dua kata
+# yang sama-sama tidak menerangkan apa pun, dan keduanya bagian dari
+# tumpukan yang sama.
+TITLE_INTENSIFIER = frozenset(
+    {
+        "paling", "makin", "semakin", "kian", "sangat", "amat",
+        "terlalu", "agak", "serba", "lebih",
+    }
+)
+
+# Berapa kata tumpukan yang masih dimaafkan di ekor judul.
+#
+# Satu kata sifat di ujung adalah cara menutup judul yang wajar -
+# "... Tanpa Potongan Sekarang" masih terbaca sebagai kalimat. Dua ke
+# atas tidak pernah: begitu dua penyangat berdiri berdampingan tanpa
+# kata sambung di antaranya, keduanya berhenti menerangkan apa pun dan
+# tinggal mengisi ruang.
+TITLE_TAIL_ALLOWED = 1
+
+# Berapa kata yang harus tersisa sesudah tumpukannya dibuang.
+#
+# Judul yang seluruh isinya penyangat tidak punya bagian utuh untuk
+# diselamatkan, dan memotongnya cuma meninggalkan nama brand berdiri
+# sendiri. Yang seperti itu dibiarkan apa adanya, lalu ditandai
+# pemeriksa SEO sebagai judul yang perlu ditulis ulang.
+TITLE_TAIL_KEEP = 4
+
+
+def title_tail_pile(text: str, keyword: str = "") -> list[str]:
+    """
+    Kata tumpukan yang berdiri di ekor judul, dari kiri ke kanan.
+
+    Kata yang ada di keyword tidak pernah dihitung tumpukan, berapa
+    pun mirip bentuknya. "Slot Gacor" adalah topik halamannya, dan
+    "gacor" yang kebetulan berdiri di ujung judul bukan penyangat yang
+    bisa dibuang - membuangnya membuang keywordnya sendiri.
+
+    Begitu juga kata yang berdiri sesudah kata sambung. Yang
+    membedakan tumpukan dari keterangan sungguhan bukan kata-katanya
+    melainkan ada tidaknya yang mengikatnya ke kalimat:
+
+      DINAR33 Deposit QRIS Cair Dalam 3 Menit     <- "3 Menit"
+      DINAR33 Pola Slot Gacor Tiap Pagi 2026 Akurat 24 Jam Hari
+
+    Dua kata terakhir di baris pertama ada di daftar penyangat, tapi
+    keduanya justru yang diterangkan "Dalam" - dibuang, judulnya
+    berhenti sebelum mengatakan dalam berapa lama. Di baris kedua
+    tidak ada satu pun kata yang mengikat "Akurat 24 Jam Hari" ke
+    kalimat sebelumnya, dan itulah yang membuatnya tumpukan.
+    """
+    kata = str(text or "").split()
+
+    if not kata:
+        return []
+
+    milik_keyword = {
+        potong.casefold()
+        for potong in re.findall(r"\w+", str(keyword or ""))
+    }
+
+    tumpukan: list[str] = []
+
+    for satu in reversed(kata):
+        bersih = satu.strip(EDGE_MARKS).casefold()
+
+        if not bersih or bersih in milik_keyword:
+            break
+
+        if (
+            bersih in TITLE_FILLER_TAIL
+            or bersih in TITLE_INTENSIFIER
+            or TITLE_FILLER_NUMBER.match(bersih)
+        ):
+            tumpukan.insert(0, satu)
+            continue
+
+        # Kata yang menghentikan penelusuran sekaligus menentukan
+        # nasib tumpukannya. Kalau ia menuntut kelanjutan - "dalam",
+        # "tanpa", "setiap" - maka yang di belakangnya bukan tumpukan
+        # melainkan kelanjutan yang dituntutnya.
+        if menggantung(satu, True):
+            return []
+
+        break
+
+    return tumpukan
+
+
+def strip_title_pile(text: str, keyword: str = "") -> str:
+    """
+    Membuang tumpukan penyangat yang menempel di ekor judul.
+
+    Yang di depan tumpukan tidak disentuh sama sekali. Judulnya sudah
+    utuh sebelum tumpukan itu ditempelkan - itu justru yang membuat
+    tumpukannya kelihatan - jadi tidak ada yang perlu disusun ulang.
+    """
+    bersih = " ".join(str(text or "").split())
+    tumpukan = title_tail_pile(bersih, keyword)
+
+    if len(tumpukan) <= TITLE_TAIL_ALLOWED:
+        return bersih
+
+    sisa = bersih.split()[: -len(tumpukan)]
+
+    if len(sisa) < TITLE_TAIL_KEEP:
+        return bersih
+
+    dipangkas = " ".join(sisa).strip(EDGE_MARKS)
+
+    # Keywordnya diperiksa lagi sesudah dipangkas. Tumpukan yang
+    # kebetulan memuat kata terakhir keywordnya tidak boleh dibuang
+    # meskipun sisanya masih panjang; yang tersisa akan lolos semua
+    # pemeriksaan panjang lalu terbit tanpa kata yang dicari orang.
+    if keyword.strip() and not keyword_covered(dipangkas, keyword):
+        return bersih
+
+    return dipangkas or bersih
+
+
 def enforce_title_shape(
     title: str,
     keyword: str,
@@ -1561,8 +2062,17 @@ def enforce_title_shape(
     di prompt sudah dicoba dan hasilnya diikuti kadang-kadang saja,
     sedangkan bentuk yang cuma benar sebagian sama saja dengan tidak
     punya bentuk.
+
+    Angka persen dibuang lebih dulu, SEBELUM panjangnya dihitung.
+    Urutannya penting: dibuang belakangan, judulnya sudah terlanjur
+    dipotong untuk memberi tempat pada angka yang kemudian hilang,
+    dan yang terbit adalah judul pendek yang ekornya tetap tercabut.
     """
-    clean = " ".join(str(title or "").split())
+    clean = strip_title_pile(
+        strip_figures(" ".join(str(title or "").split())),
+        keyword,
+    )
+
     nama = str(brand or "").strip()
 
     if not clean or not nama:
@@ -1575,7 +2085,14 @@ def enforce_title_shape(
         # dibuang. Tanpa itu, "Rahasia Spin di TIMAH33 yang Membuka
         # Peluang" berpindah jadi "TIMAH33 | Rahasia Spin di yang
         # Membuka Peluang".
-        depan = drop_dangling(clean[:cocok.start()].strip(), True)
+        #
+        # dipotong=False, dan itu disengaja. Potongan ini bukan sisa
+        # pemotongan melainkan bagian judul yang utuh, cuma kebetulan
+        # berhenti di tempat nama brand berdiri. Ditandai dipotong,
+        # aturan TRAILING_NUMBER ikut menyala dan membuang angka di
+        # ujungnya - sehingga "Slot Gacor 2026 TIMAH33 Update Harian"
+        # kehilangan tahunnya, padahal tahun itu bagian keywordnya.
+        depan = drop_dangling(clean[:cocok.start()].strip())
         sisa = f"{depan} {clean[cocok.end():].strip()}"
     else:
         sisa = clean
@@ -1619,6 +2136,52 @@ def enforce_title_shape(
     return f"{kepala}{sisa}".strip(EDGE_MARKS)
 
 
+# Kata di keyword yang tidak wajib tertulis supaya keywordnya
+# terhitung sudah ada di judul.
+#
+# Isinya tahun dan kata penunjuk waktu, dan keduanya memang yang paling
+# sering ditinggalkan model waktu menulis judul: "slot gacor 2026"
+# ditulisnya "slot gacor". Diperiksa apa adanya, judul itu terhitung
+# TIDAK memuat keywordnya, dan seluruh keyword ditempelkan lagi di
+# depan - sehingga yang terbit "WAYANGPLAY: Slot Gacor 2026 Link Login
+# Slot Gacor Anti Blokir", dengan "slot gacor" dua kali dan ekornya
+# terpotong untuk memberi tempat pada pengulangan itu.
+#
+# Inilah salah satu sebab keluhan "judulnya kaku dan terputus, tidak
+# tersusun dalam satu kalimat".
+OPTIONAL_KEYWORD_WORDS = re.compile(
+    r"^(?:\d{4}|hari|ini|terbaru|terkini|sekarang|latest|today)$",
+    re.IGNORECASE,
+)
+
+
+def keyword_covered(text: str, keyword: str) -> bool:
+    """
+    Apakah judul ini sudah memuat keywordnya, dengan toleransi.
+
+    Yang diperiksa kata-kata isinya, bukan frasa persisnya. Judul yang
+    sudah berbunyi "Link Login Slot Gacor Anti Blokir" memang sudah
+    tentang "slot gacor 2026"; menempelkan keyword utuh di depannya
+    tidak menambah satu pun kata baru, ia cuma menulis dua kali kata
+    yang sudah ada dan memakan ruang ekor judulnya.
+    """
+    isi = str(text or "").lower()
+
+    if keyword.strip().lower() in isi:
+        return True
+
+    wajib = [
+        kata
+        for kata in re.findall(r"\w+", keyword.lower())
+        if not OPTIONAL_KEYWORD_WORDS.match(kata)
+    ]
+
+    if not wajib:
+        return False
+
+    return all(re.search(rf"\b{re.escape(kata)}", isi) for kata in wajib)
+
+
 def ensure_identity(
     text: str,
     keyword: str,
@@ -1641,7 +2204,7 @@ def ensure_identity(
     if clean_brand and clean_brand.lower() not in clean.lower():
         missing.append(clean_brand)
 
-    if keyword.strip() and keyword.lower() not in clean.lower():
+    if keyword.strip() and not keyword_covered(clean, keyword):
         missing.append(
             " ".join(
                 word[:1].upper() + word[1:]
@@ -1707,8 +2270,13 @@ def normalize_reviews(
         if not isinstance(raw, dict):
             continue
 
+        # Nama pengulas tidak ikut dibetulkan. Nama orang tidak punya
+        # ejaan baku, dan "Qrisna" yang diluruskan jadi "QRIS" adalah
+        # kerusakan yang jauh lebih kelihatan daripada yang diperbaiki.
         name = re.sub(r"\s+", " ", str(raw.get("name") or "")).strip()[:40]
-        text = re.sub(r"\s+", " ", str(raw.get("text") or "")).strip()[:600]
+        text = fix_terms(
+            re.sub(r"\s+", " ", str(raw.get("text") or "")).strip()[:600]
+        )
 
         if not name or not text:
             continue
@@ -1774,6 +2342,63 @@ def normalize_ratings(raw_ratings, limit: int = 3) -> list[dict]:
     return result
 
 
+def normalize_breadcrumb(
+    raw,
+    keyword: str,
+    h1: str,
+    brand_name: str = "",
+    region: str = "id",
+) -> list[str]:
+    """
+    Merapikan jalur breadcrumb hasil AI.
+
+    Tiga hal ditegakkan di sini. Tingkat pertama selalu beranda
+    dalam bahasa halaman, karena model kadang mengisinya dengan
+    nama brand. Nama brand dibuang dari seluruh tingkat, sebab
+    breadcrumb menyatakan letak topik, bukan siapa pemiliknya -
+    dan brand sudah berdiri di title. Tingkat terakhir dipastikan
+    ada, karena remah yang berhenti di kategori tidak memberi tahu
+    pembaca hasil pencarian halaman apa yang akan dibukanya.
+    """
+    beranda = PAGE_TEXT.get(region, PAGE_TEXT["id"])["home"]
+
+    bersih: list[str] = []
+
+    for item in raw if isinstance(raw, list) else []:
+        teks = re.sub(r"\s+", " ", str(item or "")).strip(" .,-–—>/|")
+
+        if not teks:
+            continue
+
+        if brand_name and normalize(teks) == normalize(brand_name):
+            continue
+
+        teks = teks[:60]
+
+        # Dibandingkan tanpa huruf besar-kecil supaya "Beranda" dan
+        # "beranda" tidak berdiri dua kali.
+        if any(normalize(teks) == normalize(ada) for ada in bersih):
+            continue
+
+        bersih.append(teks)
+
+    # Tingkat terakhir: halaman ini. Diambil dari h1 kalau model
+    # tidak menyediakannya, dipotong pendek supaya tetap terbaca
+    # sebagai remah, bukan sebagai judul kedua.
+    daun = " ".join(h1.split()[:5])[:60] if h1 else keyword.title()[:60]
+
+    if not bersih:
+        bersih = [keyword.title()[:60], daun]
+
+    if normalize(bersih[0]) != normalize(beranda):
+        bersih.insert(0, beranda)
+
+    if len(bersih) < 2:
+        bersih.append(daun)
+
+    return bersih[:4]
+
+
 def normalize_plan(
     plan: dict,
     keyword: str,
@@ -1786,11 +2411,20 @@ def normalize_plan(
     Model kadang mengembalikan field kosong atau tipe section yang
     tidak cocok dengan isinya. Di sini semuanya dirapikan sebelum
     masuk ke generator.
+
+    Salah ketik istilah dibetulkan di sini juga, di clean_text, karena
+    itulah satu-satunya pintu yang dilewati SETIAP teks di rencana ini
+    - judul, deskripsi, heading, paragraf, poin daftar, tanya jawab,
+    dan kata kunci. Menaruhnya di tempat lain berarti memilih peran
+    mana yang boleh terbit dengan "deposit qrisk", dan tidak ada peran
+    yang boleh.
     """
+    aman = protected_words(keyword, brand_name)
+
     def clean_text(value, limit: int) -> str:
         text = re.sub(r"\s+", " ", str(value or "")).strip()
 
-        return text[:limit]
+        return fix_terms(text[:limit], aman)
 
     # Plafonnya satu angka dari awal sampai akhir.
     #
@@ -1799,18 +2433,38 @@ def normalize_plan(
     # dipangkas ke 165 lalu ke 160. Angka terkecil yang menang, dan
     # yang terbit adalah title 62 karakter - di bawah lantai yang
     # diminta, dipotong oleh baris yang tugasnya bukan memotong.
-    title = clean_text(plan.get("title"), TITLE_MAX) or (
+    # Angka dibuang PALING AWAL, sebelum satu pun tahap memotong.
+    #
+    # Urutannya menentukan, dan sempat salah: clean_text memotong ke 70
+    # lalu ensure_identity memotong lagi untuk memberi tempat pada nama
+    # brand - keduanya menghitung angka yang beberapa baris kemudian
+    # dibuang. Yang terbit adalah judul yang ekornya tercabut demi
+    # memberi ruang pada "96,4%" yang tidak ikut terbit.
+    title = strip_figures(str(plan.get("title") or ""))
+
+    title = clean_text(title, TITLE_MAX) or (
         f"{keyword.title()} — Panduan Lengkap"
     )
 
     title = ensure_identity(title, keyword, brand_name, TITLE_MAX)
     title = enforce_title_shape(title, keyword, brand_name, TITLE_MAX)
 
-    h1 = clean_text(plan.get("h1"), 90) or title
+    # H1 disapu tumpukannya juga, tapi tidak ditegakkan bentuknya.
+    # Nama situs berpemisah di dalam halaman terbaca seperti label,
+    # bukan seperti kalimat pembuka - alasannya sama seperti di
+    # ensure_template_identity. Yang berlaku di dua-duanya cuma
+    # larangan menumpuk penyangat, karena tumpukan di H1 dibaca mesin
+    # pencari persis seperti tumpukan di title.
+    h1 = clean_text(strip_figures(str(plan.get("h1") or "")), 90) or title
+    h1 = strip_title_pile(h1, keyword)
     h1 = ensure_identity(h1, keyword, brand_name, 90)
 
+    # Angka dibuang sebelum dipotong, alasannya sama seperti di title
+    # beberapa baris di atas: clean_text yang menghitung "96,4%"
+    # sebagai bagian dari 200 karakter akan memotong ekor kalimat demi
+    # memberi ruang pada angka yang beberapa baris kemudian dibuang.
     meta = ensure_keyword(
-        clean_text(plan.get("meta_description"), META_MAX),
+        clean_text(strip_figures(str(plan.get("meta_description") or "")), META_MAX),
         keyword,
         META_MAX,
     )
@@ -1821,6 +2475,14 @@ def normalize_plan(
     slug = slug_for_url(
         clean_text(plan.get("slug"), 80) or keyword,
         region,
+    )
+
+    breadcrumb = normalize_breadcrumb(
+        plan.get("breadcrumb"),
+        keyword=keyword,
+        h1=h1,
+        brand_name=brand_name,
+        region=region,
     )
 
     sections = []
@@ -1901,20 +2563,27 @@ def normalize_plan(
 
     intro_raw = str(plan.get("intro", "")).strip()
 
+    # Paragraf pembuka tidak lewat clean_text karena batas panjangnya
+    # ditentukan pemecahan barisnya, bukan angka. Pembetulan istilahnya
+    # dipanggil sendiri di sini supaya ia tidak jadi satu-satunya
+    # bagian halaman yang boleh salah ketik.
     intro_paragraphs = [
-        re.sub(r"\s+", " ", part).strip()
+        fix_terms(re.sub(r"\s+", " ", part).strip(), aman)
         for part in re.split(r"\n{2,}|\r\n\r\n", intro_raw)
         if re.sub(r"\s+", " ", part).strip()
     ]
 
     if not intro_paragraphs and intro_raw:
-        intro_paragraphs = [re.sub(r"\s+", " ", intro_raw).strip()]
+        intro_paragraphs = [
+            fix_terms(re.sub(r"\s+", " ", intro_raw).strip(), aman)
+        ]
 
     return {
         "title": title,
         "meta_description": meta,
         "slug": slug,
         "h1": h1,
+        "breadcrumb": breadcrumb,
         "intro": intro_paragraphs,
         "sections": sections,
         "faq": faq,

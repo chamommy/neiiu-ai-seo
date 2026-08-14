@@ -144,6 +144,25 @@ HIJACK_MIN_CONFIDENCE = int(
     )
 )
 
+# Berapa peringkat teratas yang isinya ikut dibaca, bukan cuma
+# dihitung.
+#
+# Membaca berarti kerangka heading, paragraf pembuka, paragraf yang
+# menyebut keyword, dan tanya-jawab FAQ ikut dikirim ke model.
+# Peringkat di bawah angka ini tetap menyumbang kerangka headingnya
+# saja: polanya masih berguna, prosanya tidak sebanding dengan tempat
+# yang dimakannya di context.
+#
+# Lima adalah pilihan sadar. Sepuluh halaman berprosa penuh
+# menghabiskan context model 16k sebelum tugasnya sendiri sempat
+# ditulis, dan yang paling menentukan peringkat memang lima teratas.
+SERP_DIGEST_DEEP_N = int(
+    os.getenv(
+        "SERP_DIGEST_DEEP_N",
+        "5",
+    )
+)
+
 
 # ==========================================================
 # NEIIU PIPELINE — AI
@@ -158,6 +177,24 @@ AI_MODEL = os.getenv(
     "AI_MODEL",
     "qwen3:4b-instruct",
 ).strip()
+
+# Model khusus tahap membaca dan memahami halaman pertama.
+#
+# Tahap ini beda sifatnya dari tahap menulis. Menulis berarti
+# mengikuti aturan panjang dan bentuk yang sudah dipatok, dan model
+# 4B sanggup melakukannya. Memahami berarti membaca sepuluh halaman
+# sekaligus lalu menyimpulkan apa yang membuat mereka menang, dan di
+# situ ukuran model terasa.
+#
+# Untungnya tahap ini cuma jalan sekali per run, sedangkan tahap
+# menulis jalan berkali-kali per batch. Jadi memakai model besar di
+# sini menambah waktu jauh lebih sedikit daripada kelihatannya.
+#
+# Dikosongkan berarti ikut AI_MODEL.
+AI_MODEL_INSIGHT = os.getenv(
+    "AI_MODEL_INSIGHT",
+    "",
+).strip() or AI_MODEL
 
 # Analisis SERP butuh ruang jawaban jauh lebih besar
 # dibanding audit satu halaman.
@@ -295,6 +332,23 @@ SITE_LOCALE = os.getenv(
 # Kosongkan kalau tidak dibutuhkan.
 SITE_DISCLAIMER = os.getenv(
     "SITE_DISCLAIMER",
+    "",
+).strip()
+
+# Lisensi atau badan pengawas yang menaungi brand, ditulis apa
+# adanya - misalnya "PAGCOR" atau "Curacao eGaming".
+#
+# Diisi berarti halaman boleh menyebut lisensinya dengan NAMA itu.
+# Dikosongkan berarti halaman tetap boleh berbicara percaya diri
+# tentang legalitas dan keamanannya, tapi tanpa menyebut nama badan
+# mana pun - karena nama pengawas yang salah lebih buruk daripada
+# tidak menyebut nama sama sekali.
+#
+# NOMOR lisensi sengaja tidak ada di sini. Nomor yang salah satu
+# digit adalah nomor milik orang lain, dan tidak ada satu pun tahap
+# di pipeline ini yang bisa memeriksanya.
+SITE_LICENSE = os.getenv(
+    "SITE_LICENSE",
     "",
 ).strip()
 

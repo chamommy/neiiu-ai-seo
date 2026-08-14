@@ -246,10 +246,65 @@ DANGLING_WORDS = {
     # dan tidak pernah menutup judul: "RTP Terupdate Setiap" berhenti
     # sebelum mengatakan setiap apa.
     "setiap", "tiap", "per", "sekitar", "hampir", "kurang",
+    # Kata penyangat. Bedanya dengan kata takaran di atas, yang
+    # dijanjikannya kata SIFAT - dan itu yang membuatnya paling sering
+    # tersisa di ujung judul yang dipotong. Terukur di halaman jadi:
+    #
+    #   <title> WAYANGPLAY: Slot Gacor 2026 dengan RTP Update Harian
+    #           Live Paling
+    #
+    # "Paling" apa tidak pernah terjawab, dan pembaca hasil pencarian
+    # melihat judul yang kalimatnya putus di tengah - persis yang
+    # dilaporkan pengguna sebagai "kaku dan terputus".
+    #
+    # Hanya yang BENAR-BENAR tidak pernah menutup frasa yang berdiri di
+    # sini. Yang bisa menutup frasa ada di CUT_ONLY_DANGLING di bawah.
+    "paling", "makin", "semakin", "kian", "sangat", "amat",
+    "terlalu", "agak", "serba",
     "a", "an", "and", "as", "at", "because", "but", "by", "for", "from",
     "every", "in", "of", "on", "or", "that", "the", "to", "which",
     "while", "with",
 }
+
+# Kata yang menggantung HANYA kalau teksnya memang baru dipotong.
+#
+# Ini perbaikan atas kerusakan yang saya buat sendiri waktu menambah
+# kata penyangat di atas. Loop pembuang di drop_dangling dan
+# close_clause berjalan tanpa memeriksa apakah teksnya dipotong -
+# aman selama isinya kata sambung sejati, karena "dan" dan "yang"
+# memang tidak pernah menutup kalimat. "cukup" dan "penuh" lain
+# ceritanya: keduanya predikat yang sah, dan begitu masuk daftar itu,
+# kalimat yang muat seluruhnya ikut kehilangan kata terakhirnya.
+#
+# Terukur, dan kena semua peran sekaligus:
+#
+#   "Apakah modal seratus ribu sudah cukup"  -> "Apakah modal seratus ribu sudah?"
+#   "Layanan pelanggan aktif 24 jam penuh."  -> "Layanan pelanggan aktif 24 jam."
+#   "Garansi Uang Kembali Penuh"             -> "Garansi Uang Kembali"
+#
+# Yang pertama persis bentuk rusak yang drop_dangling ada untuk
+# mencegahnya: tanda tanya dipasang balik sesudah kata kuncinya hilang.
+#
+# Dipisah begini, keduanya tetap dibuang waktu memang jadi sisa
+# potongan - "... Keuntungan Lebih Besar" yang terpotong jadi
+# "... Keuntungan Lebih" tetap dirapikan - tanpa menyentuh teks yang
+# ditulis utuh.
+CUT_ONLY_DANGLING = {
+    "cukup", "penuh", "lebih", "begitu", "sungguh", "benar",
+    "most", "more", "very", "less",
+}
+
+
+def menggantung(kata: str, dipotong: bool = False) -> bool:
+    """
+    Apakah kata ini menggantung di ujung teks.
+    """
+    bersih = kata.strip(".,;:-–—").lower()
+
+    if bersih in DANGLING_WORDS:
+        return True
+
+    return dipotong and bersih in CUT_ONLY_DANGLING
 
 # Angka yang berdiri di ujung potongan.
 #
@@ -289,7 +344,7 @@ def drop_dangling(text: str, dipotong: bool = False) -> str:
         kata.pop()
 
     # Kata terakhir yang menggantung sendirian, misalnya "... Cepat dan".
-    while kata and kata[-1].strip(".,;:-–—").lower() in DANGLING_WORDS:
+    while kata and menggantung(kata[-1], dipotong):
         kata.pop()
 
     # Kata terakhir yang TIDAK menggantung tapi kata sebelumnya iya,
@@ -305,10 +360,10 @@ def drop_dangling(text: str, dipotong: bool = False) -> str:
     # Semua". Ketiganya menjanjikan kelanjutan yang tidak pernah
     # datang, dan pembaca melihatnya sebagai judul yang rusak.
     if dipotong and len(kata) >= 2:
-        if kata[-2].strip(".,;:-–—").lower() in DANGLING_WORDS:
+        if menggantung(kata[-2], dipotong):
             kata = kata[:-2]
 
-            while kata and kata[-1].strip(".,;:-–—").lower() in DANGLING_WORDS:
+            while kata and menggantung(kata[-1], dipotong):
                 kata.pop()
 
     if not kata:
@@ -357,7 +412,7 @@ def close_clause(
         kata.pop()
         dibuang += 1
 
-    while kata and kata[-1].strip(".,;:-–—").lower() in DANGLING_WORDS:
+    while kata and menggantung(kata[-1], not kata_utuh):
         kata.pop()
         dibuang += 1
 

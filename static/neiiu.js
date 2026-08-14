@@ -16,6 +16,9 @@ const progressCard = document.getElementById("progressCard");
 const stepDots = document.getElementById("stepDots");
 const stepNow = document.getElementById("stepNow");
 const stepCount = document.getElementById("stepCount");
+const runPercent = document.getElementById("runPercent");
+const runBar = document.getElementById("runBar");
+const runSpinner = document.getElementById("runSpinner");
 const jobLog = document.getElementById("jobLog");
 const jobList = document.getElementById("jobList");
 const tokenBalance = document.getElementById("tokenBalance");
@@ -140,13 +143,36 @@ function renderProgress(job) {
 
     renderSteps(job.step, job.status);
 
+    const total = job.total_steps || TOTAL_STEPS;
+
+    // Persen dihitung dari langkah yang SUDAH lewat, bukan dari
+    // langkah yang sedang jalan. Langkah yang baru dimulai belum
+    // menghasilkan apa-apa, dan menghitungnya sebagai selesai
+    // membuat bar sampai di 100% sementara prosesnya masih menulis.
+    let persen = Math.round(((job.step - 1) / total) * 100);
+
+    if (job.status === "success") {
+        persen = 100;
+    } else if (job.status === "queued") {
+        persen = 0;
+    }
+
+    persen = Math.max(0, Math.min(100, persen));
+
+    runPercent.textContent = `${persen}%`;
+    runBar.style.width = `${persen}%`;
+
+    const diam = job.status === "queued" || job.status === "error";
+
+    runSpinner.classList.toggle("idle", diam);
+
     if (job.status === "queued") {
         stepNow.textContent = "Menunggu giliran...";
         stepCount.textContent =
             "Job lain sedang berjalan. Job ini otomatis mulai setelahnya.";
     } else {
         stepNow.textContent = job.step_label || "Menyiapkan...";
-        stepCount.textContent = `Langkah ${job.step} dari ${job.total_steps} — ${
+        stepCount.textContent = `Langkah ${job.step} dari ${total} — ${
             STATUS_LABEL[job.status] || job.status
         }`;
     }
@@ -175,138 +201,54 @@ function statusBadge(status) {
     }</span>`;
 }
 
+/*
+    Kartu satu job di daftar riwayat.
+
+    Job yang sudah selesai tidak lagi menampilkan rinciannya - skor
+    SEO, jumlah kata, daftar masalah, daftar domain bajakan. Semua
+    itu berguna SELAMA prosesnya berjalan, dan memang tetap tertulis
+    di log serta di ANALISIS.md di dalam ZIP-nya. Sesudah halamannya
+    jadi, yang dicari orang cuma halamannya.
+
+    Job yang GAGAL tetap menampilkan sebab kegagalannya. Menyembunyikan
+    itu bukan merapikan, melainkan membuat kegagalan jadi tidak bisa
+    ditindaklanjuti.
+*/
 function renderJobCard(job) {
     const summary = job.summary || {};
     const isDone = job.status === "success";
     const analyzeOnly = summary.analyze_only || job.analyze_only;
 
-    let stats = "";
-    let problems = "";
     let actions = "";
 
     if (isDone && !analyzeOnly) {
-        stats = `
-            <div class="job-stats">
-                <span>Skor SEO: <b>${summary.seo_score}/100</b></span>
-                <span>AMP: <b>${
-                    summary.amp_valid ? "valid" : "invalid"
-                }</b></span>
-                <span>Kata: <b>${summary.word_count}</b>
-                    <span class="muted">/ target ${summary.word_target}</span>
-                </span>
-                <span>Section: <b>${summary.sections}</b></span>
-                <span>FAQ: <b>${summary.faq}</b></span>
-            </div>
-        `;
-
-        const list = (summary.problems || []).concat(
-            summary.amp_valid ? [] : summary.amp_errors || []
-        );
-
-        if (list.length) {
-            problems = `<ul class="job-problems">${list
-                .map((item) => `<li>${escapeHtml(item)}</li>`)
-                .join("")}</ul>`;
-        }
-
         actions = `
-            <a href="/neiiu/jobs/${job.id}/preview/index.html" target="_blank">
-                Lihat landing page
+            <a class="primary-link"
+               href="/neiiu/jobs/${job.id}/preview/index.html"
+               target="_blank">
+                Lihat hasil
             </a>
-            <a href="/neiiu/jobs/${job.id}/preview/amp.html" target="_blank">
-                Lihat AMP
-            </a>
-            <a class="primary-link" href="/neiiu/jobs/${job.id}/download-all">
-                Unduh semua (ZIP)
+            <a href="/neiiu/jobs/${job.id}/download-all">
+                Unduh ZIP
             </a>
             <a href="/neiiu/jobs/${job.id}/download/index.html">
-                index.html
+                Unduh landing page
             </a>
             <a href="/neiiu/jobs/${job.id}/download/amp.html">
-                amp.html
+                Unduh AMP
             </a>
         `;
     } else if (isDone && analyzeOnly) {
-        stats = `
-            <div class="job-stats">
-                <span>Halaman dianalisis: <b>${summary.analyzed_pages}</b></span>
-                <span>Gagal: <b>${summary.failed_pages}</b></span>
-            </div>
-        `;
-
+        // Job analisis tidak menghasilkan halaman, jadi tidak ada
+        // yang bisa dilihat atau diunduh selain laporannya.
         actions = `
             <a class="primary-link" href="/neiiu/jobs/${job.id}/download-all">
-                Unduh semua (ZIP)
+                Unduh ZIP
             </a>
             <a href="/neiiu/jobs/${job.id}/download/analisis.md">
-                ANALISIS.md
-            </a>
-            <a href="/neiiu/jobs/${job.id}/download/analysis.json">
-                analysis.json
+                Unduh analisis
             </a>
         `;
-    }
-
-    let hijackBox = "";
-    const excluded = [];
-
-    (summary.hijacked_pages || []).forEach((item) => {
-        excluded.push(
-            `<li>#${item.position} ${escapeHtml(item.domain)} — domain bajakan ${
-                item.confidence
-            }%${item.cloaking ? ", cloaking" : ""}</li>`
-        );
-    });
-
-    (summary.unreadable_pages || []).forEach((item) => {
-        excluded.push(
-            `<li>#${item.position} ${escapeHtml(item.domain)} — isi tidak terbaca (${
-                item.word_count
-            } kata)</li>`
-        );
-    });
-
-    if (excluded.length) {
-        const counts = [];
-
-        if (summary.hijacked_count) {
-            counts.push(`${summary.hijacked_count} domain bajakan`);
-        }
-
-        if (summary.unreadable_count) {
-            counts.push(`${summary.unreadable_count} isi tidak terbaca`);
-        }
-
-        hijackBox = `
-            <div class="notice" style="margin-top:12px">
-                <b>${counts.join(" dan ")}</b>
-                dikeluarkan dari perhitungan target.
-                ${
-                    summary.hijack_fallback
-                        ? "<br><b style='color:var(--danger)'>Tidak ada halaman pertama yang layak jadi acuan. Target metrik tidak bisa dipercaya — tentukan halaman acuan sendiri lewat kolom URL acuan.</b>"
-                        : ""
-                }
-                <ul class="job-problems">${excluded.join("")}</ul>
-            </div>
-        `;
-    }
-
-    const meta = [];
-
-    if (summary.title) {
-        meta.push(`Title: ${escapeHtml(summary.title)}`);
-    }
-
-    if (summary.reference_domain) {
-        meta.push(`Acuan: ${escapeHtml(summary.reference_domain)}`);
-    }
-
-    meta.push(`Provider: ${escapeHtml(job.provider)}`);
-
-    if (job.error) {
-        meta.push(`<span style="color:var(--danger)">${escapeHtml(
-            job.error
-        )}</span>`);
     }
 
     const canDelete =
@@ -318,6 +260,10 @@ function renderJobCard(job) {
         ? `<span class="badge">${escapeHtml(brand)}</span>`
         : "";
 
+    const errorBox = job.error
+        ? `<div class="job-error">${escapeHtml(job.error)}</div>`
+        : "";
+
     return `
         <div class="job">
             <div class="job-head">
@@ -327,10 +273,7 @@ function renderJobCard(job) {
                     ${statusBadge(job.status)}
                 </span>
             </div>
-            <div class="job-meta">${meta.join(" &middot; ")}</div>
-            ${stats}
-            ${hijackBox}
-            ${problems}
+            ${errorBox}
             <div class="job-actions">
                 ${actions}
                 ${
@@ -397,6 +340,18 @@ async function pollJob() {
 
     if (job.status === "success" || job.status === "error") {
         stopWatching();
+
+        // Panel proses ditutup begitu halamannya jadi. Langkah,
+        // persen, dan log adalah kabar tentang pekerjaan yang
+        // sedang berlangsung; sesudah selesai ia cuma menutupi
+        // hasilnya. Log lengkapnya tetap tersimpan di ZIP.
+        //
+        // Job yang GAGAL sengaja dibiarkan terbuka: di situlah
+        // satu-satunya tempat sebab kegagalannya terbaca baris per
+        // baris.
+        if (job.status === "success") {
+            progressCard.hidden = true;
+        }
 
         showNotice(
             job.status === "success"

@@ -23,6 +23,21 @@ urutan, dan seluruh cabang yang tidak dikenali dibiarkan apa adanya.
 Angka rating dan jumlah ulasan milik template juga dipertahankan,
 karena itu klaim pemilik halaman, bukan sesuatu yang boleh dikarang
 ulang tiap kali generate.
+
+ALAMAT TIDAK IKUT, satu pun tidak. "@id", "url", "mainEntityOfPage",
+dan alamat di tiap tingkat BreadcrumbList dibiarkan persis seperti
+yang tertulis di template.
+
+Ini permintaan pengguna, dan alasannya kelihatan begitu halaman
+terbit. Alamat halaman tidak pernah diketahui pipeline: yang dipakai
+SITE_BASE_URL dari .env, yang bawaannya "https://example.com". Jadi
+tiap pengenal di seluruh graph ditulis ulang jadi
+"https://example.com/slug-halaman/#webpage" - puluhan kali dalam satu
+berkas - dan yang terbit bukan halaman beralamat lama melainkan
+halaman yang menyatakan dirinya milik contoh domain yang tidak pernah
+ada. Pengguna mengganti domainnya sendiri sesudah berkasnya diunduh,
+dan mencari-ganti satu alamat asli jauh lebih mudah daripada memburu
+alamat karangan yang tersebar di setiap simpul.
 """
 
 import json
@@ -208,6 +223,71 @@ def rewrite_reviews(
     return diganti
 
 
+def rewrite_breadcrumb(node: dict, trail: list[str]) -> int:
+    """
+    Menyesuaikan remah navigasi dengan topik halaman baru.
+
+    Yang diganti nama tiap tingkat. Posisi, jumlah tingkat, dan
+    ALAMAT tiap tingkat dibiarkan: jumlahnya ditentukan template, dan
+    alamatnya ditentukan pengguna sesudah berkasnya diunduh.
+
+    Alamat sempat ikut diurus di sini - tingkat pertama ditimpa
+    beranda sendiri, sisanya dilepas kalau berdiri di luar domain
+    sendiri. Yang terbit dari situ adalah remah beralamat
+    "https://example.com/", karena "domain sendiri" tidak pernah
+    benar-benar diketahui pipeline. Sekarang alamat template
+    dibiarkan apa adanya dan pengguna menggantinya sekali dengan
+    cari-ganti.
+
+    Kalau jalur barunya lebih pendek daripada tingkat yang ada di
+    template, tingkat terakhirlah yang dipakai untuk sisanya -
+    bukan tingkat pertama - supaya remah tetap berakhir di halaman
+    ini, bukan berhenti di kategori.
+    """
+    items = node.get("itemListElement")
+
+    if not isinstance(items, list) or not items or not trail:
+        return 0
+
+    diganti = 0
+
+    # Diurutkan menurut position kalau ada, karena JSON-LD tidak
+    # menjamin urutan tulisnya sama dengan urutan jalurnya.
+    urut = sorted(
+        (x for x in items if isinstance(x, dict)),
+        key=lambda x: x.get("position", 0)
+        if isinstance(x.get("position"), int)
+        else 0,
+    )
+
+    # Jalur yang lebih panjang daripada tingkat yang tersedia
+    # dipendekkan dari TENGAH, bukan dari ekor.
+    #
+    # Memotong ekor terdengar wajar sampai dilihat apa yang hilang:
+    # tingkat terakhir adalah halaman ini sendiri. Template pengguna
+    # punya dua tingkat, sedangkan jalur yang disusun AI lazimnya
+    # tiga - beranda, kategori, halaman ini. Memotong ekor
+    # menerbitkan "Beranda > Panduan Belajar Python" dan menghapus
+    # halamannya sendiri dari remah, padahal justru itu yang dibaca
+    # orang di hasil pencarian.
+    jalur = list(trail)
+
+    if len(jalur) > len(urut):
+        jalur = [jalur[0]] + jalur[-(len(urut) - 1):] if len(urut) > 1 else [jalur[-1]]
+
+    for nomor, item in enumerate(urut):
+        if "name" not in item:
+            continue
+
+        baru = jalur[nomor] if nomor < len(jalur) else jalur[-1]
+
+        if item["name"] != baru:
+            item["name"] = baru
+            diganti += 1
+
+    return diganti
+
+
 def swap_brand_text(node: dict, pola, new_brand: str) -> int:
     """
     Mengganti nama brand lama di nilai yang dibaca orang.
@@ -273,6 +353,56 @@ def rewrite_node(
                 node[kunci] = ringkas
                 diganti += 1
 
+    if tipe == "BreadcrumbList":
+        diganti += rewrite_breadcrumb(
+            node,
+            [
+                str(x).strip()
+                for x in (content.get("breadcrumb") or [])
+                if str(x).strip()
+            ],
+        )
+
+    # Kata kunci dan nama rubrik menyatakan halaman ini TENTANG apa.
+    # Keduanya ada di TEXT_KEYS, jadi selama ini cuma kena ganti nama
+    # brand - dan yang terbit adalah kata kunci topik template lama
+    # dengan brand baru menempel di ujungnya.
+    # Dua jalur menyediakannya dengan bentuk berbeda: halaman yang
+    # dirakit dari rencana punya daftar "keywords", sedangkan halaman
+    # dari template punya satu string di peran "meta_keywords" -
+    # persis seperti yang tertulis di <meta> template.
+    mentah = content.get("keywords")
+
+    if not mentah:
+        mentah = [
+            bagian
+            for bagian in str(content.get("meta_keywords") or "").split(",")
+        ]
+
+    kunci_baru = [str(x).strip() for x in (mentah or []) if str(x).strip()]
+
+    if kunci_baru and "keywords" in node:
+        node["keywords"] = (
+            ", ".join(kunci_baru[:12])
+            if isinstance(node["keywords"], str)
+            else kunci_baru[:12]
+        )
+
+        diganti += 1
+
+    if "articleSection" in node and isinstance(node["articleSection"], str):
+        # Rubrik diambil dari tingkat tengah remah navigasi, karena
+        # di situlah kategori topiknya sudah disimpulkan dari riset.
+        jalur = [
+            str(x).strip()
+            for x in (content.get("breadcrumb") or [])
+            if str(x).strip()
+        ]
+
+        if len(jalur) >= 2:
+            node["articleSection"] = jalur[-2]
+            diganti += 1
+
     if tipe == "FAQPage":
         diganti += rewrite_faq(
             node,
@@ -303,7 +433,12 @@ def rewrite_node(
             for anak in nilai:
                 if isinstance(anak, dict):
                     diganti += rewrite_node(
-                        anak, content, brand, dates, pola, assets
+                        anak,
+                        content,
+                        brand,
+                        dates,
+                        pola,
+                        assets,
                     )
 
     return diganti
@@ -382,6 +517,55 @@ def jsonld_blocks(scanned: dict, html: str) -> list[dict]:
     return hasil
 
 
+def breadcrumb_levels(scanned: dict, html: str) -> tuple[int, list[str]]:
+    """
+    Menghitung tingkat remah navigasi yang ada di JSON-LD template.
+
+    Dipakai untuk memesan jalur ke AI dengan jumlah tingkat yang
+    sama persis, supaya tidak ada tingkat template yang tertinggal
+    memakai nama lama - dan tidak ada tingkat karangan yang tidak
+    punya tempat.
+
+    Mengembalikan jumlah tingkat beserta nama-nama lamanya. Nama
+    lama ikut dikirim ke prompt sebagai contoh BENTUK, bukan untuk
+    disalin: dari situ model tahu remah ini bergaya satu kata
+    ("Promo") atau frasa ("Panduan Belajar Python").
+    """
+    terbanyak = 0
+    contoh: list[str] = []
+
+    def telusuri(node):
+        nonlocal terbanyak, contoh
+
+        if isinstance(node, dict):
+            if node_type(node) == "BreadcrumbList":
+                items = node.get("itemListElement")
+
+                if isinstance(items, list):
+                    nama = [
+                        str(x.get("name")).strip()
+                        for x in items
+                        if isinstance(x, dict) and str(x.get("name") or "").strip()
+                    ]
+
+                    if len(nama) > terbanyak:
+                        terbanyak = len(nama)
+                        contoh = nama
+
+            for nilai in node.values():
+                telusuri(nilai)
+
+        elif isinstance(node, list):
+            for anak in node:
+                telusuri(anak)
+
+    for blok in jsonld_blocks(scanned, html):
+        if blok["data"] is not None:
+            telusuri(blok["data"])
+
+    return terbanyak, contoh
+
+
 def jsonld_edits(
     scanned: dict,
     html: str,
@@ -396,6 +580,10 @@ def jsonld_edits(
 
     Setiap blok diganti sebagai satu rentang utuh, bukan potong
     sana-sini, supaya JSON-nya dijamin tetap valid.
+
+    Alamat tidak termasuk yang diganti. Lihat keterangan di kepala
+    berkas: pengenal halaman dibiarkan seperti tertulis di template,
+    dan pengguna menggantinya sendiri.
     """
     edits: list[dict] = []
     total = 0
@@ -407,7 +595,12 @@ def jsonld_edits(
             continue
 
         diganti = rewrite_node(
-            blok["data"], content, brand, dates, pola, assets
+            blok["data"],
+            content,
+            brand,
+            dates,
+            pola,
+            assets,
         )
 
         if not diganti:

@@ -175,11 +175,16 @@ def read_template_files(template_id: int, user_id: int) -> dict:
             "Berkas template landing page hilang dari disk."
         )
 
+    # utf-8-sig, bukan utf-8: template yang sudah tersimpan sebelum
+    # BOM disaring di lapisan unggah masih membawanya di disk, dan BOM
+    # di depan <!doctype> membuat berkas AMP hasil ditolak validator.
+    # Menyaringnya di sini membereskan template lama tanpa perlu
+    # diunggah ulang.
     return {
         "name": row["name"],
-        "landing": landing_path.read_text(encoding="utf-8"),
+        "landing": landing_path.read_text(encoding="utf-8-sig"),
         "amp": (
-            amp_path.read_text(encoding="utf-8")
+            amp_path.read_text(encoding="utf-8-sig")
             if amp_path.exists()
             else ""
         ),

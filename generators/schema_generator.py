@@ -51,22 +51,43 @@ def build_breadcrumb_schema(
     plan: dict,
     page_url: str,
 ) -> dict:
+    """
+    Menyusun remah navigasi untuk halaman yang dirakit dari rencana.
+
+    Jalurnya dipakai apa adanya dari plan["breadcrumb"], yang sudah
+    disusun AI dari riset SERP. Tingkat tengah tidak punya alamat
+    sendiri - halaman kategorinya memang tidak dibuat pipeline ini -
+    jadi "item" hanya dipasang di ujung-ujungnya. ListItem tanpa
+    "item" sah menurut schema.org dan lazim dipakai untuk tingkat
+    yang belum punya halaman.
+    """
+    jalur = [
+        str(x).strip()
+        for x in (plan.get("breadcrumb") or [])
+        if str(x).strip()
+    ] or [text_of(brand)["home"], plan["h1"]]
+
+    terakhir = len(jalur) - 1
+
+    items = []
+
+    for nomor, nama in enumerate(jalur):
+        item = {
+            "@type": "ListItem",
+            "position": nomor + 1,
+            "name": nama,
+        }
+
+        if nomor == 0:
+            item["item"] = brand["base_url"] + "/"
+        elif nomor == terakhir:
+            item["item"] = page_url
+
+        items.append(item)
+
     return {
         "@type": "BreadcrumbList",
-        "itemListElement": [
-            {
-                "@type": "ListItem",
-                "position": 1,
-                "name": text_of(brand)["home"],
-                "item": brand["base_url"] + "/",
-            },
-            {
-                "@type": "ListItem",
-                "position": 2,
-                "name": plan["h1"],
-                "item": page_url,
-            },
-        ],
+        "itemListElement": items,
     }
 
 

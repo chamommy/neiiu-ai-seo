@@ -42,6 +42,15 @@ HISTORY_ROLES = (
     "list_item",
 )
 
+# Penanda yang ikut diingat, tapi BUKAN teks yang terbit.
+#
+# Isinya sudut dan cara bercerita judul halaman ini. Yang berguna dari
+# keduanya bukan kalimatnya, melainkan fakta bahwa topik itu sudah
+# terpakai - halaman berikutnya melewatinya dan mengambil topik lain.
+# Harus sama dengan TITLE_ANGLE_MARK/TITLE_FRAME_MARK di
+# ai/neiiu_prompts.py.
+MARK_ROLES = ("_title_angle", "_title_frame")
+
 # Berapa halaman terakhir yang diingat.
 #
 # Dibatasi karena isinya masuk ke prompt, dan prompt yang membengkak
@@ -53,6 +62,16 @@ MAX_HISTORY_PAGES = 5
 # Batas jumlah baris yang dibaca sekali muat, penjaga terakhir kalau
 # satu halaman ternyata punya ratusan slot.
 MAX_HISTORY_ROWS = 600
+
+# Penanda dibaca lebih jauh ke belakang daripada teksnya.
+#
+# Teks dibatasi lima halaman karena ia masuk ke prompt dan memakan
+# context. Penanda tidak masuk ke prompt - ia cuma dibandingkan di
+# Python - dan justru harus melihat lebih jauh: daftar sudut judul
+# isinya dua belas, jadi ingatan lima halaman berarti sudut halaman
+# keenam boleh mengulang sudut halaman pertama padahal masih ada tujuh
+# sudut yang belum pernah dipakai sama sekali.
+MAX_MARK_ROWS = 60
 
 # Job yang lebih tua dari ini dibuang saat menyimpan yang baru,
 # supaya tabelnya tidak tumbuh tanpa batas.
@@ -96,7 +115,7 @@ def flatten(content: dict) -> list[tuple[str, str]]:
     """
     hasil: list[tuple[str, str]] = []
 
-    for role in HISTORY_ROLES:
+    for role in HISTORY_ROLES + MARK_ROLES:
         nilai = (content or {}).get(role)
 
         if nilai is None:
@@ -252,18 +271,39 @@ def load_used_text(
             SELECT role, text
             FROM neiiu_used_text
             WHERE user_id = ? AND job_id IN ({tanda})
+              AND role NOT IN ({",".join("?" for _ in MARK_ROLES)})
             ORDER BY job_id DESC, id ASC
             LIMIT ?
             """,
-            [int(user_id)] + jobs + [MAX_HISTORY_ROWS],
+            [int(user_id)] + jobs + list(MARK_ROLES) + [MAX_HISTORY_ROWS],
+        ).fetchall()
+
+        # Penanda dibaca dengan pertanyaannya sendiri, tanpa dibatasi
+        # lima halaman terakhir dan tanpa ikut berebut MAX_HISTORY_ROWS
+        # dengan ratusan baris teks. Syaratnya sama - pengguna, keyword
+        # atau template, dan job ini sendiri dikecualikan.
+        mark_rows = db.execute(
+            f"""
+            SELECT role, text
+            FROM neiiu_used_text
+            WHERE {" AND ".join(syarat)}
+              AND role IN ({",".join("?" for _ in MARK_ROLES)})
+            ORDER BY job_id DESC, id ASC
+            LIMIT ?
+            """,
+            params + list(MARK_ROLES) + [MAX_MARK_ROWS],
         ).fetchall()
 
     hasil: dict[str, list[str]] = {}
 
-    for row in rows:
+    # Penanda ikut apa adanya, TERMASUK yang berulang: urutannya dipakai
+    # menentukan mana yang paling lama tidak dipakai, dan membuang yang
+    # kembar di sini akan membuat sudut yang baru saja dipakai dua kali
+    # terbaca setua sudut yang dipakai sepuluh halaman lalu.
+    for row in list(rows) + list(mark_rows):
         daftar = hasil.setdefault(row["role"], [])
 
-        if row["text"] not in daftar:
+        if row["role"] in MARK_ROLES or row["text"] not in daftar:
             daftar.append(row["text"])
 
     return hasil

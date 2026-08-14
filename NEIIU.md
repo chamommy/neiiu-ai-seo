@@ -41,8 +41,9 @@ Lalu isi `.env`. Yang paling penting:
 | --- | --- |
 | `SERP_PROVIDER` | `serper`, `google_cse`, atau `manual` |
 | `SERPER_API_KEY` | Kalau memakai Serper.dev |
-| `SITE_BASE_URL` | Domain asli. **Wajib diganti** sebelum halaman diunggah, karena dipakai untuk canonical, sitemap, dan structured data |
+| `SITE_BASE_URL` | Domain asli, dipakai **hanya** oleh halaman yang dirakit dari nol — canonical, sitemap, dan structured data-nya. Halaman yang mengisi template pengguna tidak memakainya sama sekali: alamat di template dibiarkan apa adanya dan diganti manual sesudah berkasnya diunduh |
 | `SITE_CTA_URL` | Tujuan semua tombol login, daftar, bilah mengambang, dan popup. Kosong berarti menunjuk beranda sendiri |
+| `SITE_LICENSE` | Nama badan pengawas brand, mis. `PAGCOR`. Diisi berarti halaman menyebutnya dengan nama itu; kosong berarti halaman tetap bilang "resmi dan berlisensi" tanpa menyebut nama. Nomor lisensi tidak pernah ditulis |
 | `DESIGN_REFERENCES` | URL acuan gaya bawaan, dipisah koma. Bisa ditimpa per run lewat `--design-ref` |
 | `AI_MODEL` | Model Ollama yang dipakai |
 | `AI_CONTEXT_LENGTH` | Ukuran context. Jangan diturunkan di bawah 16384 kalau meng-crawl 10 kompetitor |
@@ -954,7 +955,7 @@ dilihatnya.
 | slot | rentang | dulu |
 | --- | --- | --- |
 | title | 50–70 karakter | maksimal 60, tanpa lantai |
-| meta description | 160–200 karakter | 140–160 |
+| meta description | 140–180 karakter | 160–200 |
 
 Rentang title sempat 65–80, lalu diturunkan atas permintaan pengguna
 supaya judulnya tidak kepanjangan. Yang penting bukan angkanya
@@ -1018,20 +1019,21 @@ ditulis di depan.
 
 Dua hal ikut menyesuaikan supaya tidak saling membantah:
 
-- `knowledge/gaya_title_deskripsi.txt` disaring ke rentang 160–200
-  sebelum dikirim sebagai contoh. Dari 120 baris, 22 di bawah lantai
-  dan 32 di atas plafon; 66 yang tersisa masih delapan kali lebih
-  banyak daripada yang dikirim per run.
-- `knowledge/gaya_title.txt` **tidak** disaring, karena seluruh 116
-  contohnya di bawah lantai baru (median 52, terpanjang 61). Contohnya
-  tetap dikirim untuk nadanya, dan keterangan di atasnya sekarang
-  menyebutkan bahwa panjangnya justru yang tidak ditiru.
+- `knowledge/gaya_title_deskripsi.txt` disaring ke rentang 140–180
+  sebelum dikirim sebagai contoh. Diukur 13 Agustus 2026 sesudah
+  rentangnya turun dan sesudah `PERCENT_FILTER` dipasang: dari 102
+  baris yang lolos saringan, 4 di bawah lantai dan 58 di atas plafon;
+  40 yang tersisa masih lima kali lebih banyak daripada yang dikirim
+  per run.
+- `knowledge/gaya_title.txt` ikut disaring ke 50–70, dan dari 116
+  baris yang lolos saringan, 49 masuk rentang. Yang di luar rentang
+  masih bisa ikut lewat jalan mundur di `pick_style_examples`, yang
+  menambah contoh terdekat supaya daftarnya tidak pernah kosong.
 - Meta description masuk `SENTENCE_ROLES`, dan `trim_to_sentence`
-  menerima lantai. Di 160 karakter sebuah deskripsi muat satu kalimat
-  dan potongan di batas kata praktis tidak kelihatan; di 200 ia muat
-  dua sampai tiga, dan mundur ke titik terakhir bisa jatuh ke 151 —
-  rapi, tapi di bawah lantai yang jadi alasan teks itu ditulis
-  sepanjang itu.
+  menerima lantai. Di 140 karakter sebuah deskripsi muat satu kalimat
+  dan potongan di batas kata praktis tidak kelihatan; di 180 ia muat
+  dua, dan mundur ke titik terakhir bisa jatuh di bawah lantai yang
+  jadi alasan teks itu ditulis sepanjang itu.
 
 ---
 
@@ -1534,8 +1536,15 @@ error apa pun, dan hasil analisisnya jadi ngawur tanpa ketahuan.
 
 ## Sebelum Mengunggah
 
-1. Ganti `SITE_BASE_URL` di `.env` ke domain asli, lalu jalankan
-   ulang. Canonical, sitemap, dan JSON-LD ikut memakai nilai ini.
+1. Ganti domainnya:
+   - **Halaman dari template.** Alamat di berkas hasil adalah alamat
+     yang tertulis di template — `canonical`, `href`, `@id`, `url`,
+     dan alamat di BreadcrumbList. NEIIU tidak menyentuh satu pun,
+     jadi tidak ada domain karangan yang perlu diburu. Cari-ganti
+     domain lama ke domain sendiri, sekali, di kedua berkas.
+   - **Halaman yang dirakit dari nol.** Ganti `SITE_BASE_URL` di
+     `.env` ke domain asli lalu jalankan ulang; canonical, sitemap,
+     dan JSON-LD ikut memakai nilai itu.
 2. Cek `amp/index.html` di validator resmi AMP.
 3. Baca ulang isi halamannya. Konten hasil model tetap perlu
    diperiksa manusia sebelum terbit — cek klaim yang salah,

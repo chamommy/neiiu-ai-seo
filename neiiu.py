@@ -260,6 +260,12 @@ def print_result(result: dict) -> None:
     plan = result["plan"]
     brand = result["brand"]
 
+    # Alamat halaman dari template diambil dari canonical berkasnya,
+    # dan bisa kosong kalau templatenya memang tidak punya. Kosong
+    # dikatakan apa adanya - menampilkan SITE_BASE_URL di situ berarti
+    # menyebut alamat yang tidak tertulis di berkas mana pun.
+    alamat = result.get("page_url") or "(mengikuti template)"
+
     heading("KONTEN YANG DIBUAT")
     print(f"Brand   : {brand['site_name']}")
     print(f"Domain  : {brand['base_url']}")
@@ -267,7 +273,7 @@ def print_result(result: dict) -> None:
     print(f"Title   : {plan['title']}")
     print(f"Meta    : {plan['meta_description']}")
     print(f"Slug    : {plan['slug']}")
-    print(f"URL     : {result['page_url']}")
+    print(f"URL     : {alamat}")
     print(f"Section : {len(plan['sections'])}")
     print(f"FAQ     : {len(plan['faq'])}")
 
@@ -282,8 +288,12 @@ def print_result(result: dict) -> None:
     print("  index.html      — landing page kanonik")
     print("  amp/index.html  — versi AMP")
     print(
-        "\nSebelum diunggah, ganti SITE_BASE_URL di .env supaya "
-        "canonical memakai domain asli."
+        "\nHalaman yang dirakit dari nol memakai SITE_BASE_URL dari "
+        ".env untuk canonical; gantilah sebelum diunggah.\n"
+        "Halaman yang mengisi template pengguna tidak disentuh "
+        "alamatnya sama sekali - canonical, @id, dan url di data "
+        "terstruktur tetap seperti tertulis di template, dan "
+        "domainnya diganti sendiri sesudah berkasnya diunduh."
     )
 
 
