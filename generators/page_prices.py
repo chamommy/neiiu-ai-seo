@@ -99,7 +99,12 @@ PRICE_TEXT = re.compile(
     r"""^\s*
     (?:
         (?P<sign_pre>€|£|฿|\$|rp|idr|usd|eur|gbp|thb|myr|sgd|php|vnd)
-        \s*(?P<amount_a>\d[\d.,\s]*)
+        # Titik singkatan, sama seperti di PRICE_IN_TEXT. Dua pola ini
+        # harus sepakat: yang satu menemukan harga di tengah kalimat,
+        # yang satu memutuskan apakah teksnya SELURUHNYA harga, dan
+        # kalau cuma satu yang mengenali "Rp." maka harga itu
+        # ditemukan lalu ditolak - persis yang terjadi sebelum ini.
+        \s*\.?\s*(?P<amount_a>\d[\d.,\s]*)
         |
         (?P<amount_b>\d[\d.,\s]*)\s*
         (?P<sign_post>€|£|฿|\$|rp|idr|usd|eur|gbp|thb|myr|sgd|php|vnd)
@@ -256,7 +261,14 @@ PRICE_IN_TEXT = re.compile(
     r"(?<![A-Za-z0-9])"
     r"(?:"
     r"(?P<sign_pre>€|£|฿|\$|Rp|IDR|USD|EUR|GBP|THB)"
-    r"\s*(?P<amount_a>\d[\d.,]*\d|\d)"
+    # Titik singkatan ikut dilewati.
+    #
+    # "Rp." bentuk yang paling lazim ditulis orang Indonesia, dan
+    # tanpa titik ini seluruhnya luput: "Rp 20.000" berpindah zona
+    # dengan benar sementara "Rp.20.000" tepat di sebelahnya tetap
+    # rupiah di halaman Thai. Terukur di halaman terbit 15 Agustus
+    # 2026 - satu harga berpindah, tiga tidak.
+    r"\s*\.?\s*(?P<amount_a>\d[\d.,]*\d|\d)"
     r"|"
     r"(?P<amount_b>\d[\d.,]*\d|\d)\s*"
     r"(?P<sign_post>€|£|฿|\$|IDR|USD|EUR|GBP|THB)"
@@ -317,7 +329,10 @@ def price_edits(
         if (slot["start"], slot["end"]) in sudah:
             return
 
-        if slot.get("in_ad"):
+        # Harga pengiklan tidak ikut pindah zona. Angka di kreatif
+        # pihak ketiga bagian dari penawarannya - menukar mata
+        # uangnya mengubah tawaran yang tidak pernah kita buat.
+        if slot.get("in_ad") or slot.get("protected_ad"):
             return
 
         if slot["kind"] == "attribute" and not slot.get("quote"):

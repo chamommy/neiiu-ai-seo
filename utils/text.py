@@ -142,6 +142,93 @@ SENTENCE_END = re.compile(r"[.!?。！？]")
 # buruk daripada kalimat yang kepanjangan sedikit.
 SENTENCE_KEEP_RATIO = 0.55
 
+# Kata yang membuka klausa lanjutan di dalam satu kalimat.
+#
+# Bukan daftar kata sambung umum: yang berdiri di sini hanya yang
+# menyambung DAFTAR - "A, B, dan C". Kata sambung lain seperti
+# "karena" atau "sehingga" membuka klausa yang bisa berdiri sebagai
+# keterangan utuh, jadi memotongnya justru membuang keterangan yang
+# benar.
+LIST_CONNECTORS = {
+    "dan",
+    "atau",
+    "serta",
+    "maupun",
+    "plus",
+    "juga",
+}
+
+
+def drop_cut_tail(potongan: str, asli: str) -> str:
+    """
+    Membuang klausa terakhir yang jelas-jelas terpenggal di tengah.
+
+    Dipakai hanya saat teksnya MEMANG dipotong. Bentuk yang diincar
+    satu: potongannya berhenti di dalam sebuah klausa daftar, dan
+    daftarnya masih berlanjut di teks aslinya.
+
+    Terukur pada halaman yang benar-benar terbit, berkas
+    output/wayangplay-slot-gacor-20260819_225640/index.html:
+
+        ditulis model : "... Akses langsung dari ponsel, tampilan
+                        responsif, dan hasil kemenangan langsung
+                        muncul di layar."   (203 karakter)
+        terbit        : "... Akses langsung dari ponsel, tampilan
+                        responsif, dan hasil kemenangan."  (178)
+
+    Kata terakhirnya kata benda, jadi tidak satu pun penjaga kata
+    gantung keberatan - dan yang dibaca orang di hasil pencarian
+    adalah kalimat yang berhenti sebelum mengatakan apa yang terjadi
+    pada kemenangannya.
+
+    Yang dikembalikan potongan sampai SEBELUM koma terakhir. Kalau
+    syaratnya tidak terpenuhi, potongannya dikembalikan apa adanya -
+    fungsi ini tidak pernah memperpendek teks yang sudah utuh.
+    """
+    teks = str(potongan or "").strip()
+    penuh = str(asli or "").strip()
+
+    if not teks or len(teks) >= len(penuh):
+        return potongan
+
+    if "," not in teks:
+        return potongan
+
+    kepala, _, ekor = teks.rpartition(",")
+    kata_ekor = ekor.split()
+
+    if not kata_ekor:
+        return potongan
+
+    if kata_ekor[0].strip(".!?").casefold() not in LIST_CONNECTORS:
+        return potongan
+
+    # Klausanya benar-benar masih berlanjut di teks asli?
+    #
+    # Kalau daftarnya memang berakhir persis di situ - potongannya
+    # kebetulan jatuh tepat di ujung kalimat - tidak ada yang
+    # terpenggal, dan membuangnya berarti membuang butir terakhir
+    # yang utuh.
+    lanjutan = penuh[len(teks.rstrip(".")):].lstrip()
+
+    if not lanjutan or lanjutan[0] in CLOSERS:
+        return potongan
+
+    sisa = kepala.strip().rstrip(" ,;:-–—")
+
+    # Yang tersisa harus tetap kalimat, bukan potongan sependek
+    # label. Tanpa syarat ini, teks yang seluruhnya satu daftar
+    # panjang bisa habis dibuang sampai tinggal dua kata.
+    if len(sisa.split()) < MIN_CLAUSE_WORDS:
+        return potongan
+
+    return sisa
+
+
+# Sependek apa sisa kalimat masih pantas berdiri sesudah klausa
+# terakhirnya dibuang. Diukur dalam kata.
+MIN_CLAUSE_WORDS = 5
+
 
 def trim_to_sentence(
     text: str,
@@ -221,6 +308,16 @@ def trim_to_sentence(
     # "dar." - lebih rusak daripada sebelum diperbaiki.
     utuh = body[len(dipotong):len(dipotong) + 1] in ("", " ")
 
+    # Klausa daftar yang terpenggal dibuang lebih dulu, dan HANYA
+    # kalau yang tersisa masih memenuhi lantai panjangnya. Lantai
+    # itu permintaan pengguna - deskripsi 140-180 karakter - jadi
+    # menukar kalimat yang terpenggal dengan deskripsi yang
+    # kependekan berarti menukar satu cacat dengan cacat lain.
+    tanpa_ekor = drop_cut_tail(dipotong, body)
+
+    if tanpa_ekor != dipotong and display_width(tanpa_ekor) >= floor:
+        return close_clause(tanpa_ekor, limit, tolerance, kata_utuh=True)
+
     return close_clause(dipotong, limit, tolerance, kata_utuh=utuh)
 
 
@@ -261,6 +358,24 @@ DANGLING_WORDS = {
     # sini. Yang bisa menutup frasa ada di CUT_ONLY_DANGLING di bawah.
     "paling", "makin", "semakin", "kian", "sangat", "amat",
     "terlalu", "agak", "serba",
+    # Kata depan dan kata sambung yang belum sempat masuk. Semuanya
+    # menuntut sesuatu sesudahnya dan tidak satu pun pernah menutup
+    # judul. Terukur pada halaman terbit:
+    #
+    #   <title> NAGAJITU - Bandar Bola Online Resmi Deposit QRIS
+    #           Tanpa Potongan Buat
+    #
+    # "Buat" siapa tidak pernah terjawab. Judulnya 68 karakter -
+    # muat di jatah 70 - jadi tidak satu pun aturan panjang
+    # menahannya; yang seharusnya menahan justru daftar ini, dan
+    # "buat" tidak ada di dalamnya.
+    #
+    # "buat" berdiri di sini, bukan di CUT_ONLY_DANGLING, karena
+    # sebagai kata depan ia sama sekali tidak pernah menutup frasa.
+    # Bentuk kerja yang bisa menutup - "dibuat", "membuat" - token
+    # yang berbeda, jadi tidak ikut tersentuh.
+    "buat", "sejak", "menuju", "mengenai", "alias", "ataupun",
+    "apabila", "walau", "walaupun", "meski", "meskipun", "sebab",
     "a", "an", "and", "as", "at", "because", "but", "by", "for", "from",
     "every", "in", "of", "on", "or", "that", "the", "to", "which",
     "while", "with",
@@ -292,7 +407,116 @@ DANGLING_WORDS = {
 CUT_ONLY_DANGLING = {
     "cukup", "penuh", "lebih", "begitu", "sungguh", "benar",
     "most", "more", "very", "less",
+    # Kata yang jadi kata depan di satu kalimat dan kata penuh di
+    # kalimat lain. "Menang Bersama" dan "Bonus Lewat QRIS" dua-duanya
+    # sah; yang pertama menutup frasa, yang kedua tidak. Karena
+    # bentuknya sama, yang memisahkan cuma satu hal yang bisa
+    # diketahui: teksnya memang baru dipotong atau tidak.
+    "lewat", "guna", "bersama", "beserta", "soal",
 }
+
+
+# Kata sambung Thai yang MENEMPEL ke kata sebelumnya.
+#
+# Bahasa Thai tidak memberi spasi antar kata, jadi
+# "ร้านกาแฟออนไลน์จาก" satu token buat Python padahal tiga kata buat
+# yang membacanya - dan yang menggantung cuma suku terakhirnya.
+# Seluruh aturan di DANGLING_WORDS bekerja per token, jadi tidak satu
+# pun menyentuhnya. Terukur 14 Agustus 2026, judul Thai terbit sebagai
+# "LINGUAKU > ร้านกาแฟออนไลน์จาก ใช้งานง่าย": "dari" yang berdiri
+# tanpa apa-apa sesudahnya, karena nama situs dicabut dari belakangnya.
+#
+# Isinya sengaja pendek. Yang TIDAK masuk: "ที่" (ada di "ทุกที่",
+# "สถานที่"), "ตาม" (ada di "ติดตาม"), dan "ด้วย" yang sah menutup
+# kalimat. Ketiganya kata sah di ujung frasa, dan memotongnya berarti
+# merusak teks yang benar - persis yang tidak boleh terjadi.
+THAI_DANGLING = (
+    "เพื่อ", "หรือ", "และ", "จาก", "ของ", "โดย", "กับ", "แต่",
+)
+
+# Kata sambung yang cuma dibuang DI TITIK PENCABUTAN, bukan di ujung
+# teks yang kebetulan terpotong.
+#
+# Isinya satu kata, dan satu kata itu yang benar-benar terbit. Judul
+# zona Thailand, 16 Agustus 2026:
+#
+#   SIAM123: เปิดบัญชีใหม่ที่ เพื่อเข้าร่วมการเล่นสล็อตออนไลน์
+#
+# Yang ditulis model "เปิดบัญชีใหม่ที่ SIAM123 เพื่อ..." - "buka akun
+# baru DI SIAM123 untuk...". Namanya dipindahkan ke kepala, dan "ที่"
+# yang tadinya menerangkan nama itu tertinggal tanpa apa-apa di
+# belakangnya.
+#
+# Ia sengaja tidak masuk THAI_DANGLING dan alasannya masih berlaku: di
+# ujung teks yang terpotong, "ที่" hampir selalu bagian dari kata lain
+# ("ทุกที่" = di mana saja, "สถานที่" = tempat), dan memotongnya di
+# situ merusak teks yang benar.
+#
+# Yang membedakan titik pencabutan: kata yang berdiri persis SEBELUM
+# nama situs dan berakhiran "ที่" adalah kata depan yang menerangkan
+# nama itu. "เล่นได้ทุกที่ SIAM123" bukan kalimat Thai yang wajar, jadi
+# kelas yang dikhawatirkan komentar di atas praktis tidak muncul di
+# sini - dan yang tetap mungkin muncul dijaga daftar di bawah.
+THAI_DANGLING_AT_CUT = ("ที่",)
+
+# Kata sah yang kebetulan berakhiran salah satu di atas.
+#
+# Pendek, dan boleh tetap pendek: yang perlu ditampungnya cuma kata
+# yang bisa berdiri PERSIS sebelum nama situs, bukan setiap kata Thai
+# yang berakhiran "ที่". Ini bedanya dengan daftar kata menggantung
+# bahasa Indonesia yang sempat dicoba dan ditinggalkan karena tumbuh
+# terus - lihat finish_clause.
+THAI_DANGLING_SAFE = ("ทุกที่", "สถานที่", "ที่ไหนก็ที่")
+
+
+def drop_thai_tail(text: str, di_pencabutan: bool = False) -> str:
+    """
+    Membuang kata sambung Thai yang menempel di ujung teks.
+
+    Dipakai HANYA di tempat satu kata dicabut dari tengah teks Thai,
+    bukan di sembarang teks Thai. Bedanya penting: teks yang tidak
+    dicabut apa-apa memang boleh berakhir di kata mana saja, dan
+    memangkasnya di situ berarti membuang suku kata yang sah.
+
+    di_pencabutan membedakan dua tempat pemanggilan yang selama ini
+    diperlakukan sama. Yang memanggil dari finish_clause bekerja atas
+    teks yang ujungnya kebetulan habis jatah; yang memanggil dari
+    strip_brand_mentions bekerja atas teks yang ujungnya baru saja
+    kehilangan kata di belakangnya. Bukti di keduanya tidak sama
+    kuatnya, jadi daftar yang berlaku juga tidak sama - lihat
+    THAI_DANGLING_AT_CUT.
+
+    Bawaannya False, jadi setiap pemanggil lama berperilaku persis
+    seperti sebelumnya.
+    """
+    kata = str(text or "").split()
+
+    if not kata:
+        return str(text or "")
+
+    ekor = kata[-1].rstrip(".,;:-–—")
+
+    if not THAI_RANGE.search(ekor):
+        return str(text or "")
+
+    daftar = THAI_DANGLING
+
+    if di_pencabutan and not ekor.endswith(THAI_DANGLING_SAFE):
+        daftar = THAI_DANGLING + THAI_DANGLING_AT_CUT
+
+    for sambung in daftar:
+        if not ekor.endswith(sambung):
+            continue
+
+        # Persis kata sambungnya sendiri: tokennya dibuang utuh.
+        if ekor == sambung:
+            kata.pop()
+        else:
+            kata[-1] = ekor[: -len(sambung)]
+
+        break
+
+    return " ".join(kata).rstrip(" ,;:-–—")
 
 
 def menggantung(kata: str, dipotong: bool = False) -> bool:
@@ -370,6 +594,90 @@ def drop_dangling(text: str, dipotong: bool = False) -> str:
         return str(text or "")
 
     return " ".join(kata).rstrip(" ,;:-–—")
+
+
+# Pemisah anak kalimat. Sesudah salah satu dari ini, sebuah judul
+# yang terpotong hampir selalu meninggalkan potongan anak kalimat.
+CLAUSE_MARK = re.compile(r"\s*[,;:–—-]\s*")
+
+# Sependek apa ekor sesudah pemisah masih terhitung potongan.
+CLAUSE_TAIL_WORDS = 2
+
+# Sesedikit apa yang boleh tersisa sesudah ekornya dibuang.
+CLAUSE_KEEP_WORDS = 2
+
+
+def finish_clause(text: str, dipotong: bool = False) -> str:
+    """
+    Merapikan ujung teks yang terpotong sampai kalimatnya utuh lagi.
+
+    drop_dangling membuang kata sambung yang menggantung, dan itu
+    menyelesaikan sebagian besar. Yang tidak diselesaikannya: potongan
+    anak kalimat yang kata terakhirnya bukan kata sambung. Terukur di
+    halaman terbit 15 Agustus 2026:
+
+        Pembayaran Otomatis Saat Menang, Tidak
+        Akses Baccarat Live 24 Jam, Tidak
+        Akses Dana dari HP Saja, Tidak Perlu
+
+    Ketiganya berhenti sesudah koma, di tengah keterangan yang baru
+    dimulai. Tidak satu pun kata terakhirnya kata sambung, jadi tidak
+    satu pun tersentuh - padahal ketiganya jelas putus di mata
+    pembaca.
+
+    Memasukkan "tidak" dan "perlu" ke daftar kata menggantung sempat
+    saya coba dan salah arah: keduanya kata yang sah menutup frasa
+    ("Ya atau Tidak"), dan daftar itu akan terus tumbuh satu kata
+    setiap kali muncul bentuk baru. Yang benar bukan menambah kata
+    melainkan mengenali BATAS: anak kalimat yang baru dimulai lalu
+    berhenti, dibuang seluruhnya sampai pemisahnya.
+
+    Hanya bekerja pada teks yang memang baru dipotong. Judul yang
+    ditulis utuh dan kebetulan berakhir "..., Gratis" tidak disentuh.
+    """
+    if not dipotong:
+        return drop_dangling(text, False)
+
+    hasil = " ".join(str(text or "").split())
+
+    # Bahasanya dibaca dari teksnya sendiri, bukan diminta lewat
+    # parameter. clean_line dipanggil dari sepuluh tempat dan tidak
+    # satu pun tahu zona halaman; menambah parameter di semuanya
+    # menyebarkan satu keputusan kecil ke seluruh berkas, sementara
+    # aksara Thai sudah menjawabnya sendiri di tempat.
+    if THAI_RANGE.search(hasil):
+        hasil = drop_thai_tail(hasil)
+
+    # Ekor pendek sesudah pemisah dibuang, berulang, karena satu
+    # potongan bisa menyisakan potongan lain di belakangnya.
+    dipangkas = False
+
+    for _ in range(3):
+        bagian = CLAUSE_MARK.split(hasil)
+
+        if len(bagian) < 2:
+            break
+
+        ekor = bagian[-1].split()
+        sisa = " ".join(" ".join(bagian[:-1]).split())
+
+        if not ekor or len(ekor) > CLAUSE_TAIL_WORDS:
+            break
+
+        if len(sisa.split()) < CLAUSE_KEEP_WORDS:
+            break
+
+        hasil = sisa
+        dipangkas = True
+
+    # Sesudah anak kalimatnya dibuang, teksnya TIDAK lagi terhitung
+    # terpotong - ujungnya sekarang batas yang dipilih, bukan tempat
+    # jatah kebetulan habis. Menyerahkannya ke drop_dangling dalam
+    # mode terpotong membuat aturan "dua kata terakhir" jalan lagi
+    # dan memakan kata yang sah: "Pembayaran Otomatis Saat Menang"
+    # menyusut jadi "Pembayaran Otomatis" hanya karena "Saat"
+    # kebetulan kata sambung.
+    return drop_dangling(hasil, dipotong=not dipangkas).rstrip(" ,;:-–—")
 
 
 def close_clause(

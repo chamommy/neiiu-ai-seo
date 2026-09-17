@@ -18,6 +18,12 @@ from utils.region import DEFAULT_REGION, get_region
 PAGE_TEXT: dict[str, dict[str, str]] = {
     "id": {
         "home": "Beranda",
+        # Bentuk H1 yang dipakai kalau model menulis H1 yang
+        # isinya cuma nama situs dan keyword - lihat
+        # ensure_template_identity. Frasa posisional, bukan
+        # label bertanda pisah, dan tidak mengaku-ngaku apa pun
+        # yang tidak ada di pipeline ini.
+        "h1_form": "{keyword} di {brand}",
         "faq_nav": "FAQ",
         "toc_title": "Daftar Isi",
         "toc_label": "Daftar isi",
@@ -50,6 +56,7 @@ PAGE_TEXT: dict[str, dict[str, str]] = {
     },
     "th": {
         "home": "หน้าแรก",
+        "h1_form": "{keyword} ที่ {brand}",
         "faq_nav": "คำถามที่พบบ่อย",
         "toc_title": "สารบัญ",
         "toc_label": "สารบัญ",

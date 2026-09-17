@@ -9,10 +9,20 @@ menempelkan seluruh isi halaman kompetitor.
 
 import hashlib
 import re
+from itertools import zip_longest
 
 from pathlib import Path
 
+from ai.brief import PURPOSES, brief_identity_lines, brief_rule_blocks
+from ai.language_rules import (
+    VOICE_RULES_ID,
+    style_examples_fit,
+    voice_rules,
+)
+from ai.niche import capability_lines, faq_topic_rules
 from ai.schemas import META_MAX, META_MIN, TITLE_MAX, TITLE_MIN
+from generators.content_batches import DISTINCT_ROLES
+from utils.spelling import CASUAL_WORDS
 from utils.text import content_tokens
 
 
@@ -152,9 +162,38 @@ ROBOT_FILTER = re.compile(
     # contoh yang memakainya membuat larangan itu batal sendiri -
     # model meniru contohnya, bukan aturannya.
     r"memungkinkan kamu|data kinerja|sistem pengolahan data|"
-    r"bukan sekadar[^.]{0,60}\b(tapi|tetapi|melainkan)\b|"
+    r"bukan sekadar|"
     r"tidak hanya[^.]{0,60}\b(tapi|tetapi)\b juga|"
     r"pengalaman bermain yang optimal|solusi cerdas",
+    re.IGNORECASE,
+)
+
+
+# Kata sehari-hari yang membuat sebuah contoh tidak lagi pantas
+# ditiru. Diambil dari daftar yang sama dengan penyapu ragam bahasa,
+# jadi yang dilarang terbit dan yang dilarang jadi contoh selalu satu
+# daftar - bukan dua yang lambat laun berbeda.
+#
+# Ini saringan TEGAS, tidak seperti ROBOT_FILTER yang dilepas kalau
+# menyisakan terlalu sedikit. Sebabnya beda sifat: contoh berbunyi
+# brosur cuma membuat tulisan membosankan, sedangkan contoh berbahasa
+# gaul melanggar permintaan pengguna 21 Agustus 2026 secara langsung -
+# "jangan menggunakan bahasa yang santai". Lebih baik kolam contohnya
+# tipis daripada model diperlihatkan persis bentuk yang dilarang.
+CASUAL_FILTER = re.compile(
+    r"\b("
+    + "|".join(
+        sorted(
+            (
+                kata
+                for kata in CASUAL_WORDS
+                if len(kata) >= 3 and kata not in {"kalian"}
+            ),
+            key=len,
+            reverse=True,
+        )
+    )
+    + r")\b",
     re.IGNORECASE,
 )
 
@@ -166,7 +205,7 @@ ROBOT_FILTER = re.compile(
 # lebih kaku lagi - kebalikan dari yang dimaksud. Jadi kalau yang
 # tersisa kurang dari ini, contoh aslinya dipakai apa adanya dan
 # aturan bunyi di prompt yang bekerja sendirian.
-MIN_VOICE_POOL = 3
+MIN_VOICE_POOL = 2
 
 
 def load_article_examples() -> dict[str, list[str]]:
@@ -208,6 +247,11 @@ def load_article_examples() -> dict[str, list[str]]:
             continue
 
         if CLAIM_FILTER.search(teks):
+            continue
+
+        # Contoh berbahasa gaul tidak pernah dipakai - lihat
+        # CASUAL_FILTER.
+        if CASUAL_FILTER.search(teks):
             continue
 
         paragraf.append(teks)
@@ -706,6 +750,8 @@ def format_style_examples(
     keyword: str,
     brand_name: str,
     variation: str = "",
+    language_code: str = "id",
+    niche: str = "gambling",
 ) -> str:
     """
     Bagian prompt berisi contoh gaya, siap ditempel ke brief.
@@ -715,7 +761,35 @@ def format_style_examples(
     deskripsi 181 karakter sebagai contoh title juga, lalu menulis
     title yang dipotong di batasnya - potongan yang justru membuang
     ajakan di akhir kalimatnya.
+
+    Contohnya tidak dikirim sama sekali kalau halaman ditulis dalam
+    bahasa yang bukan bahasa berkas contoh, ATAU di bidang yang bukan
+    bidang berkas contoh.
+
+    Berkas contoh (knowledge/gaya_title.txt dan
+    gaya_title_deskripsi.txt) seluruhnya bahasa Indonesia, dan
+    keterangan di atasnya berbunyi "yang diambil dari sini CUMA
+    BENTUKNYA: cara membuka, cara menyebut nama situs, ajakan di
+    akhirnya". Untuk halaman Thai, perintah itu berarti: susunlah
+    kalimat Thai mengikuti susunan kalimat Indonesia - yang persis
+    definisi kalimat hasil terjemahan, dan persis yang dikeluhkan
+    tentang halaman zona Thailand.
+
+    Alasan bidang persis sama bentuknya. Ketiga berkas berisi contoh
+    tentang situs slot, dan delapan baris "Situs Resmi Slot Gacor
+    No.1" yang berdiri di prompt halaman kursus mengajari model
+    susunan kalimatnya SEKALIGUS kosakatanya. Yang kedua tidak
+    diminta siapa pun, dan model kecil tidak memisahkan keduanya.
+
+    Yang tetap bekerja untuk zona dan bidang lain: bentuk title
+    ditegakkan enforce_title_shape, rentang panjangnya ditegakkan
+    minLength, dan bank kata dari SERP berisi title yang benar-benar
+    sedang ngerank untuk keyword ITU - contoh yang justru lebih tepat
+    daripada berkas milik bidang lain.
     """
+    if not style_examples_fit(language_code, niche):
+        return ""
+
     nama = brand_name or "situs ini"
 
     bagian: list[str] = []
@@ -874,6 +948,38 @@ Aturan:
 - Heading harus deskriptif dan menjawab kebutuhan pencari.
 - Jangan memakai placeholder seperti "lorem ipsum" atau "xxx".
 - Jangan menjanjikan hasil, keuntungan, atau kemenangan.
+- Berikan hanya hasil akhir, tanpa proses berpikir.
+- Ikuti JSON Schema yang diberikan sistem.
+
+BAHASA (paling penting):
+{order}
+""".strip()
+
+
+def metadata_system_prompt(language_code: str = "id") -> str:
+    """
+    System prompt untuk permintaan yang cuma menulis judul dan deskripsi.
+
+    Dipisah dari yang di atas bukan karena rapi melainkan karena isinya
+    salah untuk tugas ini. Yang di atas menyebut "menyusun landing page
+    baru", lalu memberi aturan paragraf dan heading - tiga hal yang
+    tidak dikerjakan permintaan ini sama sekali, dan yang justru
+    mengarahkan model kecil menulis seperti sedang mengisi halaman.
+
+    Blok BAHASA tetap dibawa apa adanya. Ia satu-satunya bagian yang
+    ditandai "paling penting" di prompt aslinya, dan alasannya tidak
+    berubah: halaman Thai yang terbit berbahasa Indonesia adalah
+    kerusakan yang tidak bisa ditambal belakangan.
+    """
+    order = LANGUAGE_ORDERS.get(language_code, LANGUAGE_ORDERS["id"])
+
+    return f"""
+Kamu penulis metadata SEO: judul halaman dan meta description.
+
+Aturan:
+- Tulis baru. Jangan menyalin kalimat yang diperlihatkan kepadamu.
+- Jangan menjanjikan hasil, keuntungan, atau kemenangan.
+- Jangan mengarang angka, persen, atau nomor lisensi.
 - Berikan hanya hasil akhir, tanpa proses berpikir.
 - Ikuti JSON Schema yang diberikan sistem.
 
@@ -1492,20 +1598,498 @@ FAQ_SHAPE_SAMPLES = 10
 # diacak, karena dua alasan: awalan prompt harus identik di semua
 # giliran supaya cache Ollama tidak batal, dan halaman kedua untuk
 # keyword yang sama harus mendapat sudut yang lain.
-TITLE_ANGLES = (
-    "jam main dan pola yang lagi jalan hari ini",
-    "link login dan cara masuk waktu link utama susah dibuka",
-    "cara daftar akun dan apa saja yang disiapkan",
-    "deposit dan penarikan - QRIS, e-wallet, dan berapa lama cair",
-    "bonus dan promo, terutama untuk yang baru gabung",
-    "daftar permainan dan penyedia yang tersedia",
-    "main dari HP: aplikasi, browser, dan kuota yang dipakai",
-    "keamanan akun dan data yang dipegang situs",
-    "RTP live dan dari mana datanya diambil",
-    "layanan bantuan dan berapa cepat dibalas",
-    "komunitas pemain dan tempat bertukar pola",
-    "panduan buat yang baru pertama kali main slot",
-)
+# Tiap sudut punya EMPAT bagian, bukan satu kalimat.
+#
+# Sebelumnya sudut ditulis sebagai satu frasa penjelas - "link login
+# dan cara masuk waktu link utama susah dibuka" - dan itu terbukti
+# tidak cukup untuk model 4B. Terukur pada lima generate berturut-turut
+# Berapa contoh gaya yang ikut ke prompt kepala halaman.
+#
+# Lebih sedikit daripada STYLE_SAMPLE_SIZE di jalur halaman penuh, dan
+# itu disengaja: giliran ini menulis SATU baris, jadi delapan contoh
+# mulai terbaca sebagai daftar yang harus dirangkum, bukan sebagai
+# gaya yang ditiru.
+HEAD_STYLE_SAMPLE = 5
+
+# Pemisah baris sebagai nama, supaya blok di bawah bisa ditulis
+# sebagai teks apa adanya tanpa satu escape pun di dalamnya.
+NEWLINE = chr(10)
+
+
+def head_style_block(
+    slot: str,
+    keyword: str,
+    brand_name: str,
+    variation: str = "",
+    language_code: str = "id",
+    niche: str = "gambling",
+) -> str:
+    """
+    Contoh gaya untuk giliran yang cuma menulis judul atau deskripsi.
+
+    Ini menambal ketimpangan yang terukur di run 30 Agustus 2026, dan
+    ketimpangannya bukan soal panjang prompt melainkan soal adil.
+
+    Judul dinilai title_penalty, dan dua ukuran di dalamnya membaca
+    berkas contoh milik pengguna:
+
+        vague_title_score  - menolak judul yang tidak memuat satu pun
+                             kata dari topic_vocabulary(), dan
+                             kosakata itu DIPANEN dari
+                             knowledge/gaya_title.txt
+        style_copy_score   - menolak judul yang menyalin contoh di
+                             berkas yang sama
+
+    Deskripsi dinilai description_penalty, yang juga memakai
+    style_copy_score atas contohnya sendiri.
+
+    Sampai sekarang tidak satu pun contoh itu dikirim ke model di
+    jalur ramping. Modelnya dinilai atas berkas yang tidak pernah
+    dilihatnya - dituntut menyebut hal yang ada di dalamnya sekaligus
+    dilarang menyerupainya. Hasilnya terukur: judul ditolak tiga kali
+    dengan alasan TIDAK MENYEBUT SATU HAL PUN YANG NYATA, lalu yang
+    terbit kandidat yang paling sedikit bermasalah -
+
+        ABECE # Togel Online untuk Pemain & Tanpa Pendaftaran
+
+    Yang dikirim contoh utuh, BUKAN daftar kata. Bedanya sudah pernah
+    dibayar: waktu sudut judul masih dikirim sebagai daftar kosakata
+    wajib, yang terbit "RTP Slot Gacor Data, Sumber, dan Perbarui" -
+    model mencentang daftarnya dengan patuh dan hasilnya terbaca
+    persis seperti daftar yang dicentang. Contoh utuh tidak bisa
+    dicentang; ia cuma bisa dibaca sebagai kalimat.
+
+    Syarat kirimnya sama dengan jalur halaman penuh - style_examples_fit
+    - jadi halaman Thai dan halaman di luar bidang judi tidak mendapat
+    satu baris pun dari berkas berbahasa Indonesia tentang situs slot.
+    """
+    if not style_examples_fit(language_code, niche):
+        return ""
+
+    contoh = pick_style_examples(
+        keyword,
+        brand_name,
+        jumlah=HEAD_STYLE_SAMPLE,
+        slot=slot,
+        variation=variation,
+    )
+
+    if not contoh:
+        return ""
+
+    nama = brand_name or "situs ini"
+    sebutan = "JUDUL" if slot == "title" else "DESKRIPSI"
+
+    baris = NEWLINE.join(
+        f"- {teks.replace('[ BRAND ]', nama)}" for teks in contoh
+    )
+
+    return f"""
+CONTOH {sebutan} MILIK SITUS INI
+JANGAN disalin, dan JANGAN diikuti topiknya. Yang diambil dari sini
+satu hal: contoh-contoh ini selalu menyebut sesuatu yang bisa
+ditunjuk - cara masuk, cara bayar, apa yang terjadi sesudah menang,
+kapan bisa dibuka. Tidak satu pun berhenti di rasa seperti "nyaman",
+"pengalaman bermain", atau "dirancang untuk pemain". Punyamu juga
+jangan.
+{baris}
+"""
+
+
+def title_rules_block(
+    brand_name: str,
+    keyword: str,
+    language_name: str,
+) -> str:
+    """
+    Aturan menulis judul, satu sumber untuk kedua jalur.
+
+    Isinya aturan yang sudah terbukti sejak 16
+    Agustus 2026 dan terbukti di 20 generate: 0 salah sudut, 0 ditolak,
+    0 keyword hilang. Dipindahkan ke sini bukan untuk diubah melainkan
+    supaya jalur panjang memakai yang SAMA - dua daftar aturan yang
+    berdiri sendiri-sendiri akan bergeser tanpa yang lain tahu, dan
+    gejalanya judul yang lolos di satu jalur lalu ditolak di jalur lain
+    dari perintah yang sama.
+
+    Alasan yang sama sudah dipakai untuk enforce_title_shape dan
+    title_penalty; ini melengkapi sisi promptnya.
+    """
+    return f"""
+ATURAN JUDUL
+1. SUDUT JUDULNYA KAMU YANG MENENTUKAN. Orang yang mengetik
+   "{keyword}" sedang mencari sesuatu; putuskan sendiri apa yang
+   paling berguna dijanjikan kepadanya, lalu tulis judul yang
+   menjanjikan hal itu. Tidak ada daftar kata yang harus kamu
+   centang di sini.
+2. SATU gagasan, bukan tiga. Judul yang menyebut akses, bonus, dan
+   kecepatan sekaligus tidak menjanjikan apa pun - pembaca hasil
+   pencarian membacanya sambil lalu dan cuma menangkap yang pertama.
+3. Jangan memaksakan kosakata apa pun. Angka, persen, "sumber data",
+   "terbaru", "diperbarui", "RTP" - kalau sudut yang kamu pilih tidak
+   benar-benar membutuhkannya, jangan ditulis. Judul yang menempelkan
+   kata-kata itu supaya terlihat lengkap justru terbaca seperti
+   daftar keyword, bukan seperti kalimat.
+4. Tulis nama situs "{brand_name or "situs ini"}" persis seperti itu.
+5. Keyword "{keyword}" ditulis SEKALI. Ia TIDAK harus di depan -
+   taruh di tempat yang membuat kalimatnya paling wajar dibaca.
+6. Satu kalimat yang SELESAI. Jangan menempelkan kata di ujung cuma
+   supaya panjangnya cukup.
+7. Paling banyak SATU koma di seluruh judul. Judul yang berisi
+   daftar - "Akses, Blokir, dan Link Cadangan" - adalah tiga
+   potongan yang didempetkan, bukan satu janji. Pilih satu.
+8. Huruf besar seperti judul yang wajar dalam bahasa {language_name}.
+9. Jangan mengarang angka, persen, jaminan menang, atau lisensi.
+10. JANGAN menyalin kalimat perintah di atas ke dalam judul. Judul
+    ditulis untuk pembaca hasil pencarian, bukan untuk menjawab
+    daftar ini.
+"""
+
+
+def title_history_block(riwayat: dict | None, keep: int = 6) -> str:
+    """
+    Judul yang sudah terbit, beserta pembukanya secara terpisah.
+
+    Bentuknya: daftar judul,
+    lalu daftar pembuka yang dilarang, lalu larangan bertanya kalau
+    yang sebelumnya sudah bertanya. Ketiganya menyasar tiga ukuran
+    yang benar-benar diperiksa Python sesudahnya - title_echo_score,
+    opening_repeat_score, dan shape_repeat_score - jadi yang dikatakan
+    ke model sama persis dengan yang dinilai darinya.
+    """
+    terakhir = [
+        " ".join(str(teks).split())
+        for teks in ((riwayat or {}).get("title") or [])
+        if str(teks).strip()
+    ][:keep]
+
+    if not terakhir:
+        return ""
+
+    pembuka = []
+
+    for teks in terakhir:
+        potong = teks.split()
+
+        if len(potong) > 3:
+            pembuka.append(" ".join(potong[1:4]))
+
+    blok = "\nJUDUL YANG SUDAH KELUAR (jangan diulang):\n"
+    blok += "\n".join(f"- {teks}" for teks in terakhir)
+
+    if pembuka:
+        blok += "\nJANGAN membuka dengan: " + "; ".join(
+            f"\"{x}\"" for x in dict.fromkeys(pembuka)
+        )
+
+    if any("?" in teks for teks in terakhir):
+        blok += (
+            "\nJudul sebelumnya sudah bertanya. Kali ini JANGAN bertanya."
+        )
+
+    return blok + "\n"
+
+
+def meta_history_block(riwayat: dict | None, keep: int = 6) -> str:
+    """
+    Deskripsi yang sudah terbit, beserta pembukanya secara terpisah.
+
+    Bentuknya sengaja sama dengan title_history_block: daftar
+    deskripsi lalu daftar pembuka yang dilarang. Sebabnya juga sama -
+    yang paling cepat terbaca sebagai halaman kembar bukan seluruh
+    kalimatnya, melainkan tiga kata pertamanya. Deskripsi di jalur
+    ini SELALU dibuka nama situs, jadi yang diadu kata KEDUA sampai
+    keempat; kalau yang diadu kata pertama, seluruhnya sama dan tidak
+    ada yang bisa dilarang.
+    """
+    terakhir = [
+        " ".join(str(teks).split())
+        for teks in ((riwayat or {}).get("meta_description") or [])
+        if str(teks).strip()
+    ][:keep]
+
+    if not terakhir:
+        return ""
+
+    pembuka = []
+
+    for teks in terakhir:
+        potong = teks.split()
+
+        if len(potong) > 4:
+            pembuka.append(" ".join(potong[1:4]))
+
+    blok = "\nDESKRIPSI YANG SUDAH KELUAR (jangan diulang):\n"
+    blok += "\n".join(f"- {teks}" for teks in terakhir)
+
+    if pembuka:
+        blok += "\nJANGAN melanjutkan nama situs dengan: " + "; ".join(
+            f'"{x}"' for x in dict.fromkeys(pembuka)
+        )
+
+    return blok + "\n"
+
+
+def meta_rules_block(
+    brand_name: str,
+    keyword: str,
+    language_name: str = "Indonesia",
+) -> str:
+    """
+    Aturan meta description, disalin dari blok aturan halaman penuh.
+
+    Setiap butir di sini sudah berdiri di build_template_content_prompt
+    dan tidak satu pun diubah artinya - yang berbeda cuma butir-butir
+    yang TIDAK ikut, yaitu semua yang mengatur paragraf, heading, FAQ,
+    dan ajakan daftar. Tidak satu pun dari itu berlaku untuk giliran
+    yang cuma menulis satu baris deskripsi.
+    """
+    return f"""
+ATURAN DESKRIPSI
+
+- Deskripsi WAJIB DIBUKA NAMA SITUS. Kata pertamanya "{brand_name}",
+  lalu satu kata kerja yang menyatakan apa yang disediakannya:
+  menyediakan, menghadirkan, menyajikan, menawarkan, menjamin, atau
+  adalah.
+    salah : "Pemain baru bisa mulai bermain di {brand_name} ..."
+    benar : "{brand_name} menghadirkan {keyword} yang bisa dibuka ..."
+  Jangan dibuka dengan menyapa pembaca, dan jangan dibuka dengan kata
+  kerja tanpa pelakunya.
+- Deskripsi BUKAN versi panjang dari judul. Judul adalah papan nama:
+  siapa ini dan tentang apa. Deskripsi adalah alasan mengklik: apa
+  yang didapat pembaca kalau masuk, hal yang TIDAK muat di judul.
+  Kalau judulnya tinggal disambung jadi deskripsimu, deskripsinya
+  salah.
+- SATU KALIMAT PENUH SAMPAI SELESAI, atau dua kalimat yang keduanya
+  selesai. Deskripsi yang berhenti di tengah - "cocok untuk pemain
+  yang ingin" - terbit apa adanya di hasil pencarian dan terbaca
+  seperti halaman yang rusak. Kalau tidak yakin muat, tulis lebih
+  pendek; jangan memulai kalimat yang tidak akan sempat selesai.
+- JANGAN menulis angka persen. Tidak satu angka pun yang diikuti
+  tanda persen, berapa pun nilainya.
+- Ditulis dalam bahasa {language_name}, seluruhnya.
+""".rstrip()
+
+
+def build_meta_only_prompt(
+    analysis: dict,
+    brand: dict,
+    spec: dict,
+    sudah: dict | None = None,
+    riwayat: dict | None = None,
+) -> tuple[str, str]:
+    """
+    Prompt khusus giliran yang isinya HANYA meta description.
+
+    Kembaran build_title_only_prompt, dan ada karena alasan yang sama
+    persis - diukur di run 30 Agustus 2026, pada permintaan yang cuma
+    minta satu judul dan satu deskripsi:
+
+        giliran title (jalur ramping) : 22 detik
+        giliran deskripsi (jalur penuh) : 472 detik
+
+        prompt giliran deskripsi : 11.811 token
+        yang diminta             : satu kalimat 140-180 karakter
+
+    Dua puluh satu kali lebih lama untuk teks yang panjangnya dua kali
+    lipat. Sebabnya satu baris di generators/content_planner.py:
+    jalur ramping menyala hanya kalau gilirannya berisi title
+    SENDIRIAN, jadi deskripsi selalu berangkat dengan prompt seluruh
+    halaman - aturan paragraf, heading, FAQ, daftar, CTA, bank kata
+    SERP, dan pertanyaan kompetitor - untuk giliran yang tidak menulis
+    satu pun dari itu.
+
+    Yang TETAP dikirim di sini, karena deskripsi memang membutuhkannya:
+    judul yang baru saja ditulis (deskripsi melanjutkan sudutnya, dan
+    dilarang mengulanginya), daftar kata khas judul yang tidak boleh
+    dipakai lagi, dan deskripsi yang sudah terbit di halaman
+    sebelumnya.
+    """
+    keyword = analysis["keyword"]
+
+    brand_name = brand.get("site_name", "").strip()
+    language_code = brand.get("region", "id")
+    language_name = brand.get("language_name", "Indonesia")
+
+    aturan_slot = spec.get("meta_description") or {}
+
+    lantai = int(aturan_slot.get("min_length") or 0)
+    plafon = int(
+        aturan_slot.get("max_length_any")
+        or aturan_slot.get("max_length")
+        or META_MAX
+    )
+
+    batas = (
+        f"Panjang deskripsi : {lantai} sampai {plafon} karakter — "
+        f"WAJIB melewati {lantai} karakter dan WAJIB berhenti "
+        f"sebelum {plafon}"
+        if lantai
+        else f"Panjang deskripsi : maksimal {plafon} karakter"
+    )
+
+    # Judul yang baru ditulis, beserta larangan mengulanginya.
+    #
+    # Ini bagian yang TIDAK boleh hilang waktu prompt dirampingkan.
+    # Tanpa judulnya, deskripsi ditulis tanpa tahu sudut apa yang
+    # sedang dilanjutkan; dengan judulnya tapi tanpa larangan, cara
+    # paling malas melanjutkan sebuah kalimat adalah menuliskannya
+    # lagi.
+    blok_judul = ""
+
+    daftar_judul = (sudah or {}).get("title") or []
+    judul = str(daftar_judul[0]).strip() if daftar_judul else ""
+
+    if judul:
+        blok_judul = (
+            f"\nJUDUL HALAMAN INI (sudah ditulis)\n{judul}\n"
+            "\nDeskripsimu MELANJUTKAN sudut judul itu, dan DILARANG "
+            "mengulanginya. Judulnya sudah terbaca sendiri di hasil "
+            "pencarian, tepat di atas deskripsimu; mengulangnya "
+            "berarti membuang seluruh baris pertama untuk mengatakan "
+            "sesuatu yang barusan dibaca orang. Buka dengan hal yang "
+            "BELUM disebut judulnya - langkahnya, syaratnya, siapa "
+            "yang memakainya, atau apa yang dirasakan sesudahnya.\n"
+            + kata_terlarang(judul, keyword, brand_name)
+        )
+
+    permintaan = f"""
+Kamu menulis SATU meta description SEO. Tidak menulis isi halaman,
+tidak menulis paragraf, tidak menulis FAQ, tidak menulis heading.
+
+DATA
+Brand             : {brand_name or "-"}
+Keyword target    : {keyword}
+Bahasa            : {language_name}
+Negara sasaran    : {brand.get("region_label", "Indonesia")}
+{batas}
+{blok_judul}{head_style_block(
+        "meta_description",
+        keyword,
+        brand_name,
+        brand.get("variation", ""),
+        language_code,
+        brand.get("niche", "gambling"),
+    )}{meta_history_block(riwayat)}{meta_rules_block(brand_name, keyword, language_name)}
+
+YANG HARUS KAMU TULIS
+
+- meta_description: 1 teks
+
+Jawab HANYA dengan JSON berisi bidang di atas. Jangan menerangkan
+apa pun di luar JSON.
+""".strip()
+
+    return metadata_system_prompt(language_code), permintaan
+
+
+def build_title_only_prompt(
+    analysis: dict,
+    brand: dict,
+    spec: dict,
+    riwayat: dict | None = None,
+) -> tuple[str, str]:
+    """
+    Prompt khusus giliran yang isinya HANYA title.
+
+    Kenapa ini ada, dengan angkanya. plan_batches menaruh title di
+    giliran sendiri - giliran pertama, isinya satu peran - lalu giliran
+    itu berangkat dengan prompt lengkap milik seluruh halaman:
+
+        prompt giliran 1 : 15.423 token
+        yang diminta     : satu judul 50-70 karakter
+
+    Sebelas koma enam kali lebih besar daripada prompt judul saja
+    untuk permintaan yang isinya sama. Blok "# ATURAN" sendirian 11.734
+    token - aturan paragraf, heading, FAQ, daftar, CTA - untuk giliran
+    yang tidak menulis satu pun dari itu.
+
+    Akibatnya terukur end-to-end dua run berturut-turut (job 93 dan
+    94): model gagal menghasilkan judul sama sekali, penambalan gagal
+    dua kali, dan yang terbit judul cadangan.
+
+    Ini BUKAN prompt lengkap yang ditambahi aturan judul. Ia berdiri
+    sendiri dan cuma menerima yang benar-benar dipakai untuk menulis
+    judul: nama situs, keyword, bahasa, jenis halaman, judul yang
+    sudah terbit, dan batas panjangnya.
+
+    Yang TIDAK dikirim, dan tidak satu pun dibutuhkan judul: aturan
+    paragraf, aturan artikel, aturan FAQ, aturan heading, aturan CTA,
+    aturan bagian halaman, bank kata SERP, pertanyaan kompetitor, dan
+    daftar teks yang sudah terpakai.
+
+    Sudut halaman TIDAK ikut dikirim, dan itu perubahan yang
+    disengaja. Dulu di sini berdiri satu blok bertajuk "SUDUT",
+    lalu dua baris kosakata wajib dan terlarang - daftar kata yang harus
+    dan tidak boleh muncul di judul. Yang terbit karenanya judul
+    seperti "RTP Slot Gacor Data, Sumber, dan Perbarui": model
+    mencentang daftarnya dengan patuh, dan hasilnya terbaca persis
+    seperti daftar yang dicentang. Sudutnya sekarang ditentukan model
+    sendiri; yang tinggal di sini cuma bahannya dan judul yang sudah
+    terbit supaya yang baru tidak mengulanginya.
+    """
+    keyword = analysis["keyword"]
+
+    brand_name = brand.get("site_name", "").strip()
+    language_code = brand.get("region", "id")
+    language_name = brand.get("language_name", "Indonesia")
+
+
+    # Jenis halaman, kalau pengguna memilihnya. Satu baris, bukan blok
+    # aturan - yang dibutuhkan judul cuma tahu halaman ini untuk apa.
+    tujuan = ""
+    pilihan_brief = brand.get("brief") or {}
+
+    if pilihan_brief.get("purpose"):
+        label = PURPOSES.get(pilihan_brief["purpose"], {}).get(
+            "label", pilihan_brief["purpose"]
+        )
+
+        tujuan = f"Jenis halaman   : {label}\n"
+
+    aturan_slot = spec.get("title") or {}
+
+    lantai = int(aturan_slot.get("min_length") or 0)
+    plafon = int(
+        aturan_slot.get("max_length_any")
+        or aturan_slot.get("max_length")
+        or TITLE_MAX
+    )
+
+    batas = (
+        f"Panjang judul   : {lantai} sampai {plafon} karakter — "
+        f"WAJIB melewati {lantai} karakter"
+        if lantai
+        else f"Panjang judul   : maksimal {plafon} karakter"
+    )
+
+    permintaan = f"""
+Kamu menulis SATU judul SEO. Tidak menulis isi halaman, tidak menulis
+paragraf, tidak menulis FAQ, tidak menulis heading.
+
+DATA
+Brand           : {brand_name or "-"}
+Keyword target  : {keyword}
+Bahasa          : {language_name}
+Negara sasaran  : {brand.get("region_label", "Indonesia")}
+{tujuan}{batas}
+{head_style_block(
+        "title",
+        keyword,
+        brand_name,
+        brand.get("variation", ""),
+        language_code,
+        brand.get("niche", "gambling"),
+    )}{title_history_block(riwayat)}{title_rules_block(brand_name, keyword, language_name)}
+YANG HARUS KAMU TULIS
+
+- title: 1 teks
+
+Jawab HANYA dengan JSON berisi bidang di atas. Jangan menerangkan
+apa pun di luar JSON.
+""".strip()
+
+    return metadata_system_prompt(language_code), permintaan
 
 
 # Cara bercerita judul, digilir terpisah dari sudutnya.
@@ -1527,129 +2111,11 @@ TITLE_ANGLES = (
 # Yang terbit: "Slot Gacor Update Harian RTP Terbaru" - benar, rapi,
 # dan persis sama dengan judul mana pun untuk topik ini. Pengguna
 # menyebutnya "kata katanya udah pernah dipakai".
-TITLE_FRAMES = (
-    "julukan atau kiasan - situsnya diibaratkan sesuatu "
-    "(tambang, kampus, markas, pasar, bengkel)",
-    "kabar atau pengumuman, seperti berita yang baru masuk",
-    "cerita satu orang, seperti kalimat pembuka sebuah kisah",
-    "ajakan langsung ke pembaca, memakai kata \"kamu\"",
-    "perbandingan sebelum dan sesudah",
-    "pertanyaan yang langsung dijawab di judul itu juga",
-    "pernyataan pendek dan tegas, tanpa hiasan sama sekali",
-    "sebutan tempat atau markas, seolah situsnya sebuah lokasi",
-)
-
-
-# Nama penanda yang dipakai mencatat sudut dan cara judul halaman ini
-# ke riwayat, supaya halaman berikutnya bisa menghindarinya.
-#
-# Berawalan garis bawah karena ia bukan slot: tidak pernah terbit di
-# halaman, cuma dititipkan di dalam isi supaya ikut tersimpan. Harus
-# sama dengan MARK_ROLES di database/neiiu_history_db.py.
-TITLE_ANGLE_MARK = "_title_angle"
-TITLE_FRAME_MARK = "_title_frame"
-
-
-def rotate_pick(daftar: tuple, benih: int, dipakai=()) -> str:
-    """
-    Satu pilihan dari daftar, digilir dan MENGHINDARI yang sudah dipakai.
-
-    Benih menentukan dari mana giliran dimulai; riwayat menentukan mana
-    yang dilewati. Pengguna memintanya dengan kalimat "kalau sudah pakai
-    topik A, berikutnya jangan dipakai lagi, ganti topik B".
-
-    Benih saja tidak cukup untuk itu. sha1 tidak tahu apa yang sudah
-    terbit, jadi halaman kedua punya satu dari dua belas kemungkinan
-    mendarat di sudut yang persis sama dengan halaman pertama - dan
-    kemungkinan itu tetap ada berapa pun rapinya benih disusun. Yang
-    memastikan topiknya berganti cuma daftar apa yang sudah dipakai.
-
-    Kalau seluruh daftar sudah pernah dipakai, yang diambil yang PALING
-    LAMA tidak dipakai. Riwayat berurut dari yang terbaru, jadi urutan
-    daftarnya sekaligus umurnya.
-    """
-    urutan = [
-        daftar[(benih + langkah) % len(daftar)]
-        for langkah in range(len(daftar))
-    ]
-
-    umur: dict[str, int] = {}
-
-    for nomor, teks in enumerate(dipakai or ()):
-        # setdefault, bukan penugasan: kalau satu pilihan muncul dua
-        # kali di riwayat, yang berlaku pemakaian TERBARU.
-        umur.setdefault(" ".join(str(teks).split()).casefold(), nomor)
-
-    paling_tua = len(daftar) + len(umur) + 1
-
-    # Yang belum pernah dipakai dihitung paling tua, jadi ia menang
-    # lebih dulu. Seri dimenangkan yang paling awal di urutan benih,
-    # karena max() mempertahankan yang pertama ditemukannya.
-    return max(
-        urutan,
-        key=lambda pilihan: umur.get(
-            " ".join(str(pilihan).split()).casefold(),
-            paling_tua,
-        ),
-    )
-
-
-def pick_title_frame(
-    brand_name: str,
-    keyword: str,
-    variation: str = "",
-    dipakai=(),
-) -> str:
-    """
-    Memilih satu cara bercerita untuk judul halaman ini.
-
-    Benihnya dibedakan dari pick_title_angle supaya sudut dan caranya
-    tidak bergerak bersamaan - kalau benihnya sama, dua belas sudut
-    kali delapan cara cuma menghasilkan dua belas kombinasi, bukan
-    sembilan puluh enam.
-
-    "dipakai" adalah cara bercerita halaman-halaman sebelumnya, terbaru
-    lebih dulu.
-    """
-    benih = hashlib.sha1(
-        "{}|{}|{}|cara".format(
-            brand_name.strip().casefold(),
-            keyword.strip().casefold(),
-            variation,
-        ).encode("utf-8")
-    ).digest()
-
-    return rotate_pick(TITLE_FRAMES, benih[3], dipakai)
-
-
-def pick_title_angle(
-    brand_name: str,
-    keyword: str,
-    variation: str = "",
-    dipakai=(),
-) -> str:
-    """
-    Memilih satu sudut judul untuk halaman ini.
-
-    Benihnya sama bentuknya dengan title_separator() dan
-    build_number_set(), dan alasannya sama: hasilnya tetap sama tiap
-    kali halaman yang sama dibuat ulang, tapi berbeda antara satu
-    halaman dan halaman berikutnya.
-
-    "dipakai" adalah sudut halaman-halaman sebelumnya untuk topik ini,
-    terbaru lebih dulu; yang ada di situ tidak dipilih lagi selama
-    masih ada sudut yang belum pernah dipakai.
-    """
-    benih = hashlib.sha1(
-        "{}|{}|{}|sudut".format(
-            brand_name.strip().casefold(),
-            keyword.strip().casefold(),
-            variation,
-        ).encode("utf-8")
-    ).digest()
-
-    return rotate_pick(TITLE_ANGLES, benih[0], dipakai)
-
+# Sepuluh tetapan di bawah ini sempat ikut terbawa waktu mesin sudut
+# judul dibuang, padahal tidak satu pun bagian dari mesin itu - mereka
+# cuma kebetulan berdiri di antara fungsi terakhir mesin itu dan fungsi
+# berikutnya. Dikembalikan apa adanya dari versi sebelumnya, tanpa satu
+# huruf pun diubah.
 # Peran yang contoh teks lamanya dikirim untuk menunjukkan FUNGSI
 # bagiannya, bukan untuk dipertahankan artinya. Harus sama dengan
 # KEEP_FUNCTION_ROLES di generators/template_filler.py.
@@ -1689,6 +2155,31 @@ PARTNER_ORDERS = {
 # berikutnya. Cukup untuk memberi tahu model apa yang sudah dipakai
 # tanpa memakan ruang yang dibutuhkan jawabannya sendiri.
 MAX_USED_REMINDERS = 60
+
+# Berapa LEBAR daftar itu boleh tumbuh, dalam karakter.
+#
+# Batas jumlah saja tidak cukup, dan itu terukur pada job 61 -
+# template LEGO berisi 9 paragraf, 7 ulasan, dan 6 jawaban FAQ, dan
+# enam puluh potong teks sepanjang itu adalah belasan ribu karakter.
+# Daftarnya tumbuh tiap giliran, dan di giliran ketiga promptnya
+# melewati seluruh context: log job berbunyi "sisa context -715
+# token". Jawaban yang terpotong lalu diminta ulang berkali-kali,
+# dan slot yang tidak kebagian terbit dengan teks pemilik template.
+#
+# Tiga ribu karakter menahan daftarnya di sekitar 750-1500 token
+# berapa pun besar templatenya.
+MAX_USED_CHARS = 3000
+
+# Tiap teks di daftar itu dipotong sependek ini.
+#
+# Daftar ini TIDAK menegakkan apa pun - penolak kalimat kembar
+# dikerjakan Python lewat "terpakai" di generators/content_planner.py,
+# dan ia membandingkan teks utuh. Gunanya di sini cuma memberi tahu
+# model ke mana halaman ini sudah pergi, dan untuk itu awal
+# kalimatnya sudah cukup mengenali. Mengirim paragraf 500 karakter
+# utuh membayar ruang context untuk ketelitian yang tidak dipakai
+# siapa pun.
+USED_REMINDER_WIDTH = 110
 
 # Berapa banyak teks dari halaman-halaman SEBELUMNYA yang disebutkan.
 #
@@ -1745,6 +2236,36 @@ REPEAT_PRONE_ROLES = (
     "card_title",
     "review_tag",
 )
+
+# Peran PROSA yang juga harus diingatkan, dengan jatah sendiri.
+#
+# Ketiganya dulu tidak ada di daftar di atas sama sekali, dan itu
+# lubang yang terbaca di halaman terbit - berkas
+# output/siam123-slot-gacor-20260819_054058/index.html:
+#
+#   deskripsi        : "Pemain baru bisa daftar dengan QRIS langsung,
+#                       tanpa perlu verifikasi tambahan. Setelah
+#                       login, tampilan slot gacor sudah update
+#                       sebelum pagi hari."
+#   paragraf pertama : kalimat yang sama, dua-duanya.
+#   paragraf keempat : kalimat kedua yang sama lagi.
+#
+# Giliran yang menulis paragraf memang tidak pernah melihat satu pun
+# paragraf yang sudah ditulis, dan tidak pernah melihat deskripsinya.
+# Ia mengulang bukan karena membandel, melainkan karena tidak ada
+# yang memberitahunya.
+#
+# Berdiri TERPISAH, bukan disambung ke daftar di atas, karena
+# keduanya berebut jatah lebar yang sama. Disambung begitu saja,
+# paragraf yang panjangnya 300 karakter akan mengusir seluruh label
+# menu dari daftar ingatan - dan label menu yang berbunyi sama
+# adalah cacat yang sudah pernah terbit juga.
+PROSE_REPEAT_ROLES = (
+    "meta_description",
+    "paragraph",
+    "faq_answer",
+)
+
 
 
 def kata_terlarang(judul: str, keyword: str, brand: str) -> str:
@@ -1810,51 +2331,18 @@ def rentang_teks(nomor: int, plafon: int, lantai: int = 0) -> str:
 # landing page dan amp yang sangat terlihat AI banget". Halaman yang
 # dirakit tanpa template terbit dengan aturan bunyi dari sebelum
 # keluhan itu ada.
-VOICE_RULES = """Aturan bunyi tulisan — berlaku untuk SEMUA teks di atas:
-- Tulis seperti orang yang mengurus situs ini sendiri dan sedang
-  menjelaskannya ke calon pemakai. Bukan seperti brosur perusahaan,
-  bukan seperti dokumen produk.
-- Subjek kalimatnya ORANG, bukan benda. Tulis "kamu bisa lihat
-  angkanya di layar", bukan "sistem menampilkan angka kepada
-  pengguna". Kalimat yang subjeknya "sistem", "teknologi", "proses",
-  "layanan", atau "platform" berturut-turut adalah tanda paling jelas
-  bahwa tulisannya dibuat mesin.
-- Kalimat berikut DILARANG dipakai, termasuk bentuk miripnya:
-  "di era digital", "hal ini membuat", "dirancang untuk",
-  "salah satu faktor utama", "salah satu keunggulan utama",
-  "teknologi yang digunakan", "memungkinkan pengguna",
-  "memungkinkan kamu", "sehingga pengguna dapat", "aspek penting",
-  "seluruh proses", "mengutamakan efisiensi",
-  "tanpa perlu intervensi manusia", "data kinerja",
-  "sistem pengolahan data", "secara transparan", "terukur dan",
-  "berbasis data", "solusi cerdas", "pengalaman bermain yang optimal".
-- DUA SUSUNAN KALIMAT INI DILARANG, dan keduanya diambil dari halaman
-  yang dikeluhkan pengguna karena "terlihat AI banget":
-    "Tidak hanya menampilkan angka, tapi juga menggambarkan pola ..."
-    "Slot gacor bukan sekadar permainan yang sering menang, tapi ..."
-  Bentuk "bukan sekadar X, tapi Y" dan "tidak hanya X, tapi juga Y"
-  adalah cara mesin membuat satu gagasan terdengar seperti dua. Orang
-  menulis gagasannya langsung: "Yang ditampilkan bukan cuma angkanya.
-  Polanya kelihatan juga." Kalau sebuah kalimat butuh dua sisi untuk
-  berdiri, pecah jadi dua kalimat.
-- Kata "secara" hampir selalu bisa dibuang. "Diperbarui secara
-  otomatis" sama artinya dengan "diperbarui sendiri", dan yang kedua
-  itu yang ditulis orang. Satu halaman paling banyak memakai "secara"
-  dua kali.
-- ANGKA PERSEN PALING BANYAK DISEBUT DUA KALI di seluruh halaman, dan
-  tidak sekali pun di ulasan. Terukur pada halaman yang dikeluhkan
-  pengguna: satu angka desimal yang sama muncul 18 kali di teks yang
-  dibaca orang, termasuk di kelima ulasan sekaligus. Tidak ada lima
-  orang yang menulis pengalamannya dan kelimanya menyebut angka
-  desimal yang sama persis - itu satu-satunya tanda yang bisa dilihat
-  pembaca tanpa membandingkan apa pun. Sebut "RTP-nya lagi bagus" atau
-  "angkanya lagi tinggi"; angka persisnya biar berdiri di tabel.
-- Panjang kalimatnya berganti-ganti. Kalimat pendek boleh berdiri
-  sendiri. Paragraf yang semua kalimatnya sama panjang dan sama
-  susunannya terbaca seperti daftar yang disamarkan.
-- Boleh memakai kata sehari-hari yang memang dipakai orang untuk
-  topik ini - "nggak", "udah", "bikin", "langsung", "tinggal" - asal
-  tidak berlebihan. Bahasa yang terlalu rapi justru mencurigakan."""
+#
+# Isinya pindah ke ai/language_rules.py supaya tiap bahasa punya
+# daftarnya sendiri. Nama lama dibiarkan berdiri sebagai penunjuk ke
+# daftar Indonesia: ia masih dipakai di luar berkas ini, dan
+# daftarnya sendiri tidak berubah sehuruf pun.
+#
+# Yang memilih daftar sekarang voice_rules(kode_bahasa), dipanggil di
+# kedua penyusun prompt. Sebelum ini daftar Indonesia dikirim juga ke
+# halaman Thai - lengkap dengan barisnya yang menyuruh memakai
+# "nggak" dan "udah" - dan itu salah satu sebab halaman Thai terbaca
+# seperti terjemahan.
+VOICE_RULES = VOICE_RULES_ID
 
 
 def brand_confidence_rules(brand: dict) -> str:
@@ -1876,6 +2364,77 @@ def brand_confidence_rules(brand: dict) -> str:
     """
     brand_name = brand.get("site_name", "")
     lisensi = str(brand.get("license") or "").strip()
+
+    # Daftar kesanggupan diambil dari bidang halamannya, bukan
+    # dipatok.
+    #
+    # Isinya dulu ditulis langsung di sini dan seluruhnya tentang
+    # situs judi - "yang menang dibayar", "deposit dan withdraw
+    # diproses cepat". Untuk halaman kursus atau toko, kalimat itu
+    # bukan cuma janggal: ia menyuruh model menuliskan kesanggupan
+    # yang tidak ada hubungannya dengan apa yang dijual halaman itu.
+    #
+    # Bidang "gambling" mengembalikan daftar yang sama persis seperti
+    # sebelum dipisah, jadi halaman judi tidak bergeser sehuruf pun.
+    kesanggupan = capability_lines(
+        brand.get("niche", "generic"),
+        brand.get("region", "id"),
+        brand.get("niche_text", ""),
+    )
+
+    # Dua larangan penutup ikut mengikuti bidang, dengan alasan yang
+    # sama dengan daftar kesanggupan di atasnya: "angka RTP" dan
+    # "hasil judi" tidak menunjuk apa pun di halaman kursus, dan
+    # menyebutkannya di situ justru menaruh kosakata judi di depan
+    # model yang sedang menulis tentang kursus.
+    #
+    # Yang dilarang tidak berubah - angka karangan dan janji hasil
+    # tetap tidak boleh di bidang mana pun. Yang berubah cuma contoh
+    # angkanya dan sebutan untuk "hasil".
+    judi = str(brand.get("niche") or "gambling").strip().lower() == "gambling"
+
+    # Seluruh butirnya ikut disubstitusi, bukan cuma daftar angkanya.
+    #
+    # Kalau yang diganti cuma daftarnya, tempat baris barunya bergeser
+    # dan teks bidang judi tidak lagi sama huruf per huruf dengan yang
+    # sudah diukur. Perbedaannya cuma pembungkus baris, dan justru
+    # karena itu ia mudah lolos - yang menahannya di sini bentuk
+    # kodenya, bukan kewaspadaan.
+    if judi:
+        larangan_angka = (
+            f'- ANGKA yang tidak diberikan ke halaman ini: jumlah member, tahun\n'
+            f'  berdiri, nomor lisensi, angka RTP, winrate, jumlah penghargaan,\n'
+            f'  lama proses dalam detik. "{brand_name}" boleh berlisensi tanpa\n'
+            f'  membuat angka-angka itu jadi ada, dan angka karangan adalah satu-\n'
+            f'  satunya klaim di halaman ini yang bisa dibantah orang lain dengan\n'
+            f'  bukti.'
+        )
+
+        janji_hasil = (
+            f'- Janji bahwa PEMBACANYA akan menang, untung, atau balik modal.\n'
+            f'  Menulis "{brand_name}" sanggup membayar adalah pernyataan tentang\n'
+            f'  brandnya dan itu boleh; menulis pembacanya pasti menang adalah\n'
+            f'  pernyataan tentang hasil judi dan itu ditolak hampir semua\n'
+            f'  platform iklan - yang rugi justru brand berlisensi, karena ia yang\n'
+            f'  punya sesuatu untuk dicabut.'
+        )
+    else:
+        larangan_angka = (
+            f'- ANGKA yang tidak diberikan ke halaman ini: jumlah pelanggan,\n'
+            f'  tahun berdiri, nomor izin, persentase kepuasan, jumlah\n'
+            f'  penghargaan, lama proses dalam menit atau detik. "{brand_name}"\n'
+            f'  boleh beroperasi resmi tanpa membuat angka-angka itu jadi ada,\n'
+            f'  dan angka karangan adalah satu-satunya klaim di halaman ini yang\n'
+            f'  bisa dibantah orang lain dengan bukti.'
+        )
+
+        janji_hasil = (
+            f'- Janji tentang HASIL yang akan didapat pembacanya.\n'
+            f'  Menulis "{brand_name}" mengerjakan sesuatu sampai selesai adalah\n'
+            f'  pernyataan tentang brandnya dan itu boleh; menjanjikan pembacanya\n'
+            f'  pasti berhasil, pasti puas, atau pasti untung adalah pernyataan\n'
+            f'  tentang sesuatu yang tidak ada di tangan brandnya.'
+        )
 
     if lisensi:
         baris_lisensi = (
@@ -1902,9 +2461,7 @@ def brand_confidence_rules(brand: dict) -> str:
   selesai: "Withdraw diproses langsung", bukan "withdraw diharapkan
   dapat diproses dengan cepat".
 {baris_lisensi}- Ini semua BOLEH ditulis sebagai kemampuan yang memang ada:
-  dana dan data pemain aman, deposit dan withdraw diproses cepat,
-  yang menang dibayar, layanan bisa dihubungi kapan saja,
-  pilihan permainannya lengkap, situsnya bisa dibuka dari mana saja.
+{kesanggupan}
 - Kata ragu berikut DILARANG dipakai untuk hal-hal di atas:
   "mungkin", "diharapkan", "berusaha untuk", "berupaya", "konon",
   "diklaim", "sebisa mungkin", "cenderung". Kata-kata itu membuat
@@ -1916,18 +2473,178 @@ def brand_confidence_rules(brand: dict) -> str:
 
 Dua hal ini tetap TIDAK boleh, dan sebabnya bukan kurang percaya
 diri:
-- ANGKA yang tidak diberikan ke halaman ini: jumlah member, tahun
-  berdiri, nomor lisensi, angka RTP, winrate, jumlah penghargaan,
-  lama proses dalam detik. "{brand_name}" boleh berlisensi tanpa
-  membuat angka-angka itu jadi ada, dan angka karangan adalah satu-
-  satunya klaim di halaman ini yang bisa dibantah orang lain dengan
-  bukti.
-- Janji bahwa PEMBACANYA akan menang, untung, atau balik modal.
-  Menulis "{brand_name}" sanggup membayar adalah pernyataan tentang
-  brandnya dan itu boleh; menulis pembacanya pasti menang adalah
-  pernyataan tentang hasil judi dan itu ditolak hampir semua
-  platform iklan - yang rugi justru brand berlisensi, karena ia yang
-  punya sesuatu untuk dicabut."""
+{larangan_angka}
+{janji_hasil}"""
+
+
+def title_examples(brand_name: str, niche: str = "gambling") -> dict:
+    """
+    Contoh judul benar dan salah, mengikuti bidang halaman.
+
+    Aturan bentuk title diajarkan lewat pasangan salah/benar, dan
+    contoh yang bidangnya lain mengajarkan dua hal sekaligus:
+    bentuknya - yang memang dimaksud - dan kosakatanya, yang tidak.
+    Model kecil tidak memisahkan keduanya, jadi halaman kursus yang
+    diberi contoh "Update Pola Slot Gacor Tiap Pagi" akan menulis
+    judul tentang slot.
+
+    Isian bidang "gambling" sama huruf per huruf dengan yang dulu
+    ditulis langsung di dalam prompt.
+    """
+    nama = brand_name or "situs ini"
+
+    if str(niche or "").strip().lower() != "gambling":
+        return {
+            "benar_bentuk": (
+                f"{nama} Kelas Malam Buat Yang Kerja Siang"
+            ),
+            "salah_tengah": (
+                f"Rahasia Belajar di {nama} Yang Jarang Diketahui"
+            ),
+            "tumpukan": (
+                f"{nama} | Kelas Online Tiap Pagi 2026 Lengkap 24 Jam "
+                "Hari"
+            ),
+            "salah_sifat": (
+                f"{nama} Kelas Online Cepat Mudah Terpercaya Resmi"
+            ),
+            "benar_sifat": (
+                f"{nama} Kelas Online Tanpa Biaya Daftar Buat Pemula"
+            ),
+            "datar": "Kelas Online Terbaru Update Harian",
+            "salah_tumpuk": (
+                f"{nama} Kelas Online 2026 Update Harian Terlengkap "
+                "Paling Murah"
+            ),
+            "benar_tunggal": (
+                f"{nama} Kelas Online Tiap Malam Buat Yang Baru Mulai"
+            ),
+        }
+
+    return {
+        "benar_bentuk": f"{nama} Update Pola Slot Gacor Tiap Pagi Buat\n            Pemain Baru",
+        "salah_tengah": f"Rahasia Spin di {nama} Yang Membuka Peluang",
+        "tumpukan": f"{nama} | Update Pola Slot Gacor Tiap Pagi 2026 Akurat 24\n    Jam Hari",
+        "salah_sifat": f"{nama} Deposit QRIS Cepat Aman Terpercaya Resmi",
+        "benar_sifat": f"{nama} Deposit QRIS Tanpa Potongan Buat Pemain Baru",
+        "datar": "Slot Gacor Update Harian RTP Terbaru",
+        "salah_tumpuk": f"{nama} Slot Gacor 2026 Update Harian Live Terbaru\n            Paling Akurat",
+        "benar_tunggal": f"{nama} Update Pola Slot Gacor Tiap Pagi Buat\n            Pemain Baru",
+    }
+
+
+def forbidden_claims_block(
+    brand_name: str = "",
+    language_code: str = "id",
+    niche: str = "gambling",
+) -> str:
+    """
+    Daftar larangan terakhir, ditaruh PALING BAWAH di prompt.
+
+    Isinya tidak baru - brand_confidence_rules sudah melarang semua
+    ini di tengah prompt. Yang baru letaknya dan bentuknya, dan
+    keduanya diubah karena aturan di tengah prompt terbukti tidak
+    cukup untuk model 4B.
+
+    Terukur 14 Agustus 2026: dengan brand_confidence_rules terpasang
+    lengkap, permintaan feature-boxes pertama terbit dengan
+    "Transaksi terjadi dalam hitungan detik" - lama proses dalam
+    satuan waktu, salah satu dari enam hal yang dilarang di prompt
+    yang sedang dibacanya.
+
+    Tiga perbedaan yang disengaja dari aturan di tengah:
+
+      1. Berdiri di akhir. Yang dibaca terakhir yang paling
+         berpengaruh pada model kecil.
+      2. Berbentuk pasangan SALAH/BENAR, bukan larangan saja. Model
+         kecil butuh tahu apa yang ditulis sebagai gantinya; dilarang
+         tanpa pengganti membuatnya memilih sendiri, dan yang
+         dipilihnya biasanya bentuk lain dari hal yang sama.
+      3. Pendek. Enam baris yang dibaca mengalahkan tiga puluh baris
+         yang dilewati.
+
+    Ini tetap lapis pertama, bukan satu-satunya. Yang benar-benar
+    menegakkannya generators/claim_guard.py, yang bekerja atas
+    jawaban model - karena aturan prompt seberapa pun tegasnya
+    diikuti model kecil kadang-kadang saja.
+    """
+    nama = brand_name or "situs ini"
+
+    # Butir 4 dan 5 menyebut RTP dan kemenangan, dan keduanya cuma
+    # ada di halaman judi. Untuk bidang lain, larangannya tetap
+    # berlaku - persen karangan dan janji hasil sama tidak bolehnya -
+    # tapi contohnya harus dari bidang yang sedang ditulis, kalau
+    # tidak model kecil justru mengambil kosakata judi dari daftar
+    # larangan yang seharusnya menahannya.
+    judi = str(niche or "").strip().lower() == "gambling"
+
+    if language_code == "th":
+        if judi:
+            empat = f"""4. ตัวเลข RTP อัตราชนะ และเปอร์เซ็นต์ทุกชนิด
+   ผิด : RTP 96.4%
+   ถูก : ช่วงนี้ตัวเลขกำลังดี
+5. คำสัญญาว่าผู้อ่านจะชนะหรือได้กำไร
+   ผิด : เล่นที่นี่ได้เงินแน่นอน
+   ถูก : {nama} จ่ายจริงเมื่อชนะ"""
+        else:
+            empat = f"""4. เปอร์เซ็นต์และคะแนนทุกชนิดที่ไม่ได้ให้ไว้กับหน้านี้
+   ผิด : ลูกค้าพึงพอใจ 98%
+   ถูก : ลูกค้าส่วนใหญ่กลับมาใช้ซ้ำ
+5. คำสัญญาถึงผลลัพธ์ที่ผู้อ่านจะได้รับ
+   ผิด : ใช้แล้วได้ผลแน่นอน
+   ถูก : {nama} ดูแลจนจบกระบวนการ"""
+
+        return f"""
+# ห้ามเขียนสิ่งเหล่านี้ (ตรวจก่อนตอบทุกครั้ง)
+
+1. ระยะเวลาดำเนินการเป็นตัวเลข
+   ผิด : ฝากถอนภายใน 30 วินาที
+   ถูก : ฝากถอนแล้วเข้าบัญชีเลย
+2. จำนวนสมาชิก ผู้เล่น หรือผู้ใช้
+   ผิด : สมาชิกกว่า 50,000 คน
+   ถูก : มีคนเลือกใช้ {nama} ทุกวัน
+3. ปีที่ก่อตั้ง และเลขที่ใบอนุญาต
+   ผิด : เปิดให้บริการตั้งแต่ปี 2015
+   ถูก : {nama} เปิดให้บริการอย่างถูกต้อง
+{empat}
+
+ถ้าไม่แน่ใจตัวเลขไหน ให้เขียนโดยไม่ใส่ตัวเลขนั้น
+""".strip()
+
+    empat = (
+        f"""4. Angka RTP, winrate, dan persen apa pun.
+   salah : RTP 96,4%
+   benar : angkanya lagi bagus
+5. Janji bahwa PEMBACANYA akan menang atau untung.
+   salah : main di sini pasti menang
+   benar : {nama} membayar yang menang"""
+        if judi
+        else f"""4. Angka persen dan skor yang tidak diberikan ke halaman ini.
+   salah : 98% pelanggan puas
+   benar : kebanyakan yang mencoba kembali lagi
+5. Janji tentang HASIL yang akan didapat pembacanya.
+   salah : dijamin berhasil
+   benar : {nama} mengurusnya sampai selesai"""
+    )
+
+    return f"""
+# JANGAN MENULIS INI (periksa sekali lagi sebelum menjawab)
+
+1. Lama proses dalam satuan waktu.
+   salah : diproses dalam hitungan detik / dalam 2 menit
+   benar : diproses langsung / begitu dikonfirmasi
+2. Jumlah member, pemain, atau pengguna.
+   salah : lebih dari 10.000 member aktif
+   benar : dipakai orang setiap hari
+3. Tahun berdiri dan nomor lisensi.
+   salah : berdiri sejak 2015 / Lisensi No. 8048
+   benar : {nama} beroperasi resmi
+{empat}
+
+Kalau ada angka yang kamu tidak yakin dari mana asalnya, tulis
+kalimatnya tanpa angka itu. Kalimat tanpa angka tetap terbit;
+kalimat berangka karangan dibuang seluruhnya oleh pemeriksa.
+""".strip()
 
 
 def build_template_content_prompt(
@@ -1954,6 +2671,46 @@ def build_template_content_prompt(
     language_code = brand.get("region", "id")
     language_name = brand.get("language_name", "Indonesia")
     aturan_brand = brand_confidence_rules(brand)
+
+    # Pilihan pengguna yang mengubah bunyi dan bentuk isi: nada,
+    # jenis halaman, pembaca yang dituju, dan keyword pendukung.
+    #
+    # Keduanya KOSONG kalau pengguna tidak memilih apa pun, dan itu
+    # disengaja - job yang dijalankan tanpa menyentuh kolom-kolom baru
+    # menghasilkan prompt yang sama persis dengan prompt sebelum brief
+    # ada. Seluruh penyetelan yang sudah terukur berdiri di atas
+    # prompt itu, jadi ia tidak boleh bergeser tanpa ada yang meminta.
+    #
+    # Keduanya berdiri di dalam brief, BUKAN di blok permintaan.
+    # Isinya tetap sepanjang satu run, jadi awalan prompt tiap giliran
+    # tetap identik dan cache prompt Ollama tidak batal - alasan yang
+    # sama dengan riwayat dan daftar angka halaman.
+    kreatif = brand.get("brief") or {}
+    baris_brief = brief_identity_lines(kreatif)
+    aturan_brief = brief_rule_blocks(kreatif, language_code)
+
+    # Isi FAQ mengikuti bidang halamannya. Bidang "gambling"
+    # mengembalikan kalimat yang sama persis seperti waktu daftarnya
+    # masih dipatok di sini.
+    #
+    # Namanya "topik_faq", bukan "aturan_faq". Nama yang kedua sudah
+    # dipakai jauh di bawah untuk hal yang sama sekali lain - spec
+    # slot faq_answer - dan memakainya di sini menimpa teks aturan
+    # ini dengan dict, atau dengan None kalau templatenya tidak punya
+    # slot jawaban FAQ. Terukur: seluruh aturan isi FAQ terbit sebagai
+    # kata "None" di dalam prompt, dan tidak ada yang gagal - promptnya
+    # tetap terkirim, cuma tanpa aturan yang paling menentukan isi FAQ.
+    topik_faq = faq_topic_rules(
+        brand.get("niche", "generic"),
+        language_code,
+        brand.get("niche_text", ""),
+    )
+
+    # Bidang halaman, dipakai memilih contoh di aturan bunyi dan di
+    # daftar larangan terakhir. Bawaannya "gambling" karena seluruh
+    # teks itu ditulis dan diukur di halaman judi - lihat keterangan
+    # di voice_rules().
+    bidang = brand.get("niche", "gambling")
 
     # Topik halaman ditulis sebagai satu frasa, bukan dua keterangan
     # terpisah.
@@ -2039,6 +2796,23 @@ def build_template_content_prompt(
                     else f"masing-masing maksimal {limit} karakter"
                 )
                 + f" ({label})"
+            )
+
+        # Peran yang tiap butirnya menunjuk tempat berbeda diminta
+        # berbeda SEJAK AWAL, bukan cuma diperbaiki belakangan.
+        #
+        # Penolak kembar di content_planner tetap ada dan tetap
+        # perlu - model kecil mengulang sendiri betapapun jelas
+        # perintahnya - tapi memperbaiki belakangan berarti satu
+        # giliran tambahan untuk tiap kelompok yang bertabrakan.
+        # Terukur pada halaman Thai terbit: empat belas tautan footer
+        # berbunyi sama, dan tidak satu baris pun di prompt yang
+        # pernah menyuruh model membedakannya.
+        if role in DISTINCT_ROLES and count > 1:
+            kebutuhan[-1] += (
+                " — tiap teks WAJIB berbeda satu sama lain; dua teks "
+                "yang sama, atau yang cuma beda satu kata di ujungnya, "
+                "dihitung salah"
             )
 
         contoh = rule.get("samples")
@@ -2128,11 +2902,22 @@ def build_template_content_prompt(
         # dijawab dengan judul template apa adanya, dan halamannya
         # terbit dengan "Keunggulan OSB99" di situs WAYANGPLAY.
         if rule.get("forbid_samples"):
+            # Slot milik situs lain tetap tidak diperlihatkan, bahkan
+            # sebagai larangan. Larangan pun sebuah contoh: yang
+            # dilarang menyalin "Gift Cards" masih bisa menuliskan
+            # padanannya, dan itu sama tidak diinginkannya.
+            ulang = list(rule.get("fresh") or [])
+
             tujuan.append(
                 f"\n{role} — tulis ulang, JANGAN salin yang di bawah:"
             )
             tujuan.extend(
-                f"  [{nomor}] DILARANG menulis ini lagi: {teks}"
+                (
+                    f"  [{nomor}] slot milik template asal - tulis teks "
+                    f"BARU tentang halaman ini"
+                    if nomor - 1 < len(ulang) and ulang[nomor - 1]
+                    else f"  [{nomor}] DILARANG menulis ini lagi: {teks}"
+                )
                 for nomor, teks in enumerate(contoh, start=1)
             )
             continue
@@ -2146,10 +2931,53 @@ def build_template_content_prompt(
         # yang memang isi, lalu ikut menuliskan nomor daftarnya juga -
         # terbit di halaman jadi sebagai "26. Cara Pesan" dan
         # "38. Inggris" di sepanjang menu.
+        # Teks milik situs lain diminta DIGANTI ISINYA, bukan
+        # dialihbahasakan.
+        #
+        # Bedanya terlihat di halaman jadi. Contoh "Gift Cards" di
+        # footer template toko mainan, diminta seperti contoh lain,
+        # dijawab dengan padanannya dalam bahasa halaman - dan
+        # halaman judi terbit dengan menu kartu hadiah yang rapi.
+        # Yang dibutuhkan dari contoh itu cuma bentuk dan panjangnya;
+        # isinya justru harus ditinggalkan.
+        # Teks milik situs lain TIDAK diperlihatkan sama sekali.
+        #
+        # Menandainya saja tidak cukup, dan itu terukur. Contohnya
+        # tetap ditampilkan dengan keterangan "jangan diterjemahkan"
+        # di sebelahnya, lalu halaman Indonesia 15 Agustus 2026 terbit
+        # dengan footer "Kartu Hadiah", "Ikuti Pesanan",
+        # "Pengembalian", dan "Kurang" - terjemahan rapi dari Gift
+        # Cards, Track My Order, Returns, dan Missing Pieces, di
+        # halaman baccarat. Model menuruti bentuk yang dilihatnya,
+        # bukan larangan yang dibacanya.
+        #
+        # Yang dibutuhkan dari contoh cuma dua hal: nomor urut supaya
+        # jawabannya jatuh di slot yang benar, dan panjangnya supaya
+        # muat di kotaknya. Keduanya bisa disebut tanpa memperlihatkan
+        # teks aslinya. Contohnya tetap ada di spec - pair_by_old_text
+        # memasangkan jawaban lewat teks lama itu - dan hanya prompt
+        # yang tidak melihatnya.
+        segar = list(rule.get("fresh") or [])
+        jatah_slot = list(rule.get("budgets") or [])
+
+        def tampil(nomor: int, teks: str) -> str:
+            if nomor - 1 < len(segar) and segar[nomor - 1]:
+                lebar = (
+                    jatah_slot[nomor - 1]
+                    if nomor - 1 < len(jatah_slot)
+                    else limit
+                )
+
+                return (
+                    f"  [{nomor}] (slot milik template asal - tulis teks "
+                    f"BARU tentang halaman ini, maksimal {lebar} karakter)"
+                )
+
+            return f"  [{nomor}] {teks}"
+
         tujuan.append(f"\n{role} — ganti berurutan:")
         tujuan.extend(
-            f"  [{nomor}] {teks}"
-            for nomor, teks in enumerate(contoh, start=1)
+            tampil(nomor, teks) for nomor, teks in enumerate(contoh, start=1)
         )
 
     # Pertanyaan yang benar-benar dipakai halaman yang sedang ngerank.
@@ -2238,10 +3066,22 @@ def build_template_content_prompt(
             mulai = int(aturan_faq.get("offset", 0))
             urutan = list(range(mulai, mulai + aturan_faq["count"]))
 
-        tanya = [
-            semua_tanya[index] if index < len(semua_tanya) else ""
-            for index in urutan
-        ]
+        # Pertanyaan yang berdiri di atas jawaban, dibaca dari
+        # halaman. Dipakai kalau daftar pertanyaan yang ditulis model
+        # tidak sampai ke nomor itu - lihat keterangan "asks" di
+        # derive_spec.
+        dibaca = list(aturan_faq.get("asks") or [])
+
+        def pertanyaan_ke(index: int) -> str:
+            if index < len(semua_tanya) and str(semua_tanya[index]).strip():
+                return str(semua_tanya[index])
+
+            if index < len(dibaca):
+                return str(dibaca[index])
+
+            return ""
+
+        tanya = [pertanyaan_ke(index) for index in urutan]
 
         if any(str(teks).strip() for teks in tanya):
             bagian_tanya = (
@@ -2259,6 +3099,28 @@ def build_template_content_prompt(
                 "jawabannya dimulai dengan ya atau tidak. Kalau "
                 "menanyakan BERAPA LAMA, jawabannya menyebut "
                 "waktunya.\n"
+                # Sesudah ya/tidak, LANGSUNG ke isinya.
+                #
+                # Tanpa baris ini, cara termurah menuruti aturan di
+                # atas adalah menyalin balik pertanyaannya sebagai
+                # kalimat berita. Terukur pada halaman terbit
+                # output/wayangplay-slot-gacor-20260819_232939:
+                #
+                #   tanya  : "Apakah deposit via QRIS di WAYANGPLAY
+                #             bisa langsung diproses?"
+                #   jawab  : "Ya, deposit via QRIS di WAYANGPLAY bisa
+                #             langsung diproses. Setelah kamu
+                #             konfirmasi transaksi, dana langsung
+                #             masuk ke akun."
+                #
+                # Kalimat pertamanya tidak menambah satu keterangan
+                # pun - pembaca sudah membacanya persis di atas.
+                "Sesudah kata ya atau tidak, langsung ke keterangannya. "
+                "JANGAN menulis ulang kalimat pertanyaannya sebagai "
+                "kalimat berita - pembaca baru saja membacanya tepat "
+                "di atas jawabanmu, dan mengulangnya menghabiskan "
+                "kalimat pertama untuk mengatakan yang sudah "
+                "diketahui.\n"
                 "Tanda [N] cuma penunjuk posisi, jangan ikut ditulis.\n"
                 + "\n".join(
                     f"  [{nomor}] {teks}"
@@ -2471,15 +3333,32 @@ def build_template_content_prompt(
     #
     # Yang menangkap angka yang tetap lolos ada di
     # generators/page_numbers.py, sesudah semua giliran selesai.
+    # Contoh angkanya mengikuti bidang. Aturannya tidak berubah -
+    # persen tetap dilarang di bidang mana pun - tapi contoh "RTP
+    # 96,4%" di halaman kursus menaruh kosakata judi di dalam
+    # larangan yang seharusnya menahannya.
+    contoh_persen = (
+        '"RTP 96,4%", bukan "RTP di atas 96%"'
+        if bidang == "gambling"
+        else '"98% pelanggan puas", bukan "kepuasan di atas 90%"'
+    )
+
+    contoh_samar = (
+        '"RTP-nya lagi tinggi", "angkanya lagi stabil", '
+        '"lagi bagus sejak pagi"'
+        if bidang == "gambling"
+        else '"lagi banyak yang pakai", "sedang ramai", '
+        '"responsnya lagi cepat"'
+    )
+
     bagian_angka = (
-        "- JANGAN menulis angka persen sama sekali. Bukan \"RTP "
-        "96,4%\", bukan \"RTP di atas 96%\", bukan angka apa pun yang "
+        "- JANGAN menulis angka persen sama sekali. Bukan "
+        f"{contoh_persen}, bukan angka apa pun yang "
         "diikuti tanda persen.\n"
         "  Pengguna sudah menyatakannya dengan jelas: berapa persis "
         "angkanya tidak penting. Yang dicari pembaca bukan angkanya "
         "melainkan apakah sedang bagus atau tidak, jadi tulis "
-        "\"RTP-nya lagi tinggi\", \"angkanya lagi stabil\", \"lagi "
-        "bagus sejak pagi\" - kalimat yang memang dipakai orang.\n"
+        f"{contoh_samar} - kalimat yang memang dipakai orang.\n"
         "  Angka desimal yang sama diulang di sepanjang halaman adalah "
         "tanda paling cepat bahwa halaman ditulis mesin, karena tidak "
         "ada orang yang menulis satu angka persis sama di enam tempat "
@@ -2535,23 +3414,79 @@ def build_template_content_prompt(
     bagian_terpakai = ""
 
     if sudah:
+        def kumpulkan(daftar_peran, saring_spec: bool) -> list[str]:
+            """
+            Teks yang sudah tertulis untuk sekelompok peran.
+
+            saring_spec menentukan apakah peran yang TIDAK diminta di
+            giliran ini ikut dikumpulkan. Untuk label dan menu
+            jawabannya tidak: yang diingatkan cuma peran yang sedang
+            ditulis, karena yang dijaga di sana adalah dua label
+            bersebelahan yang berbunyi sama.
+
+            Untuk prosa jawabannya ya. Deskripsi ditulis di giliran
+            PERTAMA dan tidak pernah diminta lagi sesudahnya, jadi
+            menyaringnya dengan spec giliran ini berarti giliran yang
+            menulis paragraf tidak pernah melihat deskripsi yang
+            sedang disalinnya.
+            """
+            hasil: list[str] = []
+
+            for role in daftar_peran:
+                if saring_spec and role not in spec:
+                    continue
+
+                hasil.extend(
+                    str(teks).strip()
+                    for teks in (sudah.get(role) or [])
+                    if str(teks).strip()
+                )
+
+            # Yang terakhir ditulis yang paling perlu diingat, karena
+            # itulah yang paling mungkin diulang.
+            return list(dict.fromkeys(reversed(hasil)))[
+                :MAX_USED_REMINDERS
+            ]
+
+        label_terpakai = kumpulkan(REPEAT_PRONE_ROLES, True)
+        prosa_terpakai = kumpulkan(PROSE_REPEAT_ROLES, False)
+
+        # Diselang-seling, bukan disambung.
+        #
+        # Jatah lebarnya dipotong di MAX_USED_CHARS, dan daftar yang
+        # disambung berarti kelompok yang berdiri di belakang tidak
+        # pernah kebagian sama sekali begitu kelompok pertama sudah
+        # menghabiskan jatahnya. Diselang-seling, keduanya kebagian
+        # yang paling baru lebih dulu.
         terpakai: list[str] = []
 
-        for role in REPEAT_PRONE_ROLES:
-            if role not in spec:
-                continue
+        for kiri, kanan in zip_longest(prosa_terpakai, label_terpakai):
+            for satu in (kiri, kanan):
+                if satu:
+                    terpakai.append(satu)
 
-            terpakai.extend(
-                str(teks).strip()
-                for teks in (sudah.get(role) or [])
-                if str(teks).strip()
-            )
+        terpakai = list(dict.fromkeys(terpakai))[:MAX_USED_REMINDERS]
 
-        # Yang terakhir ditulis yang paling perlu diingat, karena
-        # itulah yang paling mungkin diulang.
-        terpakai = list(dict.fromkeys(reversed(terpakai)))[
-            :MAX_USED_REMINDERS
-        ]
+        # Dipotong dua kali: tiap teks dipendekkan, lalu daftarnya
+        # berhenti begitu jatah lebarnya habis. Lihat MAX_USED_CHARS
+        # untuk sebabnya - tanpa ini prompt giliran ketiga melewati
+        # seluruh context pada template yang paragrafnya banyak.
+        ringkas: list[str] = []
+        lebar = 0
+
+        for teks in terpakai:
+            potong = teks[:USED_REMINDER_WIDTH].rstrip()
+
+            if len(teks) > USED_REMINDER_WIDTH:
+                potong += "..."
+
+            if lebar + len(potong) > MAX_USED_CHARS:
+                break
+
+            ringkas.append(potong)
+            lebar += len(potong)
+
+        terpakai = ringkas
 
         if terpakai:
             bagian_terpakai = (
@@ -2632,18 +3567,38 @@ def build_template_content_prompt(
     # Riwayatnya yang menentukan pergantian topik: sudut yang sudah
     # dipakai halaman sebelumnya dilewati, bukan sekadar diharapkan
     # tidak terpilih lagi oleh benih.
-    sudut_judul = pick_title_angle(
-        brand_name,
-        keyword,
-        brand.get("variation", ""),
-        (riwayat or {}).get(TITLE_ANGLE_MARK) or (),
+    contoh_judul = title_examples(brand_name, bidang)
+
+    contoh_angka_karangan = (
+        '"100.000+ spin per hari" atau "diproses dalam 2 detik"'
+        if bidang == "gambling"
+        else '"10.000+ pemakai per hari" atau "diproses dalam 2 detik"'
     )
 
-    cara_judul = pick_title_frame(
-        brand_name,
-        keyword,
-        brand.get("variation", ""),
-        (riwayat or {}).get(TITLE_FRAME_MARK) or (),
+    contoh_tur_fitur = (
+        '"Setelah lihat RTP live, saya pilih slot\n'
+        '  dengan angka 94,3% lalu bermain"'
+        if bidang == "gambling"
+        else '"Setelah membaca daftar fiturnya, saya memilih\n'
+        '  paket yang skornya paling tinggi lalu memakainya"'
+    )
+
+    # Contoh persen di aturan TITLE ditulis terpisah dari contoh di
+    # aturan isi. Keduanya sempat memakai satu variabel, dan itu
+    # menukar kalimat aturan title yang sudah disetel ("Bonus 100%",
+    # 'Cukup "RTP" atau "Bonus"') dengan kalimat dari blok lain.
+    # Aturannya sama, tapi kata-katanya sudah diukur di tempatnya
+    # masing-masing.
+    contoh_persen_judul = (
+        '"RTP 96,4%", bukan "Bonus 100%"'
+        if bidang == "gambling"
+        else '"98% pelanggan puas", bukan "Diskon 100%"'
+    )
+
+    contoh_kata_saja = (
+        '"RTP" atau "Bonus"'
+        if bidang == "gambling"
+        else '"Diskon" atau "Promo"'
     )
 
     brief = f"""
@@ -2661,16 +3616,16 @@ Keyword utama: {keyword}
 Nama brand: {brand_name or "-"}
 Bahasa isi halaman: {language_name}
 Negara sasaran: {brand.get("region_label", "Indonesia")}
-
+{baris_brief}
 {LANGUAGE_ORDERS.get(language_code, LANGUAGE_ORDERS["id"])}
-
+{aturan_brief}
 ## Yang Perlu Diketahui Dari Halaman Pertama Google
 Intent pencarian: {insight.get("search_intent", "-")}
 Ringkasan SERP: {insight.get("serp_summary", "-")}
 
 Celah konten yang bisa diambil:
 {format_list(insight.get("content_gaps", []), limit=6)}
-{format_must_cover(insight, with_reason=False)}{blok_tema_serp}{blok_tanya_serp}{serp_word_bank(analysis)}{format_style_examples(keyword, brand_name, brand.get("variation", ""))}
+{format_must_cover(insight, with_reason=False)}{blok_tema_serp}{blok_tanya_serp}{serp_word_bank(analysis)}{format_style_examples(keyword, brand_name, brand.get("variation", ""), language_code, bidang)}
 # ATURAN
 
 - Teks artikel — title, meta_description, h1, heading, paragraph,
@@ -2707,14 +3662,13 @@ Celah konten yang bisa diambil:
   tanya, dan pertanyaan yang wajar diajukan orang yang hendak
   memakai {brand_name or "situs ini"} - bukan pertanyaan
   ensiklopedia tentang "{keyword}" pada umumnya.
-- ISI FAQ SEPUTAR SLOT, dan cuma itu: cara mainnya, cara daftar,
-  deposit dan penarikan, bonus, main dari HP, keamanan akun, arti
-  istilah yang dipakai pemain. Ini permintaan pengguna, dan sebabnya
-  ada di halaman yang terbit: blok FAQ-nya berisi "What Sets ASG
-  Apart?" dan "Why Study at ASG??" - pertanyaan milik pemilik
-  template, tentang sebuah sekolah, di halaman slot. Pertanyaan yang
-  tidak nyambung dengan slot lebih baik tidak ditulis sama sekali;
-  yang kosong ditambal NEIIU dengan tanya-jawab seputar slot.
+{topik_faq}
+  Ini permintaan pengguna, dan sebabnya ada di halaman yang terbit:
+  blok FAQ-nya berisi "What Sets ASG Apart?" dan "Why Study at
+  ASG??" - pertanyaan milik pemilik template, tentang sebuah
+  sekolah, di halaman yang topiknya sudah lain sama sekali.
+  Pertanyaan yang tidak nyambung dengan topik halaman ini lebih baik
+  tidak ditulis sama sekali; yang kosong ditambal NEIIU sendiri.
 - Jangan menyalin, menerjemahkan, atau menata ulang pertanyaan yang
   sudah berdiri di template. Pertanyaan yang cuma ditukar nama
   brandnya dihitung sebagai tidak menjawab.
@@ -2731,6 +3685,13 @@ Celah konten yang bisa diambil:
   yang menanyakan hal sama dengan susunan kata berbeda dihitung
   satu dan akan dibuang. "Apa perbedaan A dan B?" dan "Apakah A
   sama dengan B?" adalah satu pertanyaan, bukan dua.
+- Tiap faq_question dibuka KATA TANYA YANG BERBEDA. Kalau yang
+  pertama dibuka "Apa", yang kedua TIDAK boleh dibuka "Apa" lagi -
+  pakai "Bagaimana", "Berapa", "Kapan", "Di mana", "Bisakah",
+  "Perlukah", atau padanannya dalam bahasa halaman. Blok FAQ yang
+  seluruh pertanyaannya dibuka kata yang sama terbaca seperti satu
+  pertanyaan yang ditulis ulang berkali-kali, dan itu justru yang
+  membuat pembaca berhenti membacanya.
 - faq_answer ke-N adalah jawaban untuk faq_question ke-N. Jawab
   yang ditanyakan, jangan menulis kalimat lain yang kebetulan
   sama topiknya.
@@ -2753,8 +3714,8 @@ Celah konten yang bisa diambil:
 
 {aturan_brand}
 
-{VOICE_RULES}{bagian_angka}- JANGAN mengarang angka DI LUAR yang disebutkan di atas. Angka
-  seperti "100.000+ spin per hari" atau "diproses dalam 2 detik"
+{voice_rules(language_code, bidang)}{bagian_angka}- JANGAN mengarang angka DI LUAR yang disebutkan di atas. Angka
+  seperti {contoh_angka_karangan}
   yang muncul begitu saja adalah tanda paling cepat bahwa halaman
   ditulis mesin, karena angkanya saling bertabrakan antar paragraf.
   Tulis tanpa angka kalau ragu.
@@ -2806,9 +3767,8 @@ Aturan ulasan:
   agak sempit di layar kecil - lalu bagaimana akhirnya. Halaman yang
   semua ulasannya bintang lima dan tidak ada satu pun keluhan tidak
   dipercaya siapa pun.
-- Ulasan BUKAN tur fitur. "Setelah lihat RTP live, saya pilih slot
-  dengan angka 94,3% lalu bermain" itu bunyi orang yang sedang
-  memperagakan produk, bukan orang yang sedang bercerita. Yang
+- Ulasan BUKAN tur fitur. {contoh_tur_fitur} itu bunyi orang yang
+  sedang memperagakan produk, bukan orang yang sedang bercerita. Yang
   ditulis: apa yang dia lakukan, apa yang terjadi, dan bagaimana
   rasanya - dengan kata-katanya sendiri.
 - Yang diceritakan harus hal yang DISEBUT DI TITLE halaman ini.
@@ -2889,9 +3849,8 @@ Aturan title dan meta_description:
   Tanda pisah antara bagian 1 dan 2 dipasang NEIIU sesudah jawabanmu,
   jadi kamu tidak perlu - dan tidak boleh - menulis tanda pisah
   sendiri.
-    benar : {brand_name} Update Pola Slot Gacor Tiap Pagi Buat
-            Pemain Baru
-    salah : Rahasia Spin di {brand_name} Yang Membuka Peluang
+    benar : {contoh_judul["benar_bentuk"]}
+    salah : {contoh_judul["salah_tengah"]}
     salah : {brand_name} menghadirkan layanan dengan sistem modern
   Yang kedua salah karena nama situs berdiri di tengah kalimat. Yang
   ketiga salah karena namanya melebur jadi subjek kalimat. Keduanya
@@ -2902,8 +3861,7 @@ Aturan title dan meta_description:
   di seluruh brief ini, dan yang paling sering dilanggar. Judul yang
   terbit dari sini pernah berbunyi:
 
-    {brand_name} | Update Pola Slot Gacor Tiap Pagi 2026 Akurat 24
-    Jam Hari
+    {contoh_judul["tumpukan"]}
 
   Enam kata pertamanya sudah judul yang utuh. "Akurat 24 Jam Hari"
   bukan kelanjutannya melainkan empat kata yang didempetkan di
@@ -2915,8 +3873,8 @@ Aturan title dan meta_description:
   Kalau judulmu masih kurang panjang, yang ditambah keterangan yang
   MENERANGKAN sesuatu - untuk siapa, dipakai kapan, apa yang tidak
   perlu disiapkan, berapa lama - bukan kata sifat berikutnya:
-    salah : {brand_name} Deposit QRIS Cepat Aman Terpercaya Resmi
-    benar : {brand_name} Deposit QRIS Tanpa Potongan Buat Pemain Baru
+    salah : {contoh_judul["salah_sifat"]}
+    benar : {contoh_judul["benar_sifat"]}
   Kalau tidak ada keterangan yang benar-benar kamu ketahui, judulnya
   berhenti lebih pendek. Judul pendek yang berbahasa Indonesia jauh
   lebih baik daripada judul panjang yang ekornya tumpukan kata.
@@ -2929,17 +3887,30 @@ Aturan title dan meta_description:
 - Janjinya ditulis Dengan Huruf Kapital Di Tiap Kata, kecuali kata
   sambung pendek seperti "dan", "di", "untuk", "dengan". Bentuk itu
   yang dipakai seluruh contoh title di bawah.
-- SUDUT JUDUL HALAMAN INI SUDAH DIPILIH, dan bukan pilihanmu:
-  {sudut_judul}.
-  Judulnya berangkat dari situ. Ini bukan saran - halaman lain untuk
-  keyword yang sama mendapat sudut yang berbeda, dan kalau semuanya
-  kembali ke sudut yang sama, halaman-halaman itu saling berebut
-  pembaca yang sama.
-- CARA BERCERITANYA JUGA SUDAH DIPILIH: {cara_judul}.
-  Sudut menentukan judulnya tentang apa; ini menentukan bagaimana ia
-  diucapkan. Keduanya harus terasa di judul yang kamu tulis.
-- Judul yang "benar tapi datar" dihitung GAGAL di sini. "Slot Gacor
-  Update Harian RTP Terbaru" tidak salah satu kata pun, dan justru
+- SUDUT JUDUL HALAMAN INI KAMU YANG MENENTUKAN. Orang yang mengetik
+  "{keyword}" sedang mencari sesuatu yang tertentu; putuskan sendiri
+  apa yang paling berguna dijanjikan kepadanya - bisa soal cara
+  masuk, cara mulai, apa yang tersedia, apa yang perlu disiapkan,
+  atau hal lain yang benar-benar ada di halaman ini - lalu tulis satu
+  judul yang menjanjikan hal itu saja.
+- JANGAN memaksakan kosakata apa pun ke dalam judul. Angka, persen,
+  "sumber data", "terbaru", "diperbarui", "RTP", "maxwin", "gampang
+  menang" - kalau sudut yang kamu pilih tidak benar-benar
+  membutuhkannya, jangan ditulis. Judul yang menempelkan kata-kata
+  itu supaya terlihat lengkap terbaca seperti daftar keyword, bukan
+  seperti kalimat yang ditulis orang.
+- SATU gagasan untuk satu judul. Dua atau tiga janji yang
+  didempetkan bukan judul yang lebih kaya - ia judul yang tidak
+  menjanjikan apa-apa, karena pembaca hasil pencarian membacanya
+  sambil lalu dan cuma menangkap yang pertama.
+- JANGAN menyalin kalimat perintah ini ke dalam judul. Judul ditulis
+  untuk pembaca hasil pencarian, bukan untuk menjawab daftar ini.
+- Judulnya harus SELESAI sebagai kalimat. Jangan menempelkan kata di
+  ujungnya cuma supaya panjangnya cukup - judul yang berakhir
+  "..., Kemenangan" atau "..., Aman" adalah judul yang ekornya tidak
+  terikat ke kalimat sebelumnya, dan itu dihitung gagal meskipun
+  panjangnya pas. Kalau kehabisan bahan, berhenti lebih pendek.
+- Judul yang "benar tapi datar" dihitung GAGAL di sini. "{contoh_judul["datar"]}" tidak salah satu kata pun, dan justru
   itu soalnya: ia cocok untuk situs mana saja, jadi pembaca sudah
   pernah membacanya di tempat lain. Contoh title di bawah ini milik
   pengguna, dan lihat betapa jauh bedanya - ada yang menjulukinya
@@ -2953,24 +3924,32 @@ Aturan title dan meta_description:
   ditumpuk. Judul yang menyebutkan dua atau tiga hal sekaligus
   terbaca sebagai potongan yang disambung, dan pembaca hasil
   pencarian berhenti di potongan pertama.
-    salah : {brand_name} Slot Gacor 2026 Update Harian Live Terbaru
-            Paling Akurat
-    benar : {brand_name} Update Pola Slot Gacor Tiap Pagi Buat
-            Pemain Baru
+    salah : {contoh_judul["salah_tumpuk"]}
+    benar : {contoh_judul["benar_tunggal"]}
   Yang salah bukan panjangnya melainkan bahwa ia tiga judul yang
   didempetkan. Yang benar panjangnya hampir sama, tapi seluruhnya
   satu kalimat: satu topik, satu keterangan, dan tiap katanya
   menerangkan kata di sebelahnya. Kalau sebuah kata bisa dibuang
   tanpa mengubah janjinya, buang.
 - JANGAN menulis angka persen di title MAUPUN di meta description.
-  Bukan "RTP 96,4%", bukan "Bonus 100%", bukan "88%" - tidak satu
+  Bukan {contoh_persen_judul}, bukan "88%" - tidak satu
   angka pun yang diikuti tanda persen, berapa pun nilainya. Cukup
-  "RTP" atau "Bonus", dan itu pun hanya kalau sudut halaman ini
+  {contoh_kata_saja}, dan itu pun hanya kalau sudut halaman ini
   memang tentang hal itu.
   Angka di dua tempat ini memakan ruang yang seharusnya dipakai
   janjinya, angka persisnya bukan yang dicari orang di hasil
   pencarian, dan angka yang sama muncul di puluhan halaman adalah
   tanda paling cepat bahwa halamannya dibuat mesin.
+- meta_description WAJIB DIBUKA NAMA SITUS. Kata pertamanya nama
+  situs, lalu satu kata kerja yang menyatakan apa yang
+  disediakannya: menyediakan, menghadirkan, menyajikan, menawarkan,
+  menjamin, atau adalah.
+    salah : "Pemain baru bisa mulai bermain slot online di NAMA ..."
+    benar : "NAMA menghadirkan slot online yang bisa dibuka ..."
+  Jangan dibuka dengan menyapa pembaca dan jangan dibuka dengan
+  kata kerja tanpa pelakunya. Nama situs berdiri di depan supaya
+  pembaca hasil pencarian tahu situs mana yang sedang menawarkan,
+  sebelum ia membaca apa yang ditawarkan.
 - Sudut pandang yang dipilih di title dipakai lagi di h1,
   paragraf, FAQ, dan ulasan. Satu halaman satu sudut pandang.
 {bagian_riwayat}""".strip()
@@ -2985,223 +3964,23 @@ tidak boleh dikira-kira. Tulis persis sebanyak ini:
 {chr(10).join(kebutuhan)}
 {bagian_tema}{bagian_cetakan}{bagian_artikel}{bagian_contoh_tanya}{bagian_tanya}{bagian_fungsi}{bagian_bentuk}{bagian_padanan}{bagian_terpakai}""".rstrip()
 
-    return (
-        content_planner_system_prompt(language_code),
-        f"{brief}\n\n{permintaan}",
-    )
-
-
-def build_content_plan_prompt(
-    analysis: dict,
-    insight: dict,
-    template: dict,
-    brand: dict,
-) -> tuple[str, str]:
-    """
-    Menyusun prompt untuk membuat isi landing page baru.
-    """
-    keyword = analysis["keyword"]
-    blueprint = analysis["blueprint"]
-    target = blueprint["target"]
-
-    # Target panjang diambil dari top 5, bukan rata-rata semua,
-    # supaya halaman baru mengejar yang benar-benar menang.
-    word_target = int(
-        max(
-            target["word_count_top5_median"],
-            target["word_count_median"],
-            900,
-        )
-    )
-
-    section_target = max(int(target["h2_median"]), 5)
-    section_target = min(section_target, 9)
-
-    structure_text = format_list(
-        [
-            f"{section['order']}. {section['type']} "
-            f"({section['level']}, {section['subheading_count']} subheading)"
-            for section in template["structure"]
-        ],
-        limit=12,
-    )
-
-    disclaimer_rule = (
-        "- Sisipkan nada informatif dan netral, bukan ajakan berlebihan."
-        if brand.get("disclaimer")
-        else "- Fokus ke informasi yang berguna untuk pembaca."
-    )
-
-    brand_name = brand.get("site_name", "").strip()
-    language_code = brand.get("region", "id")
-    language_name = brand.get("language_name", "Indonesia")
-    aturan_brand = brand_confidence_rules(brand)
-
-    blok_tema_wajib = blok_daftar(
-        "## Tema Yang Wajib Disinggung",
-        [item["term"] for item in blueprint["heading_topics"]],
-        limit=12,
-    )
-
-    blok_entity = blok_daftar(
-        "## Entity Yang Sering Muncul Di Kompetitor",
-        [item["entity"] for item in blueprint["common_entities"]],
-        limit=12,
-    )
-
-    blok_tanya_faq = blok_daftar(
-        "## Pertanyaan Yang Harus Dijawab Di FAQ",
-        blueprint["people_also_ask"] + blueprint["competitor_questions"],
-        limit=10,
-    )
-
-    user_prompt = f"""
-# BRIEF LANDING PAGE BARU
-
-Keyword utama: {keyword}
-Nama brand: {brand_name or "-"}
-Bahasa isi halaman: {language_name}
-Negara sasaran: {brand.get("region_label", "Indonesia")}
-
-{LANGUAGE_ORDERS.get(language_code, LANGUAGE_ORDERS["id"])}
-
-## Bedanya Keyword dan Brand
-Keyword "{keyword}" adalah topik yang dicari orang di Google.
-Brand "{brand_name}" adalah nama situs yang menyajikan halaman ini.
-Keduanya berbeda dan tidak boleh dipertukarkan.
-
-## Hasil Analisis SERP
-Intent pencarian: {insight.get("search_intent", "-")}
-Ringkasan SERP: {insight.get("serp_summary", "-")}
-
-Bukti yang mendasari intent itu:
-{format_list(insight.get("intent_evidence", []), limit=5)}
-
-Celah konten yang bisa diambil:
-{format_list(insight.get("content_gaps", []), limit=8)}
-
-Strategi menang:
-{format_list(insight.get("winning_strategy", []), limit=8)}
-{format_must_cover(insight)}
-
-## Target Yang Harus Dikejar
-Total kata halaman: sekitar {word_target} kata
-Jumlah section (H2): {section_target} section
-Panjang title: {TITLE_MIN} sampai {TITLE_MAX} karakter
-Panjang meta description: {META_MIN} sampai {META_MAX} karakter
-Keyword density wajar: 0.8% sampai 2%
-{serp_word_bank(analysis)}
-
-## Struktur Halaman Acuan Yang Ngerank
-Sumber acuan: {template["source_domain"]}
-{structure_text}
-{blok_tema_wajib}{blok_entity}{blok_tanya_faq}
-# TUGAS
-
-Susun isi landing page lengkap:
-
-1. title — memuat brand "{brand_name}" DAN keyword "{keyword}",
-   panjangnya {TITLE_MIN} sampai {TITLE_MAX} karakter dan WAJIB
-   melewati {TITLE_MIN}. Katanya diambil dari "Bahan Kata Untuk
-   Title Dan Deskripsi" di atas, bukan dikarang dari nol.
-   Bentuknya dipatok tiga bagian, urut: nama situs "{brand_name}"
-   berdiri PALING DEPAN dan sendirian, lalu topiknya, lalu SATU
-   keterangan - "{brand_name} {keyword.title()} ...".
-   Tanda pisah di antara keduanya dipasang NEIIU sesudah jawabanmu,
-   jadi jangan menulis tanda pisah sendiri. Nama situs yang berdiri
-   di tengah kalimat, seperti "{keyword.title()} di {brand_name}
-   ...", tidak dipakai: pembaca hasil pencarian jadi tidak punya
-   satu titik pun untuk berhenti dan tahu ini situs apa.
-   Jatah panjangnya diisi KETERANGAN, bukan kata sifat. Kalau
-   judulnya masih kurang panjang, yang ditambah untuk siapa, dipakai
-   kapan, apa yang tidak perlu disiapkan - bukan "akurat",
-   "terpercaya", "24 jam", "hari ini" yang ditumpuk di ekornya.
-   Dua kata penyangat berdampingan di ujung judul membuat judulnya
-   diminta ulang, dan judul yang berhenti lebih pendek karena
-   keterangannya memang tidak ada jauh lebih baik daripada judul
-   panjang yang ekornya tumpukan kata.
-2. meta_description — {META_MIN} sampai {META_MAX} karakter dan
-   WAJIB melewati {META_MIN}, memuat keyword dan sebutkan brand
-   "{brand_name}" sekali. Bagian terpentingnya ditulis di depan,
-   karena Google memotong tampilannya di sekitar 155 karakter.
-3. slug — huruf kecil, dipisah tanda hubung, memuat keyword.
-4. h1 — berbeda susunan kata dari title, tetap memuat keyword dan
-   brand "{brand_name}".
-4b. breadcrumb — jalur letak halaman ini, 2 sampai 4 tingkat, urut
-   dari yang paling umum ke halaman ini sendiri.
-   - Tingkat pertama selalu beranda: tulis "Beranda" untuk bahasa
-     Indonesia, atau padanannya dalam bahasa halaman.
-   - Tingkat terakhir adalah halaman ini. Tulis ringkas, 2 sampai 5
-     kata, bukan seluruh title.
-   - Tingkat di tengah adalah kategori topiknya, diambil dari
-     "Topik yang wajib terbahas" dan intent pencarian di atas.
-     Ini yang dimaksud jalur berdasarkan riset: kategorinya
-     mengikuti apa yang benar-benar dicari orang untuk
-     "{keyword}", bukan nama menu yang kebetulan ada di template.
-   - Jangan memuat nama brand di tingkat mana pun.
-5. intro — 2 sampai 3 paragraf pembuka yang langsung menjawab intent.
-6. sections — {section_target} section. Setiap section punya:
-   - heading deskriptif
-   - type: paragraph, list, table, steps, atau cta
-   - paragraphs: isi penjelasan
-   - items: poin-poin kalau tipenya list, table, atau steps
-   Kalau tipenya paragraph, biarkan items kosong.
-   Kalau tipenya list atau steps, isi minimal 4 item.
-   Pilihan sectionnya BUKAN karangan bebas: dahulukan "Topik yang
-   wajib terbahas" di atas, karena daftar itu hasil membaca halaman
-   yang sedang menang di keyword ini. Sisa jatah section baru diisi
-   celah konten yang belum digarap kompetitor. Kalau satu topik
-   wajib tidak masuk akal untuk halaman ini, lewati topiknya - tapi
-   jangan melewatinya cuma karena ada ide lain yang terdengar lebih
-   menarik.
-7. faq — 6 sampai 8 pertanyaan beserta jawabannya.
-8. keywords — variasi keyword turunan yang dipakai di halaman.
-9. reviews — 4 ulasan pemakai. Tiap ulasan punya:
-   - name: satu nama depan yang lazim di zona ini
-   - rating: angka 4.0 sampai 5.0, jangan semuanya 5.0
-   - text: 2 sampai 3 kalimat tentang pengalaman memakai
-     halaman atau layanannya
-   Jangan menulis tanggal. NEIIU yang memasangnya.
-10. ratings — 3 aspek layanan yang dinilai. Tiap aspek punya:
-   - label: nama aspeknya, misalnya kecepatan akses atau
-     kelengkapan pilihan
-   - value: angka 4.0 sampai 5.0
-
-Aturan tambahan:
-- Total seluruh teks harus mendekati {word_target} kata.
-- Jangan mengulang kalimat yang sama di section berbeda.
-- Setiap section membahas sudut yang berbeda.
-{disclaimer_rule}
-
-{VOICE_RULES}
-
-{aturan_brand}
-
-Aturan brand:
-- Sebut "{brand_name}" di paragraf pembuka, sekali saja.
-- Sebut "{brand_name}" di section penutup atau CTA.
-- Di seluruh halaman, brand cukup muncul 3 sampai 5 kali.
-  Menyebutnya di setiap paragraf membuat halaman terbaca seperti
-  iklan dan menurunkan kualitasnya di mata pembaca.
-- Jangan menulis brand sebagai bagian dari keyword, misalnya
-  "{brand_name} gacor". Keduanya berdiri sendiri.
-
-Aturan ulasan:
-- Tulis ulasan yang membahas hal yang bisa dilihat sendiri oleh
-  pembaca: kecepatan halaman, kemudahan mencari sesuatu,
-  kelengkapan informasi, tampilan di ponsel.
-- Ulasan boleh menyebut hal yang memang disanggupi "{brand_name}" -
-  withdrawnya cair, bantuannya dibalas, situsnya bisa dibuka - dan
-  menyebutnya sebagai pengalaman yang sudah terjadi, bukan sebagai
-  harapan.
-- Jangan menulis ulasan yang menjanjikan hasil, keuntungan, atau
-  kemenangan bagi pembacanya. Ulasan semacam itu melanggar aturan
-  sebagian besar platform iklan.
-- Setiap ulasan menyoroti hal yang berbeda. Empat ulasan yang
-  isinya sama terbaca sebagai ulasan yang dibuat satu orang.
-""".strip()
+    # Daftar larangan berdiri PALING BAWAH, sesudah blok permintaan.
+    #
+    # Isinya sudah disebut di brief, dan diulang di sini bukan karena
+    # lupa: yang dibaca terakhir yang paling berpengaruh pada model
+    # kecil, dan brief di jalur ini panjangnya ribuan token. Aturan
+    # yang berdiri di sepertiga awal prompt selebar itu terbukti
+    # dilewati - lihat keterangan di forbidden_claims_block.
+    #
+    # Diletakkan di blok permintaan, BUKAN di brief. Brief harus tetap
+    # identik antar giliran supaya cache prompt Ollama tidak batal,
+    # dan blok ini memang berubah-ubah panjangnya mengikuti bidang.
+    # Isinya sendiri tetap sepanjang satu run, jadi tidak ada yang
+    # hilang dari sisi mutu.
+    larangan = forbidden_claims_block(brand_name, language_code, bidang)
 
     return (
         content_planner_system_prompt(language_code),
-        user_prompt,
+        f"{brief}\n\n{permintaan}\n\n{larangan}",
     )
+

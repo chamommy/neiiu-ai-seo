@@ -96,14 +96,115 @@ def check_length(
         )
 
 
+def check_head_pair(
+    page: dict,
+    amp_html: str,
+    amp_url: str,
+    brand_name: str,
+    problems: list[str],
+    passed: list[str],
+) -> None:
+    """
+    Memeriksa dua hal yang cuma kelihatan kalau kedua berkas diadu.
+
+    Pertama, nama situs di title. Bentuk judul yang diminta pengguna
+    menaruhnya paling depan, dan itu ditegakkan enforce_title_shape -
+    tapi penegak itu punya jalan keluar (judul yang jatahnya hampir
+    habis dipakai nama situsnya sendiri terbit apa adanya), dan tidak
+    ada satu pun lapisan sesudahnya yang mengatakan kalau itu terjadi.
+
+    Kedua, title dan deskripsi halaman AMP. Keduanya diisi dari isi
+    yang sama dengan halaman landing, jadi dua teks yang berbeda
+    berarti salah satunya tidak kebagian - dan yang terbit di
+    tempatnya kalimat pemilik template.
+
+    Terukur pada halaman yang benar-benar terbit 16 Agustus 2026:
+
+      landing : Cara Akses Slot Gacor di HP dengan Link Resmi
+      AMP     : WAYANGPLAY - Solusi Deposit QRIS yang Cepat dan Praktis
+
+    Yang pertama 44 karakter dan tidak menyebut nama situs sama
+    sekali; yang kedua judul milik template dengan nama brandnya saja
+    yang tertukar - "Solusi Deposit QRIS ... yang Cepat dan Praktis"
+    adalah kalimat pemilik template, dan keywordnya tidak ada di
+    situ. Dua halaman yang seharusnya satu maksud terbit dengan dua
+    judul yang tidak berhubungan, dan tidak satu pun pemeriksaan yang
+    berjalan waktu itu keberatan.
+    """
+    judul = str(page.get("title") or "")
+
+    nama = str(brand_name or "").strip()
+
+    if nama:
+        if re.search(re.escape(nama), judul, re.IGNORECASE):
+            passed.append("Nama situs ada di title.")
+        else:
+            problems.append(
+                f'Title tidak menyebut nama situs "{nama}". Bentuk '
+                "judul yang dipakai NEIIU menaruhnya paling depan, "
+                "jadi judul tanpa nama berarti penegak bentuknya "
+                "menyerah - biasanya karena jatah lebar slot title "
+                "di template hampir habis dipakai namanya sendiri."
+            )
+
+    if not amp_html:
+        return
+
+    amp = parse_html(amp_html, amp_url or page_url_of(page))
+
+    pasangan = (
+        ("Title", judul, str(amp.get("title") or "")),
+        (
+            "Meta description",
+            str(page.get("meta_description") or ""),
+            str(amp.get("meta_description") or ""),
+        ),
+    )
+
+    for label, landing, versi_amp in pasangan:
+        satu = " ".join(landing.split())
+        dua = " ".join(versi_amp.split())
+
+        if not satu or not dua:
+            problems.append(
+                f"{label} kosong di salah satu berkas "
+                f"(landing: {len(satu)} karakter, AMP: {len(dua)})."
+            )
+        elif satu == dua:
+            passed.append(f"{label} halaman AMP sama dengan landing.")
+        else:
+            problems.append(
+                f"{label} halaman AMP berbeda dari halaman landing, "
+                "padahal keduanya diisi dari isi yang sama. Berarti "
+                "salah satu slotnya tidak kebagian teks baru dan "
+                f"terbit dengan kalimat pemilik template. "
+                f"Landing: \"{satu[:60]}\". AMP: \"{dua[:60]}\"."
+            )
+
+
+def page_url_of(page: dict) -> str:
+    """
+    Alamat halaman yang sudah terbaca, untuk dipakai ulang menguraikan
+    berkas AMP saat alamatnya sendiri belum diketahui.
+    """
+    return str(page.get("canonical") or "") or "https://localhost/"
+
+
 def validate_page(
     html: str,
     keyword: str,
     blueprint: dict,
     page_url: str,
+    amp_html: str = "",
+    amp_url: str = "",
+    brand_name: str = "",
 ) -> dict:
     """
     Membandingkan halaman hasil generate dengan target SERP.
+
+    Berkas AMP dan nama brand boleh tidak diberikan, dan kalau tidak
+    diberikan pemeriksaannya dilewati begitu saja - pemanggil lama
+    tetap mendapat laporan yang sama persis seperti sebelumnya.
     """
     page = parse_html(html, page_url)
     target = blueprint["target"]
@@ -228,6 +329,15 @@ def validate_page(
         problems.append("Link rel=amphtml belum terpasang.")
 
     check_crawl(html, page, problems, passed)
+
+    check_head_pair(
+        page,
+        amp_html,
+        amp_url,
+        brand_name,
+        problems,
+        passed,
+    )
 
     if '"FAQPage"' in html:
         passed.append("Schema FAQPage terpasang.")

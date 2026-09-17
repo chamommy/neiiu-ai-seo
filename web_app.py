@@ -35,6 +35,13 @@ from starlette.middleware.sessions import (
     SessionMiddleware,
 )
 
+from ai.brief import (
+    normalize_purpose,
+    normalize_tone,
+    parse_keywords,
+    purpose_options,
+    tone_options,
+)
 from ai.chat_service import (
     generate_chat_response,
 )
@@ -58,7 +65,12 @@ from database.ip_allowlist_db import (
     list_ips,
     set_enabled,
 )
-from database.neiiu_history_db import forget_job, init_history_db
+from database.neiiu_history_db import (
+    SCOPE_LIVE,
+    SCOPE_QA,
+    forget_job,
+    init_history_db,
+)
 from database.neiiu_jobs_db import (
     create_job,
     delete_job,
@@ -76,8 +88,11 @@ from database.neiiu_templates_db import (
     init_templates_db,
     list_templates,
     read_template_files,
+    update_template,
 )
 from generators.template_assets import UnsafeAssetUrl, clean_assets
+from generators.brand_swap import brand_names
+from generators.page_links import UnsafeLinkUrl, clean_links
 from generators.template_scanner import TemplateTooDeep, scan
 from generators.template_slots import build_slot_map
 from serp.serp_search import slugify
@@ -291,7 +306,17 @@ class PinRequest(BaseModel):
 
 
 class NeiiuJobRequest(BaseModel):
-    keyword: str = Field(min_length=1, max_length=120)
+    # Topik halaman. Dikirim formulir sebagai "niche"; "keyword"
+    # dipertahankan sebagai nama lama supaya permintaan yang sudah
+    # ditulis di luar formulir - skrip, /api/neiiu/compose - tidak
+    # patah hanya karena kolomnya berganti nama di layar.
+    #
+    # Keduanya boleh kosong DI SINI lalu diperiksa bersama-sama di
+    # api_neiiu_create_job. Kalau min_length dipasang di salah satu,
+    # permintaan yang mengisi kolom satunya ditolak Pydantic dengan
+    # pesan yang menyebut nama kolom yang tidak ada di layar.
+    niche: str = Field(default="", max_length=120)
+    keyword: str = Field(default="", max_length=120)
     brand_name: str = Field(default="", max_length=60)
     base_url: str = Field(default="", max_length=200)
     provider: Literal["serper", "google_cse", "manual"] = (
@@ -315,15 +340,22 @@ class NeiiuJobRequest(BaseModel):
     # Literal tidak bisa dilakukan Pydantic, dan kota zona lain harus
     # ditolak - bukan diam-diam dipakai.
     city: str = Field(default="", max_length=80)
-    # 0 berarti tidak memakai template unggahan, jadi jalur lama
-    # yang meniru struktur kompetitor tetap dipakai.
+    # Template WAJIB untuk membuat halaman. Nol hanya sah untuk
+    # analyze_only, yang tidak menerbitkan berkas apa pun - lihat
+    # pemeriksaannya di api_neiiu_create_job, yang menolak nol dengan
+    # pesan yang bisa dibaca, bukan dengan galat Pydantic.
     template_id: int = Field(default=0, ge=0)
     # Nama brand yang sudah tertulis di dalam template, supaya bisa
     # dicari dan diganti dengan brand baru sampai ke sudut halaman.
-    template_brand: str = Field(default="", max_length=60)
-    # Dipakai hanya saat template_id = 0. URL halaman yang gaya
-    # visualnya dijadikan acuan, dipisah baris baru atau koma.
-    design_refs: str = Field(default="", max_length=1000)
+    # Boleh diisi beberapa nama, dipisah koma - template bekas
+    # sering berlapis. Batasnya naik dari 60 karena satu nama
+    # saja sudah bisa 20-30 huruf, dan dua nama tidak muat.
+    template_brand: str = Field(default="", max_length=120)
+    # Ruang ingatan lintas run. "qa" memisahkan run pemeriksaan dari
+    # ingatan produksi, ke dua arah: ia tidak membacanya dan tidak
+    # menambahinya. Penolak kembar tetap berjalan penuh di dalam
+    # ruangnya sendiri, jadi yang diuji tetap perilaku sebenarnya.
+    history_scope: Literal["live", "qa"] = "live"
     # Tujuan seluruh tombol login, daftar, dan bilah mengambang.
     cta_url: str = Field(default="", max_length=300)
     # Alamat gambar pengganti di template unggahan. Kosong berarti
@@ -333,6 +365,11 @@ class NeiiuJobRequest(BaseModel):
     logo_url: str = Field(default="", max_length=500)
     favicon_url: str = Field(default="", max_length=500)
     poster_url: str = Field(default="", max_length=500)
+    # Alamat halaman. Kosong berarti alamat yang sudah tertulis di
+    # template dibiarkan apa adanya - tidak ada nilai cadangan, dan
+    # itu disengaja. Lihat generators/page_links.py.
+    canonical_url: str = Field(default="", max_length=300)
+    amphtml_url: str = Field(default="", max_length=300)
     # Target panjang blok artikel, dalam kata. Nol berarti
     # mengikuti panjang contoh di knowledge/gaya_artikel.txt.
     # Batas atasnya bukan selera: model kecil makin sering
@@ -340,6 +377,18 @@ class NeiiuJobRequest(BaseModel):
     # dan yang mengulang dibatalkan penyaring - artikel yang
     # diminta terlalu panjang justru terbit lebih pendek.
     article_words: int = Field(default=0, ge=0, le=5000)
+    # Brief kreatif. Keempatnya opsional, dan yang dikosongkan tidak
+    # mengubah apa pun - job yang dikirim tanpa menyentuh kolom ini
+    # menghasilkan prompt yang sama persis dengan sebelum brief ada.
+    #
+    # Nilainya tidak dibatasi Literal di sini, melainkan dicocokkan
+    # dengan daftar di ai/brief.py lewat normalize_tone dan
+    # normalize_purpose. Daftar yang ditulis dua kali akan berbeda
+    # suatu saat, dan yang di sini yang akan ketinggalan.
+    tone: str = Field(default="", max_length=40)
+    page_purpose: str = Field(default="", max_length=40)
+    target_audience: str = Field(default="", max_length=300)
+    secondary_keywords: str = Field(default="", max_length=600)
 
 
 @app.on_event("startup")
@@ -1070,6 +1119,40 @@ def neiiu_page(request: Request):
                 for spec in REGIONS.values()
             ],
             "max_template_mb": MAX_TEMPLATE_BYTES // (1024 * 1024),
+            # Daftar pilihan brief dikirim dari satu sumber di
+            # ai/brief.py, bukan ditulis ulang
+            # sebagai <option> di templatenya. Daftar yang ditulis dua
+            # kali akan berbeda suatu saat, dan yang di HTML yang
+            # ketinggalan - lalu pengguna memilih nilai yang diam-diam
+            # diabaikan server.
+            "tones": tone_options(),
+            "purposes": purpose_options(),
+        },
+    )
+
+
+@app.get("/neiiu/template", response_class=HTMLResponse)
+def neiiu_template_page(request: Request):
+    """
+    Pengelola template, berdiri di alamatnya sendiri.
+
+    Dipisah dari /neiiu karena keduanya pekerjaan yang berbeda irama.
+    Yang di /neiiu dikerjakan tiap kali sebuah halaman dibuat; yang di
+    sini sekali waktu, saat template barunya datang. Berdiri di satu
+    halaman, formulir unggah dan daftar template ikut memanjangkan
+    layar setiap kali orang cuma mau mengetik satu keyword.
+    """
+    user = session_user(request)
+
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    return templates.TemplateResponse(
+        request=request,
+        name="neiiu_template.html",
+        context={
+            "user": dict(user),
+            "max_template_mb": MAX_TEMPLATE_BYTES // (1024 * 1024),
         },
     )
 
@@ -1082,12 +1165,18 @@ def api_neiiu_create_job(
     user = require_user(request)
     user_id = int(user["id"])
 
-    keyword = payload.keyword.strip()
+    # Niche menang atas keyword.
+    #
+    # Keduanya kolom yang sama - topik halaman yang dicari di Google -
+    # dan yang berganti cuma namanya di layar. Yang mengirim keduanya
+    # sekaligus mendapat yang ditulis di formulir, karena itu yang
+    # baru saja diketik orangnya.
+    keyword = payload.niche.strip() or payload.keyword.strip()
 
     if not keyword:
         raise HTTPException(
             status_code=400,
-            detail="Keyword tidak boleh kosong.",
+            detail="Niche tidak boleh kosong.",
         )
 
     # Kota diperiksa terhadap zonanya sekarang, bukan nanti saat job
@@ -1119,6 +1208,79 @@ def api_neiiu_create_job(
             status_code=400,
             detail=str(error),
         ) from error
+
+    # Alamat halaman diperiksa di sini juga, dengan alasan yang sama
+    # persis seperti alamat gambar di atas.
+    try:
+        clean_links(
+            {
+                "canonical": payload.canonical_url,
+                "amphtml": payload.amphtml_url,
+                "cta": payload.cta_url,
+            }
+        )
+    except UnsafeLinkUrl as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+    # Template adalah kontraknya, jadi ketiadaannya ditolak di sini -
+    # sebelum satu token pun dipotong dan sebelum job masuk antrean.
+    #
+    # Yang dijanjikan generator ini adalah halaman yang strukturnya
+    # persis template pilihan pengguna. Job tanpa template tidak bisa
+    # memenuhi janji itu dengan cara apa pun, jadi menerimanya berarti
+    # menghabiskan satu token dan belasan menit untuk sesuatu yang
+    # sudah pasti bukan yang diminta.
+    if not payload.template_id and not payload.analyze_only:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Pilih template dulu. Generator ini menulis halaman "
+                "HANYA di atas template yang kamu unggah - struktur, "
+                "iklan, skrip, dan tautannya dipertahankan apa adanya. "
+                "Unggah atau pilih satu template di Template Library, "
+                "lalu jalankan lagi."
+            ),
+        )
+
+    # Brand lama yang diisi dengan brand BARU ditolak di sini.
+    #
+    # Kolom "Brand lama di dalam template" berisi nama yang sudah
+    # tertulis di template dan harus dicari lalu diganti. Diisi
+    # dengan brand baru, penyapunya tidak menemukan apa pun: halaman
+    # terbit dengan judul dan meta bernama baru sementara puluhan
+    # sudut halaman masih menyebut pemilik template sebelumnya.
+    # Terukur pada satu template: 76 kemunculan nama lama tetap 76.
+    #
+    # Salah isi seperti ini tidak pernah ketahuan dari hasilnya
+    # sebelum belasan menit terpakai, jadi ditolak sekarang.
+    # Diperiksa per nama, bukan atas seluruh isi kolomnya.
+    #
+    # Kolom ini boleh memuat beberapa nama dipisah koma, dan
+    # perbandingan atas seluruh isinya akan meloloskan
+    # "ABECE, TeePublic" untuk brand baru "ABECE" - salah isi yang
+    # persis sama, cuma bersembunyi di belakang nama kedua.
+    nama_lama = [
+        satu.casefold()
+        for satu in brand_names(payload.template_brand)
+    ]
+
+    brand_baru = payload.brand_name.strip().casefold()
+
+    if brand_baru and brand_baru in nama_lama:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Kolom 'Brand lama di dalam template' diisi sama "
+                "dengan Brand. Yang diminta di situ nama brand yang "
+                "SUDAH tertulis di dalam template - nama pemilik "
+                "template sebelumnya - supaya semua kemunculannya "
+                "bisa diganti dengan brand barumu. Kalau templatenya "
+                "memang belum menyebut brand mana pun, kosongkan saja."
+            ),
+        )
 
     # Kepemilikan template diperiksa sebelum job dibuat. Tanpa ini,
     # siapa pun bisa memakai template pengguna lain hanya dengan
@@ -1164,12 +1326,30 @@ def api_neiiu_create_job(
         city=payload.city.strip(),
         template_id=payload.template_id,
         template_brand=payload.template_brand.strip(),
-        design_refs=payload.design_refs.strip(),
         cta_url=payload.cta_url.strip(),
         article_words=payload.article_words,
         logo_url=payload.logo_url.strip(),
         favicon_url=payload.favicon_url.strip(),
         poster_url=payload.poster_url.strip(),
+        canonical_url=payload.canonical_url.strip(),
+        amphtml_url=payload.amphtml_url.strip(),
+        # Disimpan sesudah dinormalkan, bukan mentah. Nilai yang tidak
+        # dikenal jadi string kosong di sini juga, jadi baris job di
+        # database menyatakan apa yang benar-benar berlaku - bukan apa
+        # yang dikirim formulir lalu diam-diam diabaikan belakangan.
+        tone=normalize_tone(payload.tone),
+        page_purpose=normalize_purpose(payload.page_purpose),
+        target_audience=payload.target_audience.strip(),
+        secondary_keywords="\n".join(
+            parse_keywords(payload.secondary_keywords)
+        ),
+        # Ruang ingatan. Hanya dua nilai yang berlaku, dan apa pun
+        # selain "qa" jatuh ke produksi - jadi permintaan yang tidak
+        # menyebutkannya berperilaku persis seperti sebelum kolom ini
+        # ada, dan nilai asal-asalan tidak bisa membuat ruang baru.
+        history_scope=(
+            SCOPE_QA if payload.history_scope == SCOPE_QA else SCOPE_LIVE
+        ),
     )
 
     submit_job(job_id)
@@ -1183,6 +1363,13 @@ def api_neiiu_create_job(
         ),
     }
 
+
+# Dua penolong yang dipakai bersama jalur unggah template.
+#
+# Keduanya sempat berdiri di dekat jalur yang sudah dihapus, dan
+# ikut terbawa waktu jalur itu dibuang - padahal yang memakainya
+# adalah unggah template, yang masih hidup. Dikembalikan apa
+# adanya dari versi sebelumnya, tanpa satu huruf pun diubah.
 
 async def read_upload(
     upload: UploadFile | None,
@@ -1455,6 +1642,191 @@ async def api_neiiu_upload_template(request: Request):
             status_code=400,
             detail=str(error),
         ) from error
+
+    return {
+        "status": "success",
+        "template_id": template_id,
+        "slots": summary["counts"],
+        "total_slots": summary["total"],
+        "notes": notes,
+    }
+
+
+@app.put("/api/neiiu/templates/{template_id}")
+async def api_neiiu_update_template(
+    template_id: int,
+    request: Request,
+):
+    """
+    Mengubah template yang sudah tersimpan, tanpa mengganti nomornya.
+
+    Ada karena API template cuma punya daftar, simpan, dan hapus -
+    dan "ubah" yang dikerjakan sebagai simpan-baru-lalu-hapus-lama
+    memberi nomor baru pada pasangan yang sama. Nomor itu yang
+    mengikat landing page dan AMP, jadi menggesernya berarti setiap
+    hal yang sudah menunjuk template itu menunjuk yang salah.
+
+    Ketiga bagiannya opsional dan berdiri sendiri: nama saja, berkas
+    landing saja, berkas AMP saja, atau gabungan mana pun. Yang tidak
+    dikirim tidak disentuh.
+
+    Penjagaannya disalin dari jalur unggah - login dulu, ukuran dulu,
+    baru badan permintaannya disentuh - dengan alasan yang sama
+    persis seperti yang tertulis di sana.
+    """
+    user = require_user(request)
+
+    declared = request.headers.get("content-length")
+
+    if declared is None:
+        raise HTTPException(
+            status_code=411,
+            detail="Permintaan ubah harus menyertakan Content-Length.",
+        )
+
+    try:
+        declared_size = int(declared)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail="Content-Length tidak sah.",
+        ) from error
+
+    if declared_size > MAX_UPLOAD_BODY:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Total unggahan melebihi "
+                f"{MAX_UPLOAD_BODY // (1024 * 1024)} MB."
+            ),
+        )
+
+    try:
+        form = await request.form(
+            max_files=4,
+            max_fields=8,
+            max_part_size=MAX_TEMPLATE_BYTES,
+        )
+    except MultiPartException as error:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Berkas melebihi "
+                f"{MAX_TEMPLATE_BYTES // (1024 * 1024)} MB."
+            ),
+        ) from error
+
+    try:
+        nama_baru = form.get("name")
+        landing = form.get("landing")
+        amp = form.get("amp")
+
+        # Diperiksa terhadap kelas milik Starlette, bukan milik
+        # FastAPI - alasannya sama seperti di jalur unggah.
+        if not isinstance(landing, StarletteUploadFile):
+            landing = None
+
+        if not isinstance(amp, StarletteUploadFile):
+            amp = None
+
+        landing_html = (
+            await read_upload(landing, "landing page") if landing else None
+        )
+        amp_html = await read_upload(amp, "AMP") if amp else None
+    finally:
+        await form.close()
+
+    nama = str(nama_baru).strip() if nama_baru is not None else None
+
+    if nama is None and landing_html is None and amp_html is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Tidak ada yang diubah.",
+        )
+
+    if nama is not None and not nama:
+        raise HTTPException(
+            status_code=400,
+            detail="Nama template tidak boleh kosong.",
+        )
+
+    if landing_html is not None and not landing_html.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Berkas landing page kosong.",
+        )
+
+    # Yang tidak dikirim dibaca dari disk, supaya pemeriksaan jumlah
+    # slot tetap membandingkan pasangan yang UTUH. Tanpa itu, mengganti
+    # AMP saja tidak pernah bisa ketahuan berbeda dari landing page-nya.
+    try:
+        tersimpan = read_template_files(template_id, int(user["id"]))
+    except TemplateError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    landing_final = (
+        landing_html if landing_html is not None else tersimpan["landing"]
+    )
+    amp_final = amp_html if amp_html is not None else tersimpan["amp"]
+
+    try:
+        summary = await run_in_threadpool(summarize_template, landing_final)
+    except TemplateTooDeep as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    if summary["total"] == 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Tidak ada satu pun bagian isi yang dikenali di "
+                "template landing page ini."
+            ),
+        )
+
+    notes: list[str] = []
+
+    if amp_final:
+        try:
+            amp_summary = await run_in_threadpool(
+                summarize_template,
+                amp_final,
+            )
+        except TemplateTooDeep as error:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Berkas AMP: {error}",
+            ) from error
+
+        if amp_summary["total"] == 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Berkas AMP tidak punya satu pun bagian isi yang "
+                    "bisa dikenali."
+                ),
+            )
+
+        for role, count in summary["counts"].items():
+            other = amp_summary["counts"].get(role, 0)
+
+            if other != count:
+                notes.append(
+                    f"Jumlah {role} berbeda antara landing ({count}) "
+                    f"dan AMP ({other})."
+                )
+
+    try:
+        update_template(
+            template_id=template_id,
+            user_id=int(user["id"]),
+            name=nama,
+            landing_html=landing_html,
+            amp_html=amp_html,
+            slot_summary=json.dumps(summary["counts"], ensure_ascii=False),
+            notes=" ".join(notes),
+        )
+    except TemplateError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
 
     return {
         "status": "success",

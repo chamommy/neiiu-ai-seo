@@ -18,8 +18,10 @@ jadi. Teks sependek itu diminta ke AI sebagai label pendek supaya
 lebarnya tetap muat di tata letak yang sudah ada.
 """
 
+import html
 import re
 
+from generators.ad_regions import inside
 from generators.brand_swap import variants as brand_variants
 from generators.page_prices import looks_like_price
 from utils.region import REGIONS
@@ -88,6 +90,18 @@ LABEL_TAGS = {"a", "button", "label", "option", "th", "abbr", "summary"}
 # Atribut yang isinya dibaca orang, bukan mesin.
 LABEL_ATTRS = {"placeholder", "aria-label", "title"}
 
+# Dari LABEL_ATTRS, hanya yang ini yang TERLIHAT di layar semua orang.
+#
+# aria-label dan title tidak ikut. Keduanya memang dibaca orang, tapi
+# yang membacanya pembaca layar - dan teksnya bukan sekadar nama,
+# melainkan keterangan perilaku tombol. <button aria-label="Back to
+# top" class="scroll-top"> di template pengguna tidak punya teks lain
+# selain panah; label itulah satu-satunya nama tombol, dan JS
+# mengikatnya lewat .scroll-top. Menggantinya dengan "Kembali" membuat
+# pembaca layar menyebut tombol yang salah - lebih buruk daripada
+# menyebutnya dalam bahasa Inggris.
+VISIBLE_ATTRS = {"placeholder"}
+
 # Teks di dalam tag ini tidak pernah diganti sama sekali. Isinya
 # bukan kalimat untuk pembaca melainkan nilai yang dibaca mesin.
 NEVER_TAGS = {"script", "style", "code", "pre", "textarea"}
@@ -101,6 +115,889 @@ NOT_PROSE = re.compile(
     r"|^[\d.,]+\s*(?:%|k|jt|m|rb|bath|baht)?$",
     re.IGNORECASE,
 )
+
+
+def bukan_prosa(text: str) -> bool:
+    """
+    Apakah teks ini bukan kalimat, melainkan tanda atau angka belaka.
+
+    Entitas HTML diuraikan lebih dulu, dan itu bukan kerapian
+    melainkan seluruh gunanya. NOT_PROSE menolak teks yang isinya
+    tanda baca saja, tapi ia melihat teks MENTAH - dan tanda pisah
+    yang ditulis sebagai entitas mengeja dirinya dengan huruf:
+
+        "&gt;"      -> memuat "g" dan "t"     -> lolos sebagai kalimat
+        "&raquo;"   -> memuat "raquo"         -> lolos sebagai kalimat
+        "&middot;"  -> memuat "middot"        -> lolos sebagai kalimat
+
+    Akibatnya terukur pada halaman yang benar-benar terbit. Template
+    dengan remah `<a>Home</a> &gt; <a>Kategori</a> &gt; <span>Judul</span>`
+    terbaca punya LIMA slot breadcrumb, bukan tiga: dua tanda pisahnya
+    ikut terhitung remah. Model diminta lima remah, menjawab empat,
+    dan yang tertinggal tanpa isi adalah remah TERAKHIR - sehingga
+    yang terbit:
+
+        Beranda > Slot Online > Slot Gacor > Pola Slot Gacor > Halaman Lama
+
+    Tanda pisahnya hilang ditimpa keyword, remah terakhirnya masih
+    milik pemilik template, dan keywordnya tertulis empat kali di satu
+    baris. Tiga keluhan sekaligus dari satu sebab.
+    """
+    return bool(NOT_PROSE.match(html.unescape(str(text or "")).strip()))
+
+# Kata tugas bahasa Inggris yang tidak pernah jadi kata Indonesia.
+#
+# Dipakai sebagai BUKTI bahwa satu teks template ditulis dalam bahasa
+# lain, bukan sebagai daftar kata terlarang. Isinya sengaja kelas
+# tertutup - kata depan, kata ganti, kata bantu - karena kelas itulah
+# yang tidak pernah terserap ke bahasa Indonesia. Kata benda dan kata
+# sifat Inggris justru sebaliknya: "free spin", "new member", "live
+# casino", "login", "bonus" adalah istilah yang memang dipakai
+# pembaca Indonesia, dan menulis ulangnya berarti merusak halaman
+# yang sudah benar.
+ENGLISH_FUNCTION_WORDS = frozenset(
+    """
+    a an the of on in at to for from with without over under about
+    into onto upon off out up down through during before after
+    between against among across behind beyond within
+    and or but nor so yet because although though while whereas
+    this that these those it its they them their there here
+    i we you your yours our ours my mine his her hers him he she
+    is am are was were be been being do does did done have has had
+    will would shall should can could may might must
+    all any each every some such no not only just more most other
+    same own very much many few less least than then when where
+    which who whom whose what why how if unless until since
+    """.split()
+)
+
+# Kata Indonesia berfrekuensi tinggi. Kehadiran satu saja sudah
+# cukup membuktikan teksnya BUKAN teks asing.
+INDONESIAN_MARKERS = frozenset(
+    """
+    yang dan di ke dari untuk dengan pada ini itu atau tidak bisa
+    akan sudah juga saja setiap hari semua lebih tanpa oleh kami
+    kamu anda kita mereka adalah dalam agar supaya karena sebagai
+    saat ketika hingga sampai bagi antara namun tetapi tapi jika
+    kalau bukan belum masih hanya lagi sangat paling harus dapat
+    banyak baru lama cepat mudah aman langsung tersedia gratis
+    """.split()
+)
+
+# Bentuk teks yang tidak pernah dihitung sebagai salinan asing,
+# apa pun bahasanya.
+#
+# Tautan lewati-ke-isi dan teks khusus pembaca layar termasuk di
+# sini. Keduanya memang berbahasa Inggris di banyak template, tapi
+# keduanya juga perkakas aksesibilitas yang perilakunya bergantung
+# pada teksnya - persis yang tidak boleh disentuh.
+A11Y_TEXT = re.compile(
+    r"^\s*(?:skip|jump)\s+(?:to|ke)\b"
+    r"|^\s*(?:menu|close|open|toggle|previous|next|back)\s*$",
+    re.IGNORECASE,
+)
+
+A11Y_CLASS = re.compile(
+    r"sr-only|screen-?reader|visually-?hidden|skip-?link|\bskip\b",
+    re.IGNORECASE,
+)
+
+# Wilayah yang isinya ditulis ulang oleh JS saat halaman berjalan.
+#
+# Peran ARIA ini artinya persis itu: isinya berubah sendiri, dan
+# pembaca layar diberi tahu tiap kali berubah. Teks yang tertulis di
+# HTML cuma keadaan awal. Di template pengguna:
+#
+#     <div aria-live="polite" class="toast" role="status">
+#       Added to bag successfully
+#     </div>
+#
+# dan di skripnya: showToast(message){ toast.textContent = message }.
+# Apa pun yang kita tulis di situ ditimpa begitu tombol ditekan, jadi
+# menggantinya tidak memperbaiki apa-apa - hanya menaruh kalimat yang
+# tidak pernah terbaca dan berisiko menabrak pesan aslinya.
+LIVE_REGION_ROLES = {"status", "alert", "log", "timer", "marquee", "progressbar"}
+
+# Nama dokumen kebijakan situs. Bukan salinan demo, meski berbahasa
+# Inggris di halaman Indonesia.
+#
+# "Terms of Use" dan "Privacy Policy" menamai halaman yang benar-benar
+# ada dan mengikat secara hukum. Menggantinya jadi "Panduan Pengguna"
+# membuat tautan syarat-ketentuan menghilang dari footer - halaman
+# tujuannya tetap ada, tapi tidak ada lagi yang menamainya. Nama-nama
+# ini dikenali di semua bahasa yang didukung, karena yang dilindungi
+# jenis dokumennya, bukan bahasanya.
+# Yang dicari kata benda DOKUMEN, bukan pokok bahasannya.
+#
+# "Privacy Policy" dikenali dari kata "policy", bukan dari "privacy".
+# Bedanya besar: "Free returns within 30 days" dan "Easy returns on
+# all orders" memuat kata hukum tapi keduanya salinan demo toko yang
+# justru harus diganti. Kalau pokok bahasan ikut dihitung, tiap
+# template belanja punya kalimat demo yang kebal tanpa alasan.
+SITE_POLICY_NAMES = re.compile(
+    r"\b(?:polic(?:y|ies)|terms?|conditions?|disclaimers?|imprint|dmca|"
+    r"notices?|statements?|agreements?)\b"
+    r"|kebijakan|ketentuan|syarat|sanggahan"
+    r"|นโยบาย|ข้อกำหนด|เงื่อนไข",
+    re.IGNORECASE,
+)
+
+# Baris hak cipta dan pemberitahuan hak, sepanjang apa pun.
+#
+# Dipisah dari daftar di atas karena bentuknya kalimat, bukan nama:
+# "Copyright © 2026 Real Madrid CF. All Rights Reserved." delapan
+# kata, lewat dari batas nama dokumen, padahal justru baris inilah
+# yang paling tidak boleh ditulis ulang jadi kalimat iklan.
+LEGAL_NOTICE = re.compile(
+    r"©|\(c\)\s*(?:19|20)\d{2}"
+    r"|\ball\s+rights?\s+reserved\b"
+    r"|\bcopyrights?\b|hak\s*cipta"
+    r"|\baccessibility\b|aksesibilitas"
+    r"|\bcookies?\b",
+    re.IGNORECASE,
+)
+
+# Sepanjang apa satu teks masih mungkin berupa NAMA dokumen.
+#
+# Pembatas ini yang membedakan tautan "Syarat & Ketentuan" dari
+# kalimat iklan "syarat dan ketentuan berlaku untuk semua bonus".
+# Yang pertama nama dokumen dan dilindungi; yang kedua kalimat biasa
+# yang tidak boleh ikut kebal hanya karena memuat satu kata hukum.
+POLICY_MAX_WORDS = 6
+
+# Sesedikit-dikitnya kata sebelum satu teks boleh dinilai bahasanya.
+#
+# Dua kata terlalu pendek untuk dibedakan dari istilah serapan:
+# "Free Spin", "Live Chat", dan "Size Guide" sama-sama dua kata
+# Inggris, dan yang pertama justru istilah yang benar di halaman
+# berbahasa Indonesia. Tiga kata ke atas baru berbentuk kalimat.
+# Bentuk kata yang khas bahasa Indonesia.
+#
+# Awalan dan akhiran pembentuk kata - bukan daftar kata. Yang
+# dicari ciri bentuknya, supaya kata yang belum pernah kita lihat
+# pun ikut terbaca: "pengguna", "bantuan", "keunggulan",
+# "pembayaran", "transaksi", "navigasi" semuanya tertangkap tanpa
+# satu pun tertulis di sini.
+#
+# Akhiran -si dan -asi sengaja ikut. Keduanya serapan, tapi bentuk
+# serapannya justru yang membedakan: bahasa Inggris menulis
+# "information" dan "navigation", bahasa Indonesia "informasi" dan
+# "navigasi", jadi kata berakhiran -si di halaman Indonesia hampir
+# pasti sudah berbahasa Indonesia.
+INDONESIAN_SHAPE = re.compile(
+    r"^(?:ber|ter|mem|men|meng|meny|pem|pen|peng|peny|per|ke)\w{3,}"
+    r"|\w{3,}(?:kan|nya|annya|asi|isasi)$"
+    r"|^\w{3,}an$",
+    re.IGNORECASE,
+)
+
+FOREIGN_MIN_WORDS = 3
+
+# Bahasa halaman yang aksaranya BUKAN Latin.
+#
+# Di halaman begini, aksaranya sendiri sudah jadi bukti. Halaman Thai
+# ditulis dengan aksara Thai; satu kata beraksara Latin yang berdiri
+# di tengahnya hampir pasti sisa template, dan menunggu sampai tiga
+# kata berarti membiarkan yang pendek-pendek lewat. Terukur di berkas
+# AMP template pengguna: "menang di", "sebesar", "Baru Saja", dan "5
+# Detik Lalu" terbit utuh berbahasa Indonesia di halaman Thai, semata
+# karena tidak satu pun mencapai tiga kata.
+#
+# Ambang tiga tetap berlaku untuk halaman beraksara Latin: di sana
+# "Free Spin" dan "Live Chat" memang istilah yang benar, dan tidak
+# ada cara membedakannya dari sisa template selain panjangnya.
+NON_LATIN_LANGUAGES = {"th"}
+
+FOREIGN_MIN_WORDS_NON_LATIN = 1
+
+# Kata sapaan Indonesia. Kelas tertutup, dan satu-satunya tanda yang
+# memisahkan nama orang Indonesia dari nama produk.
+#
+# "Ibu Ninik" dan "Wild Bandito" sama-sama dua kata beraksara Latin
+# tanpa satu pun kata tugas, jadi tidak ada ukuran panjang atau
+# bentuk yang bisa membedakannya. Yang membedakan cuma sapaannya:
+# nama gim tidak pernah didahului "Ibu" atau "Bapak". Terukur di
+# berkas AMP template pengguna, halaman Thai terbit dengan tiga nama
+# pemenang berbahasa Indonesia sementara nama gimnya - yang memang
+# harus utuh - berdiri di sebelahnya.
+#
+# Yang pendek dan bermakna ganda sengaja tidak masuk: "mas" juga
+# kode maskapai, "bu" juga singkatan. Keduanya lebih sering salah
+# daripada benar.
+INDONESIAN_HONORIFICS = frozenset(
+    "ibu bapak pak mbak saudara saudari nyonya tuan".split()
+)
+
+# Kosakata perkakas berbahasa Indonesia yang TIDAK berimbuhan.
+#
+# INDONESIAN_SHAPE menangkap yang berimbuhan - "keamanan", "layanan",
+# "terpercaya" - tapi label sependek "Masuk", "Daftar", dan "Promosi"
+# tidak berimbuhan sama sekali, dan di halaman Thai keduanya sama
+# saja salahnya. Dua daftar ini saling menutupi lubang masing-masing;
+# sendiri-sendiri, tiap-tiap meninggalkan separuh label pendeknya.
+#
+# Isinya sengaja kata PERKAKAS - tombol, menu, keadaan akun - bukan
+# kata benda umum. Kata benda ikut muncul di nama produk, dan nama
+# produk tidak boleh disentuh siapa pun.
+INDONESIAN_UI_WORDS = frozenset(
+    """
+    masuk keluar daftar beranda promosi bantuan hubungi lihat cari
+    pilih buka tutup kirim simpan unduh pusat resmi tentang syarat
+    panduan dukungan cara harga gratis lainnya selengkapnya sekarang
+    kembali lanjut batal ubah hapus tambah kelola riwayat saldo setor
+    tarik akun sandi alamat jumlah hasil menang kalah main bermain
+    taruhan situs halaman tautan akses
+    hemat murah lengkap utama khusus wajib bebas nyata
+    populer favorit
+    """.split()
+)
+
+# Serapan Indonesia yang bentuk serapannya sendiri jadi buktinya.
+#
+# Bahasa Indonesia menulis "progresif", "alternatif", "komunitas",
+# dan "transparansi" di tempat bahasa Inggris menulis "progressive",
+# "alternative", "community", dan "transparency". Ekornya yang
+# berbeda, dan perbedaan itu tidak pernah kebetulan.
+#
+# Dipakai HANYA di halaman beraksara non-Latin. Di halaman Indonesia
+# bentuk ini justru bahasa halamannya sendiri.
+# Empat huruf di depan ekornya bukan hiasan. Tanpa syarat itu "Otis"
+# terbaca "oto-matis" dan "motif" terbaca serapan - dua nama yang
+# justru harus selamat. Dengan syarat itu, yang lolos hanya kata yang
+# memang panjang: "otomatis", "progresif", "alternatif", "kualitas".
+INDONESIAN_LOAN_SUFFIX = re.compile(r"\w{4,}(?:if|itas|nsi|isme|tis)$", re.I)
+
+# Kosakata perkakas berbahasa Inggris yang bukan serapan Thai.
+#
+# Halaman Thai memang memakai sebagian kata Inggris apa adanya -
+# "LOGIN", "VIP", "RTP", "Live Chat" terbaca wajar di sana - jadi
+# yang berdiri di sini hanya kata yang TIDAK begitu: sisa toko daring
+# dan label akun yang di halaman Thai selalu ditulis beraksara Thai.
+#
+# "settings" dan "accessibility" sengaja TIDAK masuk. Keduanya nama
+# dokumen kebijakan yang memang sengaja dibekukan, dan memasukkannya
+# ke sini berarti membatalkan keputusan itu lewat pintu belakang.
+FOREIGN_UI_WORDS = frozenset(
+    """
+    account cart bag checkout wishlist basket orders returns
+    shipping delivery withdraw deposit trust member
+    """.split()
+)
+
+LATIN_WORD = re.compile(r"[A-Za-z][A-Za-z'’-]*")
+THAI_CHAR = re.compile(r"[฀-๿]")
+
+# Ada huruf sungguhan di dalamnya, bukan cuma tanda baca dan angka.
+WORD_CHAR = re.compile(r"[A-Za-z฀-๿]")
+
+
+def live_region(attrs: dict | None, ancestors: list | None = None) -> bool:
+    """
+    Apakah teks ini tinggal di wilayah yang isinya diurus JS.
+
+    Diperiksa sampai ke atas karena pesannya sering dibungkus lagi:
+    <div role="status"><span>...</span></div>. Yang menentukan wadah
+    terluarnya, bukan tag tempat teksnya kebetulan berada.
+    """
+    for kotak in list(ancestors or []) + [attrs or {}]:
+        if str((kotak or {}).get("aria-live") or "").strip():
+            return True
+
+        if str((kotak or {}).get("role") or "").strip().lower() in LIVE_REGION_ROLES:
+            return True
+
+    return False
+
+
+def policy_name(text: str) -> bool:
+    """Apakah teks ini nama dokumen kebijakan, bukan kalimat biasa."""
+    isi = " ".join(str(text or "").split())
+
+    if LEGAL_NOTICE.search(isi):
+        return True
+
+    return len(isi.split()) <= POLICY_MAX_WORDS and bool(SITE_POLICY_NAMES.search(isi))
+
+
+def protected_text(
+    text: str,
+    attrs: dict | None = None,
+    ancestors: list | None = None,
+) -> bool:
+    """
+    Apakah teks ini tidak boleh ditulis ulang, apa pun bahasanya.
+
+    Dikumpulkan di satu tempat supaya penilai bahasa dan penilai
+    serumpun di bawah memakai daftar perlindungan yang sama persis.
+    Dua daftar yang terpisah pasti berbeda cepat atau lambat, dan
+    yang bocor lewat celahnya justru yang paling perlu dijaga.
+    """
+    isi = " ".join(str(text or "").split())
+
+    if not isi or bukan_prosa(isi):
+        return True
+
+    if A11Y_TEXT.search(isi) or policy_name(isi):
+        return True
+
+    if live_region(attrs, ancestors):
+        return True
+
+    if A11Y_CLASS.search(str((attrs or {}).get("class") or "")):
+        return True
+
+    return str((attrs or {}).get("aria-hidden") or "").lower() == "true"
+
+
+def native_words(text: str, language: str = "id") -> bool:
+    """
+    Apakah teks ini memuat tanda bahasa halaman sendiri.
+
+    Kata tugas saja tidak cukup untuk label pendek. "BANTUAN",
+    "NAVIGASI", dan "ulasan pengguna" semuanya bahasa Indonesia yang
+    benar, tapi tak satu pun memuat kata tugas - label memang jarang
+    memuatnya. Terukur: mengandalkan kata tugas saja membuat ketiganya
+    terbaca asing di halaman Indonesia sendiri.
+
+    Karena itu bentuk katanya ikut dibaca. Awalan dan akhiran di
+    INDONESIAN_SHAPE tidak pernah muncul di kata Inggris yang
+    sepadan - "informasi" lawan "information", "bantuan" lawan
+    "help" - jadi keberadaannya bukti kuat, bukan tebakan.
+    """
+    isi = " ".join(str(text or "").split())
+
+    if language == "th":
+        return bool(THAI_CHAR.search(isi))
+
+    kata = [w.lower() for w in LATIN_WORD.findall(isi)]
+
+    if any(w in INDONESIAN_MARKERS for w in kata):
+        return True
+
+    return any(INDONESIAN_SHAPE.search(w) for w in kata if len(w) >= 5)
+
+
+# Sepanjang apa satu teks masih terhitung LABEL, bukan tulisan.
+GROUP_MAX_WORDS = 5
+
+# Sedikitnya berapa label serumpun sebelum satu kelompok boleh
+# dinilai bersama-sama, dan sedikitnya berapa yang harus terbukti
+# asing lebih dulu.
+GROUP_MIN_MEMBERS = 3
+GROUP_MIN_PROOF = 2
+
+# Sebesar apa satu kelompok masih masuk akal ditulis ulang seluruhnya.
+#
+# Template 1/275 punya satu mega-menu berisi 306 tautan - "Home Jersey
+# 26/27", "Mens", "Womens", "Youth", "View All", berulang untuk tiap
+# koleksi. Semuanya memang salinan demo, tapi meminta model menulis
+# 306 label pendek yang berbeda-beda satu sama lain bukan pekerjaan
+# yang bisa selesai: yang kembar dibatalkan penyaring pengulangan,
+# slotnya jatuh kembali ke teks template, dan menunya terbit campur
+# lagi - persis keadaan yang aturan serumpun ini ada untuk mencegah.
+#
+# Di atas batas ini kelompoknya dilewati utuh, bukan dibuka sebagian.
+GROUP_MAX_MEMBERS = 40
+
+
+# Sejauh apa dua simpul teks masih mungkin satu kalimat.
+FRAGMENT_WINDOW = 4
+
+
+# Sebesar apa lompatan nomor elemen sebelum dua label terhitung
+# berada di daftar yang berbeda.
+#
+# Terukur pada footer template pengguna: antar label di dalam satu
+# kolom jaraknya selalu +2 - satu <li> di antaranya - dan antar kolom
+# +5, karena ada </ul></div><div><h4> di antaranya. Tiga memisahkan
+# keduanya dengan selisih yang lebar di kedua sisi.
+CLUSTER_GAP = 3
+
+
+def clusters(anggota: list) -> list:
+    """
+    Memecah satu keluarga struktur jadi daftar-daftar yang sebenarnya.
+
+    Jalur tag saja tidak cukup: seluruh tautan <div><ul><li><a> di
+    satu halaman punya jalur yang sama persis, jadi empat kolom
+    footer yang berbeda - dan menu berbahasa Indonesia di sebelahnya
+    - terbaca sebagai satu kelompok raksasa. Digabung begitu, satu
+    label berbahasa Indonesia di kolom mana pun membuat kolom yang
+    jelas-jelas milik toko lain ikut kebal.
+    """
+    hasil: list = []
+    berjalan: list = []
+    sebelum = None
+
+    for slot, isi in anggota:
+        nomor = slot.get("element_index") or 0
+
+        if sebelum is not None and nomor - sebelum > CLUSTER_GAP:
+            hasil.append(berjalan)
+            berjalan = []
+
+        berjalan.append((slot, isi))
+        sebelum = nomor
+
+    if berjalan:
+        hasil.append(berjalan)
+
+    return hasil
+
+
+# Sejauh apa satu label masih terhitung berada di bagian yang sama
+# dengan kalimat yang sudah terbukti salinan demo.
+SECTION_WINDOW = 12
+SECTION_DEPTH = 4
+
+
+def section_inherit(slots: list, language: str, terbukti: set) -> set:
+    """
+    Label pendek di bagian yang sudah terbukti demo ikut terbuka.
+
+    Ini menutup lubang terakhir yang tidak bisa ditutup bukti bahasa.
+    "Ages" dan "Pieces" satu kata; tidak ada kata tugas Inggris di
+    dalamnya, dan tanpa kamus tidak ada cara mengetahui keduanya
+    bukan bahasa Indonesia. Terukur di template pengguna, keduanya
+    terbit apa adanya di halaman judi berbahasa Indonesia - sisa
+    spesifikasi mainan, lengkap dengan angkanya.
+
+    Yang menjawabnya letaknya, bukan katanya. Tiga label itu berdiri
+    tepat di sebelah kalimat yang SUDAH terbukti salinan demo:
+
+        <p class="price-note">VAT included · Free delivery       (idx 138)
+           on orders over £50</p>
+        <div class="agepiece"> ... 10+ / Ages / 280 / Pieces     (idx 141-148)
+
+    Satu bagian halaman yang memuat kalimat demo tidak memuat
+    setengah isi baru; seluruhnya milik template asal. Buktinya
+    dipinjam dari tetangga yang sudah terbukti, dan hanya itu -
+    label yang berdiri jauh dari bukti mana pun tidak ikut terbuka.
+
+    Angka dan harga tidak pernah ikut: keduanya dijegal NOT_PROSE di
+    protected_text sebelum sampai ke sini, jadi "10+" dan "280"
+    tetap seperti aslinya sementara namanya berganti.
+    """
+    if not terbukti:
+        return set()
+
+    jangkar = [
+        (slot.get("element_index") or 0, slot.get("depth") or 0)
+        for slot in slots
+        if id(slot) in terbukti
+    ]
+
+    # Calon dikelompokkan dulu menurut posisi strukturnya. Yang
+    # diwarisi kelompok, bukan label satu-satu: tiga label sejajar
+    # yang semuanya bukan bahasa halaman adalah satu strip demo,
+    # sedangkan satu label menyendiri di dekat kalimat demo bisa saja
+    # label yang memang benar. Kelompok yang salah satu anggotanya
+    # sudah berbahasa halaman tidak pernah diwarisi.
+    keluarga: dict = {}
+
+    for slot in slots:
+        if slot.get("kind") != "text" or id(slot) in terbukti:
+            continue
+
+        isi = " ".join(str(slot.get("current") or "").split())
+
+        if not isi or len(isi.split()) > GROUP_MAX_WORDS:
+            continue
+
+        if protected_text(isi, slot.get("attrs"), slot.get("ancestors")):
+            continue
+
+        keluarga.setdefault(tuple(slot.get("path") or ()), []).append((slot, isi))
+
+    warisan = set()
+
+    for anggota in keluarga.values():
+        # Batas besar yang sama dengan sibling_groups, dan karena
+        # alasan yang sama: mega-menu 306 tautan tidak bisa ditulis
+        # ulang label demi label. Tanpa batas ini pewarisan bagian
+        # membuka 200 slot di template 1/275 lewat pintu belakang -
+        # batasnya ada di aturan sebelah, bukan di sini.
+        if not 2 <= len(anggota) <= GROUP_MAX_MEMBERS:
+            continue
+
+        if any(native_words(isi, language) for _, isi in anggota):
+            continue
+
+        anggota.sort(key=lambda x: x[0].get("element_index") or 0)
+
+        for daftar in clusters(anggota):
+            dekat = False
+
+            for slot, _ in daftar:
+                nomor = slot.get("element_index") or 0
+                dalam = slot.get("depth") or 0
+
+                if any(
+                    abs(n - nomor) <= SECTION_WINDOW
+                    and abs(d - dalam) <= SECTION_DEPTH
+                    for n, d in jangkar
+                ):
+                    dekat = True
+                    break
+
+            if dekat:
+                warisan.update(
+                    (slot["start"], slot["end"]) for slot, _ in daftar
+                )
+
+    return warisan
+
+
+def native_fragments(slots: list, language: str = "id") -> set:
+    """
+    Menemukan potongan yang sebenarnya bagian dari kalimat bahasa halaman.
+
+    Penilai bahasa membaca tiap simpul teks sendirian - harus begitu,
+    kalau digabung kalimat Indonesia di sebelahnya akan menutupi
+    salinan Inggris yang berdiri sendiri. Tapi sebagian simpul memang
+    bukan teks yang berdiri sendiri, melainkan sepotong dari kalimat
+    induknya. Di berkas AMP template pengguna:
+
+        <div class="winner-line">
+          <span class="winner-name">Ibu Ninik</span> menang di
+          <span class="winner-game">Gates Of Olympus Super Scatter</span>
+          sebesar <span class="winner-amount">IDR 55.956.000</span>
+        </div>
+
+    Dibaca sendirian, nama gimnya lima kata Inggris tanpa satu pun
+    kata Indonesia - persis bentuk salinan demo. Dibaca bersama
+    induknya, ia nama produk di tengah kalimat Indonesia, dan nama
+    produk tidak pernah boleh diterjemahkan.
+
+    Yang dipakai teks milik INDUK LANGSUNG saja - satu tingkat di
+    atasnya, di posisi yang berdekatan. Tetangga sekadar berdekatan
+    tidak dihitung: <h4>BANTUAN</h4> berbahasa Indonesia berdiri
+    dekat sekali dengan kolom tautan berbahasa Inggris di footer,
+    dan kalau itu ikut dihitung seluruh kolom itu jadi kebal.
+    """
+    induk: dict = {}
+
+    for slot in slots:
+        if slot.get("kind") != "text":
+            continue
+
+        # Bahasa induknya tidak ditanyakan, dan itu disengaja. Yang
+        # menentukan bukan induknya berbahasa apa melainkan bahwa ia
+        # PUNYA kalimat sendiri: begitu induknya berkalimat, anaknya
+        # sepotong dari kalimat itu, dan potongan diurus lewat
+        # kalimatnya - tidak pernah sendiri-sendiri. Nama gim tadi
+        # sama-sama harus utuh di halaman Indonesia dan di halaman
+        # Thai, padahal kalimat pembungkusnya hanya berbahasa
+        # Indonesia di salah satunya.
+        if not WORD_CHAR.search(str(slot.get("current") or "")):
+            continue
+
+        jalur = tuple(slot.get("path") or ())
+        induk.setdefault(jalur, []).append(
+            (slot.get("element_index") or 0, slot.get("depth") or 0)
+        )
+
+    pecahan = set()
+
+    for slot in slots:
+        if slot.get("kind") != "text":
+            continue
+
+        jalur = tuple(slot.get("path") or ())
+
+        if len(jalur) < 2:
+            continue
+
+        nomor = slot.get("element_index") or 0
+        dalam = slot.get("depth") or 0
+
+        for lain, dalam_lain in induk.get(jalur[:-1], ()):
+            # Induknya harus induk yang SEBENARNYA, bukan sekadar
+            # elemen yang bentuk jalurnya sama.
+            #
+            # Jalur cuma daftar nama tag, jadi setiap <div><div><span>
+            # di satu halaman punya jalur yang sama persis. Tanpa dua
+            # syarat di bawah, teks mana pun yang kebetulan berdekatan
+            # dan berjalur sebangun terbaca sebagai induk - dan
+            # akibatnya bukan cuma satu simpul salah tanda.
+            #
+            # Terukur di berkas AMP template pengguna: kartu pemberitahuan
+            # pemenang bertingkat-tingkat, dan tiap tingkat menganggap
+            # dirinya potongan dari tingkat di atasnya. Seluruh kartu
+            # lalu tidak ada yang bertanggung jawab menulis ulangnya,
+            # dan halaman Thai terbit dengan "Ibu Ninik menang di ...
+            # sebesar ..." utuh berbahasa Indonesia.
+            #
+            # Induk sejati selalu satu tingkat lebih dangkal dan
+            # dibuka lebih dulu.
+            if dalam_lain != dalam - 1 or lain >= nomor:
+                continue
+
+            if nomor - lain <= FRAGMENT_WINDOW:
+                pecahan.add((slot["start"], slot["end"]))
+                break
+
+    return pecahan
+
+
+def sibling_groups(slots: list, language: str = "id") -> set:
+    """
+    Menemukan kelompok label yang seluruhnya milik situs lain.
+
+    Ini menutup lubang yang tidak bisa ditutup kata per kata. Bukti
+    bahasa butuh tiga kata untuk bisa dipercaya - "Free Spin" dan
+    "Live Chat" dua kata Inggris yang justru istilah benar di halaman
+    Indonesia - jadi label sependek "Gift Cards" dan "New Sets" tidak
+    akan pernah lolos ambang itu sendirian.
+
+    Yang terjadi di template pengguna karena itu, terukur 14 Agustus
+    2026: satu kolom footer terbit setengah-setengah. "Track My
+    Order" tiga kata, terbukti asing, diganti jadi "Hubungi Tim";
+    tetangganya "Customer Service", "Returns", "Building
+    Instructions", dan "Missing Pieces" bertahan berbahasa Inggris.
+    Footer campur begitu lebih buruk daripada footer yang dibiarkan
+    utuh - dan yang menyebabkannya justru perbaikan sebelumnya.
+
+    Yang dinilai di sini kelompoknya, bukan anggotanya. Label yang
+    berdiri di posisi struktur yang sama - <div><ul><li><a> yang itu
+    juga - satu daftar menu buat pembacanya. Kalau di dalam satu
+    daftar ada dua label yang TERBUKTI asing dan tidak satu pun
+    anggotanya memuat kata bahasa halaman, daftar itu memang menu
+    milik situs lain, dan seluruh isinya salinan demo.
+
+    Syaratnya sengaja berlapis supaya menu yang sah tidak ikut
+    terbuka: kelompoknya harus cukup besar, buktinya harus lebih dari
+    satu, dan satu kata bahasa halaman saja di anggota mana pun
+    membatalkan seluruh penilaian.
+    """
+    keluarga: dict = {}
+
+    for slot in slots:
+        if slot.get("kind") != "text":
+            continue
+
+        isi = " ".join(str(slot.get("current") or "").split())
+
+        if not isi or len(isi.split()) > GROUP_MAX_WORDS:
+            continue
+
+        if protected_text(isi, slot.get("attrs"), slot.get("ancestors")):
+            continue
+
+        kunci = tuple(slot.get("path") or ())
+        keluarga.setdefault(kunci, []).append((slot, isi))
+
+    tertular = set()
+
+    for anggota in keluarga.values():
+        # Batas besar diperiksa atas SELURUH keluarga, bukan atas tiap
+        # daftar. Mega-menu 306 tautan di template 1/275 terpecah jadi
+        # puluhan daftar kecil yang masing-masing lolos batas, dan
+        # kalau yang diperiksa cuma pecahannya, batas itu tidak
+        # menahan apa pun - seluruh 306 label tetap terbuka.
+        if len(anggota) > GROUP_MAX_MEMBERS:
+            continue
+
+        anggota.sort(key=lambda x: x[0].get("element_index") or 0)
+
+        terbukti = {
+            id(slot)
+            for slot, isi in anggota
+            if foreign_copy(
+                isi, language, slot.get("attrs"), slot.get("ancestors")
+            )
+        }
+
+        for daftar in clusters(anggota):
+            if len(daftar) < GROUP_MIN_MEMBERS:
+                continue
+
+            # Satu kata bahasa halaman di anggota mana pun membatalkan
+            # seluruh daftar. Menu yang memang milik pemilik situs
+            # tidak pernah lolos syarat ini.
+            if any(native_words(isi, language) for _, isi in daftar):
+                continue
+
+            # Buktinya boleh datang dari daftar itu sendiri, atau dari
+            # daftar sebelah yang sebangun. Kolom "TENTANG" di
+            # template pengguna - About Us, Sustainability, LEGO®
+            # Insider, Careers - tidak punya satu pun label tiga kata,
+            # jadi sendirian ia tidak akan pernah terbukti; yang
+            # membuktikannya kolom sebelahnya, yang strukturnya sama
+            # persis dan sudah ketahuan menu toko.
+            sendiri = sum(1 for slot, _ in daftar if id(slot) in terbukti)
+
+            if not sendiri and len(terbukti) < GROUP_MIN_PROOF:
+                continue
+
+            tertular.update((slot["start"], slot["end"]) for slot, _ in daftar)
+
+    return tertular
+
+
+def indonesian_evidence(kata: list) -> bool:
+    """
+    Apakah deretan kata ini memuat bukti LEKSIKAL bahasa Indonesia.
+
+    Empat lapis, dan tiap lapis menutup lubang lapis di atasnya:
+    sapaan menangkap nama orang, kosakata perkakas menangkap label
+    tanpa imbuhan, bentuk kata menangkap yang berimbuhan, dan ekor
+    serapan menangkap kata yang bentuk Inggrisnya beda ekor.
+
+    Yang TIDAK ada di sini disengaja: aksara Latin itu sendiri tidak
+    pernah jadi bukti. Kalau ia ikut dihitung, "Wild Bandito",
+    "Gates Of Olympus Super Scatter", "RTP", dan "WhatsApp" semuanya
+    terbaca sisa template di halaman Thai - dan lapisan ini sudah dua
+    kali terbukti merusak lebih banyak daripada yang diperbaikinya
+    waktu buktinya terlalu longgar.
+    """
+    if not kata:
+        return False
+
+    # Sapaan harus berdiri di DEPAN dan ada yang disapa sesudahnya.
+    # Begitulah bentuk yang sebenarnya dipakai, dan syarat itu yang
+    # menahan "PAK" sebagai singkatan supaya tidak ikut terbaca.
+    if kata[0] in INDONESIAN_HONORIFICS and len(kata) >= 2:
+        return True
+
+    if any(
+        w in INDONESIAN_UI_WORDS or w in INDONESIAN_MARKERS for w in kata
+    ):
+        return True
+
+    if any(INDONESIAN_SHAPE.search(w) for w in kata if len(w) >= 5):
+        return True
+
+    return any(INDONESIAN_LOAN_SUFFIX.search(w) for w in kata)
+
+
+def indonesian_copy(
+    text: str,
+    language: str = "id",
+    attrs: dict | None = None,
+    ancestors: list | None = None,
+) -> bool:
+    """
+    Apakah teks ini salinan berbahasa Indonesia di halaman yang bukan.
+
+    Dipisah dari foreign_copy karena dipakai untuk satu keputusan
+    yang lebih tajam: membatalkan pengecualian potongan kalimat.
+    Potongan memang dibiarkan utuh - itu yang menjaga nama gim di
+    tengah kalimat - tapi pengecualian itu ikut melindungi nama orang
+    Indonesia yang berdiri di tempat yang sama persis.
+
+    Bedanya harus dibuat dengan bukti yang lebih sempit daripada
+    foreign_copy, bukan bukti yang sama. "Gates Of Olympus Super
+    Scatter" lolos foreign_copy lewat kata tugas "of"; kalau
+    pembatalnya memakai foreign_copy juga, nama gim itu ikut
+    tertulis ulang dan yang rusak justru yang selama ini benar.
+    """
+    if str(language or "").lower() not in NON_LATIN_LANGUAGES:
+        return False
+
+    isi = " ".join(str(text or "").split())
+
+    # Urutannya mengikat: nama dokumen kebijakan, wilayah yang diurus
+    # JS, dan perkakas pembaca layar diperiksa lebih dulu, persis
+    # seperti di foreign_copy. Wilayah titipan pihak ketiga sudah
+    # disingkirkan lebih awal lagi, di build_slot_map.
+    if protected_text(isi, attrs, ancestors):
+        return False
+
+    if THAI_CHAR.search(isi):
+        return False
+
+    return indonesian_evidence([w.lower() for w in LATIN_WORD.findall(isi)])
+
+
+def foreign_copy(
+    text: str,
+    language: str = "id",
+    attrs: dict | None = None,
+    ancestors: list | None = None,
+) -> bool:
+    """
+    Apakah teks ini salinan demo berbahasa lain, bukan isi halaman.
+
+    Ini dimensi yang dulu tidak pernah ditanyakan. Pemeta slot sudah
+    memutuskan mana yang perkakas situs dan mana yang tulisan, tapi
+    tidak satu pun keputusan itu menanyakan teksnya berbahasa apa -
+    sehingga salinan demo toko berbahasa Inggris ikut terbit di
+    halaman berbahasa Indonesia, dibekukan justru oleh aturan yang
+    dibuat untuk melindungi menu.
+
+    Terukur 14 Agustus 2026 pada template pengguna:
+
+        <span>Find a Store</span>                     (di <header>)
+        <p>VAT included · Free delivery on orders     (di luar blok
+           over £50</p>                                milik brand)
+
+    Yang dijadikan bukti kata TUGAS Inggris, bukan kata Inggris apa
+    pun. Kelas tertutup itu tidak pernah terserap ke bahasa
+    Indonesia, sedangkan kata benda dan kata sifatnya justru istilah
+    yang dipakai pembaca - lihat ENGLISH_FUNCTION_WORDS.
+
+    Tiga syarat harus terpenuhi sekaligus, dan ketiganya menyempit:
+    panjangnya cukup untuk dinilai, ada bukti kata tugas asing, dan
+    tidak ada satu pun kata Indonesia di dalamnya.
+    """
+    isi = " ".join(str(text or "").split())
+
+    # Nama dokumen kebijakan, wilayah yang diurus JS, dan perkakas
+    # pembaca layar tidak pernah dihitung salinan demo, sekalipun
+    # bahasanya asing. Semuanya dikumpulkan di protected_text.
+    if protected_text(isi, attrs, ancestors):
+        return False
+
+    # Teks beraksara Thai tidak pernah dihitung asing di sini.
+    # Di halaman Thai ia memang bahasanya sendiri; di halaman
+    # Indonesia ia salah bahasa, tapi yang begitu ditangani pemeriksa
+    # bahasa - bukan pemeta slot, yang tidak boleh menebak.
+    if THAI_CHAR.search(isi):
+        return False
+
+    kata = [w.lower() for w in LATIN_WORD.findall(isi)]
+
+    ambang = (
+        FOREIGN_MIN_WORDS_NON_LATIN
+        if str(language or "").lower() in NON_LATIN_LANGUAGES
+        else FOREIGN_MIN_WORDS
+    )
+
+    if len(kata) < ambang:
+        return False
+
+    # Kata Indonesia membuktikan teksnya bukan asing HANYA di halaman
+    # berbahasa Indonesia. Di halaman Thai, kalimat Indonesia justru
+    # salinan asing juga - dan bahasa Indonesia tidak akan pernah
+    # ketahuan lewat kata tugas Inggris, jadi di situ kata Indonesia
+    # berpindah peran: dari bukti "bukan asing" jadi bukti "asing".
+    if language == "id":
+        if any(w in INDONESIAN_MARKERS for w in kata):
+            return False
+
+        return any(w in ENGLISH_FUNCTION_WORDS for w in kata)
+
+    if any(
+        w in ENGLISH_FUNCTION_WORDS or w in INDONESIAN_MARKERS
+        for w in kata
+    ):
+        return True
+
+    # Label pendek tidak akan pernah memuat kata tugas - label memang
+    # jarang memuatnya - jadi di halaman berbahasa lain ia lolos terus
+    # selama buktinya cuma kata tugas. Terukur pada halaman Thai
+    # terbit: "Masuk", "Beranda", "Keamanan", "Promosi", "Account",
+    # dan "Min Deposit" semuanya bertahan sementara kalimat panjang di
+    # sekitarnya sudah berbahasa Thai.
+    #
+    # Bukti kosakata yang menutupnya, bukan aksara. Nama produk dan
+    # merek pihak lain tidak memuat kata perkakas, jadi keduanya tetap
+    # lewat - dan itu memang yang harus terjadi.
+    return indonesian_evidence(kata) or any(
+        w in FOREIGN_UI_WORDS for w in kata
+    )
+
 
 # Meta yang boleh ditulis ulang, beserta perannya.
 META_ROLES = {
@@ -246,6 +1143,38 @@ def in_frozen(slot: dict) -> bool:
     menyatakan maksudnya sendiri.
     """
     return any(tag in FROZEN_TAGS for tag in slot.get("path", []))
+
+
+# Penanda footer di nama class dan id.
+#
+# Tag <footer> sudah menyatakan maksudnya sendiri, dan sampai 21
+# Agustus 2026 hanya itu yang dibaca. Yang tidak tertangkap: template
+# yang footernya dirakit dari <div> biasa. Template 488 milik pengguna
+# tidak punya satu pun tag <footer>; kolom-kolom footernya ditandai
+# class 'm-footer__trusted-text', 'm-footer-links', dan
+# 'm-foot__links-section'. Akibatnya seluruh kolom footer toko ikut
+# ditulis ulang, dan judul kolomnya - "Support", "About Us",
+# "Explore", "Artists", "Follow Us", "We Accept" - terbit sebagai
+# "Pengalaman", "Sistem Stabil", "Pemain Aktif", "Pilihan Banyak",
+# "Keamanan Tinggi", "Main Tanpa Batas" di footer halaman slot.
+#
+# Nama class memang bebas dipilih pembuat template, jadi ini bisa
+# kelebihan tangkap - "footer-cta" di tengah halaman bukan footer.
+# Kelebihan tangkap dipilih dengan sadar: yang tertangkap tetap
+# kebagian penggantian nama brand dan penyamaan teks kembar, jadi
+# harganya satu blok yang memakai kata-kata template, sedangkan
+# kekurangan tangkap harganya footer toko yang isinya diacak.
+FOOTER_HINT = re.compile(r"footer|foot__|__foot\b|site-foot", re.I)
+
+
+def in_footer(slot: dict) -> bool:
+    """
+    Apakah slot ini berdiri di footer, dibaca dari tag maupun class.
+    """
+    if "footer" in slot.get("path", []):
+        return True
+
+    return nearest_hint(slot, FOOTER_HINT)
 
 
 def in_never(slot: dict) -> bool:
@@ -437,6 +1366,28 @@ def is_city_name(text: str) -> bool:
     return clean in ALL_CITY_NAMES
 
 
+# Sapaan, lalu satu atau dua kata berhuruf besar. Persis bentuk yang
+# dipakai orang, dan tidak dipakai apa pun yang lain.
+PERSON_SHAPE = re.compile(
+    r"^(?:{})\s+[A-Z][\w'’-]+(?:\s+[A-Z][\w'’-]+)?$".format(
+        "|".join(sorted(INDONESIAN_HONORIFICS))
+    ),
+    re.IGNORECASE,
+)
+
+
+def person_name(text: str) -> bool:
+    """
+    Apakah teks ini nama orang lengkap dengan sapaannya.
+
+    Dipakai untuk memilih SUMBER isinya, bukan untuk memutuskan boleh
+    tidaknya disentuh. Yang memutuskan itu indonesian_copy; yang ini
+    cuma menyatakan "isinya nama orang, jadi ambil dari daftar nama
+    zona, jangan minta ke model".
+    """
+    return bool(PERSON_SHAPE.match(" ".join((text or "").split())))
+
+
 def hint_text(attrs: dict) -> str:
     return " ".join(
         str(attrs.get(key, ""))
@@ -556,7 +1507,7 @@ def classify(slot: dict) -> str:
     # Angka, jam, dan persentase dibiarkan. Bentuknya memang bukan
     # kalimat, dan menimpanya dengan tulisan merusak tabel ukuran atau
     # daftar jam operasional tanpa menambah apa pun.
-    if not current or NOT_PROSE.match(current):
+    if not current or bukan_prosa(current):
         return ""
 
     if tag == "time":
@@ -692,8 +1643,27 @@ def classify(slot: dict) -> str:
         # pertanyaannya sebagai <h6> menerbitkannya sebagai heading
         # artikel - satu pertanyaan hilang, dan pasangan tanya-jawab
         # sesudahnya bergeser.
-        if tag in {"h2", "h3", "h4", "h5", "h6", "dt"}:
+        if tag == "dt":
             return "faq_question"
+
+        # Judul di dalam blok bertanda FAQ hanya dihitung pertanyaan
+        # kalau ia memang berbunyi seperti pertanyaan.
+        #
+        # Penanda FAQ dibaca dari class dan id leluhurnya, dan nama
+        # class tidak selalu sesempit maksudnya. Terukur di template
+        # 488: seluruh blok keterangan produk berdiri di dalam
+        # <div class="m-design-product-info-and-faqs">, jadi
+        # <h4>Product Quality</h4> - judul bagian mutu produk milik
+        # toko - terbaca sebagai pertanyaan FAQ, dan paragraf di
+        # bawahnya jadi jawabannya. Satu "pertanyaan" palsu itu
+        # menggeser seluruh pasangan tanya-jawab di halaman.
+        #
+        # Yang tidak bertanya apa-apa diteruskan ke aturan di bawah
+        # dan berakhir sebagai heading biasa - tetap ditulis ulang,
+        # cuma tidak berpura-pura jadi pertanyaan.
+        if tag in {"h2", "h3", "h4", "h5", "h6"}:
+            if looks_like_question(current):
+                return "faq_question"
 
         # <strong> dan <b> dipakai untuk dua hal yang sama sekali
         # berbeda di dalam blok yang sama: pertanyaannya, dan kata
@@ -1273,6 +2243,31 @@ def can_promote(slot: dict | None, sudah_berperan: set) -> bool:
     if slot.get("tag") in HEADING_TAGS:
         return False
 
+    # Teks yang berdiri DI DALAM sebuah judul juga tidak diangkat,
+    # walau tagnya sendiri bukan tag judul.
+    #
+    # Syarat di atas cuma membaca tag simpulnya sendiri, dan judul
+    # yang sebagian katanya ditebalkan atau dimiringkan lolos begitu
+    # saja. Terukur di berkas AMP template 298:
+    #
+    #     <h1 class="hero-title">OSB99 <em>Login</em></h1>
+    #     <p class="lead">OSB99 memberikan kemudahan deposit ...</p>
+    #
+    # "Login" berdiri tepat sebelum sebuah paragraf, sekedalaman
+    # dengannya, dan jauh lebih pendek daripadanya - ketiga syarat
+    # judul kartu terpenuhi - lalu ia diisi satu kalimat judul kartu
+    # utuh. Yang terbit: judul besar halaman berbunyi "RAJAWALI77
+    # <em>kalimat judul kartu sepanjang satu baris</em>", dan karena
+    # H1 berkas AMP jadi berbeda dari H1 landing, pemeriksa akhir
+    # menolak SELURUH run - template itu tidak bisa dipakai sama
+    # sekali sampai syarat ini dipasang.
+    #
+    # Kata di dalam judul adalah bagian dari judul itu. Ia sudah
+    # kebagian penggantian nama brand dan penyamaan teks kembar
+    # seperti bagian judul lainnya.
+    if any(tag in HEADING_TAGS for tag in (slot.get("path") or ())):
+        return False
+
     # Teks tautan dan tombol tidak pernah diangkat.
     #
     # Bentuknya memang cocok - pendek, tebal, berdiri tepat di atas
@@ -1464,6 +2459,168 @@ def promote_review_tags(scanned: dict, roles: dict, skipped: list) -> int:
     return len(diangkat)
 
 
+# Berapa simpul teks ke belakang sebuah pertanyaan boleh dicari dari
+# jawabannya. Kartu FAQ menyelipkan ikon, nomor, dan label "Learn
+# More" di antara keduanya, jadi tetangga langsung saja terlalu ketat.
+# Lebih jauh dari ini yang ditemukan bukan lagi pertanyaan miliknya
+# melainkan pertanyaan kartu sebelumnya.
+FAQ_PAIR_WINDOW = 4
+
+# Sejauh apa, dalam byte, sebuah pertanyaan boleh berdiri dari
+# jawabannya. Pasangan sungguhan di template 488 berjarak 528 dan 485
+# byte; yang palsu - jawaban milik toko yang menempel ke pesan
+# pencarian kosong "Not what you're looking for?" - berjarak 2.192.
+FAQ_PAIR_BYTES = 1400
+
+
+def pair_faq_cards(scanned: dict, roles: dict, skipped: list) -> int:
+    """
+    Memastikan tiap jawaban FAQ punya pertanyaan yang berdiri di atasnya.
+
+    Ini penutup cacat yang paling terlihat pembaca: **ditanya A
+    dijawab Z**. Mesin yang sudah ada memasangkan jawaban ke-N dengan
+    pertanyaan ke-N dari daftar slot, dan itu benar SELAMA kedua
+    daftarnya sama panjang dan sejajar. Di template nyata keduanya
+    sering tidak sejajar sama sekali.
+
+    Terukur di template 488 milik pengguna, sebuah template toko kaos
+    yang isinya disisipi bagian brand:
+
+        <h4>Product Quality</h4>                    <- terbaca faq_question
+        <p>Our Production Team establishes ...</p>  <- terbaca faq_answer
+        ...
+        <div>Mengapa BATARATOTO Menjadi Situs Slot Pilihan?</div>
+        <span>BATARATOTO hadir sebagai situs slot ...</span>  <- faq_answer
+        ...
+        <div>Apa Saja Pilihan Game yang Tersedia di BATARATOTO?</div>
+        <p>BATARATOTO menghadirkan koleksi permainan ...</p>   <- faq_answer
+
+    Seluruh blok itu berdiri di dalam <div class="...-and-faqs">, jadi
+    penanda FAQ mengenainya semua. Hasilnya satu "pertanyaan" yang
+    sebenarnya judul bagian toko, dan tiga "jawaban". Model diberi
+    daftar berisi satu pertanyaan lalu diminta tiga jawaban, jadi dua
+    jawaban terakhir ditulis tanpa pernah melihat pertanyaan apa pun -
+    sementara di halaman keduanya berdiri persis di bawah dua
+    pertanyaan sungguhan yang tidak pernah ikut ditulis ulang.
+
+    Yang dikerjakan fungsi ini, untuk tiap jawaban, urut dokumen:
+
+      1. Mencari teks berbentuk pertanyaan yang berdiri di atasnya.
+      2. Kalau teks itu belum berperan, ia DIANGKAT jadi faq_question,
+         sehingga tanya dan jawabnya ditulis ulang berpasangan.
+      3. Bunyi pertanyaannya dicatat di "asks" - dipakai prompt kalau
+         pertanyaannya sendiri tidak bisa diangkat, misalnya karena
+         berdiri di footer atau di dalam iklan.
+      4. Jawaban yang TIDAK punya pertanyaan di atasnya bukan jawaban.
+         Ia diturunkan jadi paragraf biasa.
+
+    Teks di dalam <button> ikut boleh diangkat, dan itu bukan
+    kelonggaran melainkan bentuk yang lazim: akordeon FAQ menulis
+    pertanyaannya sebagai tombol yang membuka jawabannya. Yang
+    membedakannya dari label tombol biasa bentuk teksnya sendiri -
+    label tombol tidak bertanya apa-apa.
+
+    Mengembalikan berapa jawaban yang diturunkan jadi paragraf.
+    """
+    jawaban = roles.get("faq_answer")
+
+    if not jawaban:
+        return 0
+
+    teks = sorted_text_slots(scanned)
+
+    sudah_berperan = {
+        (slot["start"], slot["end"])
+        for daftar in roles.values()
+        for slot in daftar
+    }
+
+    diangkat: list[dict] = []
+    tersisa: list[dict] = []
+    diturunkan = 0
+
+    for isi in sorted(jawaban, key=lambda slot: slot["start"]):
+        tanya = None
+        batas = isi["start"]
+
+        for _ in range(FAQ_PAIR_WINDOW):
+            calon = previous_text_slot(teks, batas)
+
+            if calon is None:
+                break
+
+            batas = calon["start"]
+
+            if isi["start"] - batas > FAQ_PAIR_BYTES:
+                break
+
+            if looks_like_question(str(calon["current"])):
+                tanya = calon
+                break
+
+            # Judul bagian yang bukan pertanyaan menutup pencarian.
+            #
+            # Judul memulai bagian baru, jadi apa pun yang berdiri di
+            # atasnya milik bagian sebelumnya. Tanpa batas ini,
+            # paragraf mutu produk di template 488 - yang dikepalai
+            # <h4>Product Quality</h4> - menyeberang ke pesan
+            # pencarian kosong "Not what you're looking for?" dua
+            # simpul di atasnya, lalu terbit sebagai jawaban atas
+            # pertanyaan yang tidak pernah ditanyakan siapa pun.
+            if str(calon.get("tag")) in HEADING_TAGS:
+                break
+
+        if tanya is None:
+            # Bukan jawaban, melainkan paragraf yang kebetulan
+            # berdiri di dalam blok bertanda FAQ.
+            isi["role"] = (
+                "paragraph"
+                if len(str(isi["current"]).strip()) >= MIN_PARAGRAPH_CHARS
+                else "label"
+            )
+            isi["budget"] = length_budget(isi["current"], isi["role"])
+
+            roles.setdefault(isi["role"], []).append(isi)
+            roles[isi["role"]].sort(key=lambda slot: slot["start"])
+
+            diturunkan += 1
+            continue
+
+        isi["asks"] = " ".join(str(tanya["current"]).split())
+        tersisa.append(isi)
+
+        kunci = (tanya["start"], tanya["end"])
+
+        if kunci in sudah_berperan:
+            continue
+
+        if tanya.get("frozen") or tanya.get("in_ad"):
+            continue
+
+        if tanya.get("tag") in NEVER_TAGS:
+            continue
+
+        if not tanya.get("kept"):
+            continue
+
+        tanya["partner"] = isi["start"]
+        diangkat.append(tanya)
+        sudah_berperan.add(kunci)
+
+    if tersisa:
+        roles["faq_answer"] = tersisa
+    else:
+        roles.pop("faq_answer", None)
+
+    if diangkat:
+        take_from_skipped(skipped, diangkat, "faq_question")
+
+        roles.setdefault("faq_question", []).extend(diangkat)
+        roles["faq_question"].sort(key=lambda slot: slot["start"])
+
+    return diturunkan
+
+
 def scope_to_brand_block(
     scanned: dict,
     roles: dict,
@@ -1473,9 +2630,34 @@ def scope_to_brand_block(
     """
     Menyisihkan paragraf dan butir daftar yang bukan milik brand lama.
 
-    Satu bagian dianggap milik brand lama kalau judulnya menyebut
-    namanya. Isi di bawah judul itulah yang ditulis ulang; sisanya
-    tetap memakai kalimat pemilik template.
+    Sebuah bagian ditulis ulang kalau salah satu dari dua hal berlaku
+    pada judulnya:
+
+      1. Judulnya menyebut nama brand lama.
+      2. Judulnya SENDIRI ikut ditulis ulang NEIIU.
+
+    Syarat kedua yang dulu tidak ada, dan ketiadaannya menerbitkan
+    halaman yang isinya bertengkar dengan judulnya sendiri. Terukur di
+    template 298: judul kartu "Transparansi informasi" berganti teks
+    baru, sementara paragraf tepat di bawahnya - "Setiap data yang
+    ditampilkan memiliki sumber yang dapat diverifikasi." - bertahan
+    apa adanya karena judul itu tidak menyebut "OSB99". Delapan
+    paragraf bernasib sama di berkas itu, dan lima di antaranya masih
+    bercerita tentang deposit QRIS, keyword pemilik template
+    sebelumnya, di halaman yang seluruh judulnya sudah membicarakan
+    keyword yang lain sama sekali.
+
+    Syarat pertama tetap ada dan tetap yang utama: bagian yang
+    judulnya menyebut brand lama ditulis ulang walau judulnya sendiri
+    tidak jadi slot.
+
+    Yang dijaga syarat kedua justru yang sama dengan yang dijaga
+    seluruh fungsi ini - tulisan milik pemilik template. Judul milik
+    toko yang templatenya dipinjam tidak pernah jadi slot heading:
+    di template 275 judul "Become a Madridista Platinum" berbahasa
+    Inggris di halaman berbahasa Indonesia, jadi ia tersisih jauh
+    sebelum sampai ke sini, dan keterangan produk di bawahnya ikut
+    tetap aman.
 
     Mengembalikan berapa slot yang disisihkan.
     """
@@ -1491,18 +2673,33 @@ def scope_to_brand_block(
     if not bagian:
         return 0
 
-    # Rentang tiap bagian milik brand lama.
+    # Letak judul yang teksnya diganti NEIIU.
+    #
+    # Dibaca dari peran "heading" saja. Peran "card_title" belum ada
+    # waktu fungsi ini jalan - ia diangkat dari label PALING AKHIR,
+    # justru sesudah penyisihan ini - dan memanggilnya lebih awal
+    # membalik urutan yang sudah dijelaskan di build_slot_map.
+    judul_diganti = {
+        int(slot["start"]) for slot in roles.get("heading", [])
+    }
+
+    # Rentang tiap bagian yang isinya ikut ditulis ulang.
     milik: list[tuple[int, float]] = []
 
     for urutan, (mulai, judul) in enumerate(bagian):
-        if not pola.search(judul):
-            continue
-
         batas = (
             bagian[urutan + 1][0]
             if urutan + 1 < len(bagian)
             else float("inf")
         )
+
+        # Teks judulnya berdiri sesudah tag pembukanya dan sebelum
+        # judul berikutnya, jadi rentang bagian ini juga yang
+        # menentukan slot heading mana yang menamainya.
+        if not pola.search(judul) and not any(
+            mulai < posisi < batas for posisi in judul_diganti
+        ):
+            continue
 
         milik.append((mulai, batas))
 
@@ -1522,7 +2719,14 @@ def scope_to_brand_block(
             # berdiri. Bagian yang judulnya berupa gambar tidak akan
             # pernah cocok dengan nama apa pun, dan tanpa syarat ini
             # isinya hilang bersama judulnya.
-            if di_dalam or pola.search(str(slot["current"])):
+            # Salinan demo berbahasa lain ikut ditulis ulang di mana
+            # pun ia berdiri. Aturan "hanya di dalam blok milik brand
+            # lama" ada supaya tulisan milik pemilik template tidak
+            # ditimpa; teks berbahasa Inggris di halaman Indonesia
+            # bukan tulisan yang perlu dijaga begitu.
+            if di_dalam or pola.search(str(slot["current"])) or slot.get(
+                "foreign"
+            ):
                 tersisa.append(slot)
                 continue
 
@@ -1538,7 +2742,11 @@ def scope_to_brand_block(
     return disisihkan
 
 
-def build_slot_map(scanned: dict, old_brand: str = "") -> dict:
+def build_slot_map(
+    scanned: dict,
+    old_brand: str = "",
+    language: str = "id",
+) -> dict:
     """
     Mengelompokkan slot menurut perannya.
 
@@ -1547,18 +2755,88 @@ def build_slot_map(scanned: dict, old_brand: str = "") -> dict:
     tagnya. Ini yang membedakan tulisan logo dari label menu di
     template yang tidak memberi penanda class apa pun.
 
+    language dipakai satu hal saja: memutuskan apakah teks yang
+    dibekukan atau dilewati ternyata salinan demo berbahasa lain.
+    Dua kebijakan di bawah - beku dan kept - dibuat untuk melindungi
+    perkakas situs, dan keduanya benar. Yang tidak pernah keduanya
+    tanyakan adalah teksnya berbahasa apa, sehingga salinan toko
+    berbahasa Inggris ikut terlindungi di halaman berbahasa
+    Indonesia. Lihat foreign_copy.
+
     Mengembalikan {"roles": {peran: [slot,...]}, "skipped": [...]}.
     """
     roles: dict[str, list[dict]] = {}
     skipped: list[dict] = []
     unquoted: list[str] = []
+    asing = 0
+    terlindungi = 0
 
     nama_lama = {
         " ".join(bentuk.split()).casefold()
         for bentuk in brand_variants(old_brand)
     }
 
+    # Titipan pihak ketiga disingkirkan LEBIH DULU, sebelum satu pun
+    # penilaian bahasa berjalan.
+    #
+    # Urutannya yang penting, bukan cuma keberadaannya. Iklan
+    # berbahasa Inggris di halaman Thai memang terbaca "asing" oleh
+    # foreign_copy - dan memang seharusnya terbaca begitu, karena ia
+    # asing. Yang salah bukan penilaiannya melainkan menerapkannya:
+    # kreatif itu ditulis dalam bahasa itu oleh pemasangnya. Kalau
+    # penyaringan bahasa dijalankan dulu lalu perlindungan menyusul,
+    # yang terbit adalah iklan setengah diterjemahkan.
+    dilindungi = list(scanned.get("protected") or [])
+
+    bebas = [
+        slot
+        for slot in scanned["slots"]
+        if not inside(slot.get("start", -1), dilindungi)
+    ]
+
+    # Penilaian tetangga hanya melihat slot yang bebas. Label di
+    # dalam iklan tidak boleh ikut jadi bukti bagi tetangganya, dan
+    # tidak boleh ikut tertular oleh mereka.
+    pecahan = native_fragments(bebas, language)
+
+    terbukti = {
+        id(slot)
+        for slot in bebas
+        if slot.get("kind") == "text"
+        and (slot["start"], slot["end"]) not in pecahan
+        and foreign_copy(
+            slot.get("current"),
+            language,
+            slot.get("attrs"),
+            slot.get("ancestors"),
+        )
+    }
+
+    tertular = (
+        sibling_groups(bebas, language)
+        | section_inherit(bebas, language, terbukti)
+    ) - pecahan
+
     for slot in scanned["slots"]:
+        # Penanda dari pemanggilan sebelumnya dibuang dulu. Slot yang
+        # sama bisa dipetakan lebih dari sekali - landing dan AMP
+        # dipindai terpisah, tapi satu hasil pindai bisa dipetakan
+        # ulang untuk zona lain - dan penanda yang tertinggal membuat
+        # keputusan zona kedua terbawa ke zona pertama.
+        slot.pop("foreign", None)
+        slot.pop("protected_ad", None)
+
+        # Seluruh isi wilayah titipan ikut terlindungi, sampai ke
+        # anak terdalamnya. Perlindungan setengah - logonya utuh,
+        # judulnya tertulis ulang - lebih buruk daripada tidak
+        # melindungi sama sekali, karena hasilnya iklan yang tidak
+        # lagi bisa dibaca sebagai iklan siapa pun.
+        if inside(slot.get("start", -1), dilindungi):
+            slot["protected_ad"] = True
+            terlindungi += 1
+            skipped.append(slot)
+            continue
+
         role = classify(slot)
 
         if (
@@ -1605,20 +2883,147 @@ def build_slot_map(scanned: dict, old_brand: str = "") -> dict:
         # memang menamai kolom menu.
         beku = frozen_tags(slot)
 
-        boleh_lewat = role == "breadcrumb" or (
-            role in {"h1", "heading"} and beku == {"header"}
+        # Footer dibekukan MUTLAK, tanpa pengecualian salinan asing.
+        #
+        # Pengecualian itu ada supaya sisa teks demo berbahasa lain
+        # tetap tertulis ulang di mana pun ia berdiri, dan untuk badan
+        # halaman itu benar. Untuk footer justru itu yang merusak:
+        # kolom footer memang hampir seluruhnya berbahasa Inggris di
+        # template buatan luar, jadi pengecualian ini membuka persis
+        # blok yang paling tidak boleh dibuka. Diminta pengguna 21
+        # Agustus 2026: "untuk bagian footer jangan ubah bila tidak
+        # menyangkut brand".
+        #
+        # Yang menyangkut brand tetap berganti - nama brand lama di
+        # footer diganti nama baru lewat brand_edits, seperti di
+        # bagian beku lainnya.
+        di_footer = in_footer(slot)
+
+        # Salinan demo berbahasa lain tidak ikut dilindungi kedua
+        # kebijakan di bawah. Perlindungannya ada supaya perkakas
+        # situs tetap memakai kata-kata pemiliknya; teks berbahasa
+        # Inggris di halaman Indonesia bukan perkakas yang perlu
+        # dijaga, melainkan sisa template yang belum berganti.
+        # Nilai atribut ikut diperiksa hanya kalau tulisannya muncul
+        # di layar - lihat VISIBLE_ATTRS. Nama untuk pembaca layar
+        # tidak ikut: di sana teks Inggris memang cacat, tapi salah
+        # menamai tombol jauh lebih merugikan daripada membiarkannya.
+        bisa_dinilai = slot.get("kind") == "text" or (
+            slot.get("attr") in VISIBLE_ATTRS
         )
 
-        if beku and not boleh_lewat:
-            slot["frozen"] = True
+        # Bukti Indonesia membatalkan pengecualian potongan kalimat.
+        #
+        # Potongan dibiarkan utuh supaya nama produk di tengah kalimat
+        # tidak ikut diterjemahkan, dan itu benar - tapi di kartu yang
+        # sama persis berdiri juga nama ORANG, dan nama orang
+        # Indonesia di halaman Thai bukan nama produk yang perlu
+        # dijaga. Terukur: "Ibu Ninik", "Ibu Mayang", dan "Bapak
+        # Rehan" terbit utuh di halaman Thai, terlindungi oleh aturan
+        # yang dibuat untuk melindungi "Wild Bandito" di sebelahnya.
+        #
+        # Pembatalnya memakai indonesian_copy, bukan foreign_copy.
+        # Bedanya yang menjaga nama gim: "Gates Of Olympus Super
+        # Scatter" lolos foreign_copy lewat kata tugas "of", dan
+        # dengan pembatal yang sama luasnya ia ikut tertulis ulang.
+        bukti_indonesia = bisa_dinilai and indonesian_copy(
+            slot.get("current"),
+            language,
+            slot.get("attrs"),
+            slot.get("ancestors"),
+        )
+
+        salinan_asing = bisa_dinilai and (
+            bukti_indonesia
+            or (
+                (slot["start"], slot["end"]) not in pecahan
+                and (
+                    foreign_copy(
+                        slot.get("current"),
+                        language,
+                        slot.get("attrs"),
+                        slot.get("ancestors"),
+                    )
+                    or (slot["start"], slot["end"]) in tertular
+                )
+            )
+        )
+
+        if salinan_asing:
+            asing += 1
+            slot["foreign"] = True
+
+        # Nama orang tidak diminta ke model, diambil dari daftar zona.
+        #
+        # Alasannya sama seperti nama pengulas dan nama kota, dan
+        # sudah tertulis di PERSON_NAMES: yang diminta ke model 4B
+        # tidak pernah benar-benar jadi nama. Dibiarkan lewat jalur
+        # label biasa, slot ini terisi frasa Thai sepanjang sembilan
+        # karakter di tempat yang seharusnya berisi nama orang.
+        #
+        # Hanya berlaku waktu teksnya memang terbukti salah bahasa,
+        # jadi halaman Indonesia sama sekali tidak tersentuh.
+        if bukti_indonesia and role in KEPT_ROLES and person_name(
+            slot.get("current")
+        ):
+            role = "review_author"
+
+        # Perkakas situs diperiksa PALING DULU, dan tanpa satu pun
+        # jalan keluar.
+        #
+        # Dua hal berubah di sini pada 30 Agustus 2026, dan keduanya
+        # perbaikan atas kerusakan yang terukur di halaman jadi.
+        #
+        # Pertama, urutannya. Dulu pemeriksaan ini berdiri SESUDAH
+        # gerbang bagian beku, dan gerbang itu punya jalan keluar
+        # "salinan_asing and not di_footer" - jadi menu berbahasa
+        # asing di dalam <nav> yang beku justru lolos lewat sana
+        # sebelum sempat sampai ke sini.
+        #
+        # Kedua, jalan keluar "not salinan_asing" dicabut. Itu yang
+        # merusak: templatenya berbahasa Inggris, halamannya
+        # Indonesia, jadi SETIAP label menu terbaca "salah bahasa"
+        # lalu ditulis ulang jadi kalimat SEO. Terukur pada job 169,
+        # 79 tulisan tautan berganti - dan bukan berganti bahasa,
+        # melainkan berganti maksud:
+        #
+        #     "Log In"            -> "Main dari HP"
+        #     "Create an Account" -> "Proses Tanpa Gangguan"
+        #     "animals"           -> "Sistem Responsif"
+        #     "anime"             -> "Layanan 24 Jam"
+        #     "About TeePublic"   -> "Tampilan Realtime"
+        #
+        # Menu yang tombol masuknya bertuliskan "Main dari HP" bukan
+        # menu yang bahasanya diperbaiki; ia menu yang isinya
+        # ditukar. Pengguna menyebutnya dengan kalimatnya sendiri:
+        # "bagian struktur template jangan di ubah jangan rusak dan
+        # jangan di gantian bagian struktur nya".
+        #
+        # Yang HILANG karena pencabutan ini cuma satu: menu berbahasa
+        # asing tidak lagi diterjemahkan. Itu memang kerugian, dan
+        # itu kerugian yang jauh lebih murah - menu berbahasa Inggris
+        # masih menunjuk ke tempat yang benar, sedangkan menu yang
+        # ditulis ulang tidak.
+        #
+        # Dilewati di sini BUKAN berarti dibekukan. Slot yang
+        # dilewati tetap kebagian dua lapis berikutnya: nama brand
+        # lama di dalamnya diganti, dan teks yang bunyinya sama
+        # dengan judul lama ikut memakai judul baru. Jadi
+        # "BATARATOTO LOGIN" terbit sebagai "ABECE LOGIN" - bukan
+        # sebagai "Pilih Slot".
+        if role in KEPT_ROLES:
+            slot["kept"] = True
             skipped.append(slot)
             continue
 
-        # Perkakas situs - menu, tombol, label formulir, keterangan
-        # gambar - tetap memakai kata-kata template. Penjelasannya
-        # panjang di KEPT_ROLES.
-        if role in KEPT_ROLES:
-            slot["kept"] = True
+        boleh_lewat = (
+            role == "breadcrumb"
+            or (role in {"h1", "heading"} and beku == {"header"})
+            or (salinan_asing and not di_footer)
+        )
+
+        if (beku or di_footer) and not boleh_lewat:
+            slot["frozen"] = True
             skipped.append(slot)
             continue
 
@@ -1655,6 +3060,15 @@ def build_slot_map(scanned: dict, old_brand: str = "") -> dict:
     # sesudah ulasan sebelumnya.
     promote_review_tags(scanned, roles, skipped)
 
+    # Pasangan tanya-jawab dibereskan SEBELUM penyisihan blok brand.
+    #
+    # Urutannya mengikat: fungsi ini menurunkan jawaban tanpa
+    # pertanyaan jadi paragraf, dan paragraf itu harus ikut dinilai
+    # penyisihan blok seperti paragraf lainnya. Dijalankan sesudahnya,
+    # paragraf hasil penurunan lolos tanpa pernah diperiksa milik
+    # bagian siapa.
+    faq_lepas = pair_faq_cards(scanned, roles, skipped)
+
     di_luar_blok = scope_to_brand_block(scanned, roles, skipped, old_brand)
 
     # Judul kartu diangkat PALING AKHIR, sesudah paragraf yang bukan
@@ -1668,6 +3082,14 @@ def build_slot_map(scanned: dict, old_brand: str = "") -> dict:
         "skipped": skipped,
         "unquoted": unquoted,
         "outside_block": di_luar_blok,
+        # Berapa "jawaban" yang ternyata tidak punya pertanyaan di
+        # atasnya, jadi diturunkan jadi paragraf biasa.
+        "faq_unpaired": faq_lepas,
+        # Berapa teks yang dibuka justru karena bahasanya lain.
+        # Dilaporkan supaya jumlahnya kelihatan di log, bukan
+        # berpindah tangan diam-diam.
+        "foreign": asing,
+        "protected": terlindungi,
         "counts": {role: len(items) for role, items in sorted(roles.items())},
     }
 

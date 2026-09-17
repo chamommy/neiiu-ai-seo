@@ -22,6 +22,32 @@ const runSpinner = document.getElementById("runSpinner");
 const jobLog = document.getElementById("jobLog");
 const jobList = document.getElementById("jobList");
 const tokenBalance = document.getElementById("tokenBalance");
+const genStatus = document.getElementById("genStatus");
+
+/*
+ * Keadaan job dalam satu kata, di sebelah judul kartu.
+ *
+ * Bilah kemajuan menjawab "sudah sampai mana"; yang ini menjawab
+ * "sedang apa". Halaman template tidak punya simpul ini, jadi
+ * kehadirannya diperiksa dulu - aturan yang sama dengan bagian lain
+ * di berkas ini yang dipakai bersama dua halaman.
+ */
+const STATUS_CHIP = {
+    idle: "Siap",
+    starting: "Menyiapkan",
+    running: "Berjalan",
+    success: "Selesai",
+    error: "Gagal",
+};
+
+function setGenStatus(state) {
+    if (!genStatus) {
+        return;
+    }
+
+    genStatus.dataset.state = state;
+    genStatus.textContent = STATUS_CHIP[state] || state;
+}
 
 let watchedJobId = null;
 let pollTimer = null;
@@ -45,13 +71,19 @@ function escapeHtml(value) {
 }
 
 function showNotice(message, kind) {
+    if (!formNotice) {
+        return;
+    }
+
     formNotice.textContent = message;
     formNotice.className = "notice" + (kind ? " " + kind : "");
     formNotice.hidden = false;
 }
 
 function hideNotice() {
-    formNotice.hidden = true;
+    if (formNotice) {
+        formNotice.hidden = true;
+    }
 }
 
 // ---------- Konfirmasi ----------
@@ -97,8 +129,15 @@ function tanya({ judul, pesan, tombol = "Hapus", bahaya = true }) {
 }
 
 async function api(url, options) {
+    // Berkas dan formulir multipart TIDAK boleh kebagian header
+    // JSON. Batas antarbagian multipart ditulis browser sendiri ke
+    // dalam Content-Type, dan menimpanya dengan "application/json"
+    // membuat server menerima badan permintaan yang tidak bisa
+    // diurai - jawabannya 400 untuk permintaan yang sebenarnya benar.
+    const multipart = options && options.body instanceof FormData;
+
     const response = await fetch(url, {
-        headers: { "Content-Type": "application/json" },
+        headers: multipart ? {} : { "Content-Type": "application/json" },
         ...options,
     });
 
@@ -140,6 +179,7 @@ function renderSteps(step, status) {
 
 function renderProgress(job) {
     progressCard.hidden = false;
+    setGenStatus(job.status === "queued" ? "starting" : "running");
 
     renderSteps(job.step, job.status);
 
@@ -287,6 +327,14 @@ function renderJobCard(job) {
 }
 
 async function refreshJobs() {
+    // Berkas ini dipakai dua halaman: generator dan pengelola
+    // template. Yang kedua tidak punya daftar riwayat, jadi
+    // ketiadaannya bukan kesalahan - cuma berarti tidak ada yang
+    // perlu dimuat di sini.
+    if (!jobList) {
+        return;
+    }
+
     let payload;
 
     try {
@@ -353,6 +401,8 @@ async function pollJob() {
             progressCard.hidden = true;
         }
 
+        setGenStatus(job.status === "success" ? "success" : "error");
+
         showNotice(
             job.status === "success"
                 ? `Job "${job.keyword}" selesai.`
@@ -383,6 +433,7 @@ function watchJob(jobId) {
 function stopWatching() {
     watchedJobId = null;
     submitBtn.disabled = false;
+    submitBtn.classList.remove("is-loading");
 
     if (pollTimer) {
         clearInterval(pollTimer);
@@ -390,26 +441,49 @@ function stopWatching() {
     }
 }
 
-form.addEventListener("submit", async (event) => {
+form?.addEventListener("submit", async (event) => {
     event.preventDefault();
     hideNotice();
 
-    const keyword = document.getElementById("keyword").value.trim();
+    const niche = document.getElementById("niche").value.trim();
 
-    if (!keyword) {
-        showNotice("Keyword tidak boleh kosong.", "error");
+    if (!niche) {
+        showNotice("Niche tidak boleh kosong.", "error");
+        return;
+    }
+
+    // Diperiksa di sini JUGA, bukan cuma di server.
+    //
+    // Server tetap yang memutuskan - lihat api_neiiu_create_job -
+    // tapi menunggu jawaban 400 untuk kolom yang jelas-jelas belum
+    // diisi berarti pengguna menekan tombol, menunggu, lalu membaca
+    // pesan yang bisa muncul seketika.
+    const templateDipilih = Number(
+        document.getElementById("templateId").value
+    ) || 0;
+
+    if (!templateDipilih && !document.getElementById("analyzeOnly").checked) {
+        showNotice(
+            "Pilih template dulu. Halaman ditulis di atas template " +
+                "yang kamu unggah, jadi tanpa template tidak ada " +
+                "struktur yang bisa diisi.",
+            "error"
+        );
         return;
     }
 
     submitBtn.disabled = true;
+    submitBtn.classList.add("is-loading");
+    setGenStatus("starting");
 
     const body = {
-        keyword,
+        // Topik halaman. Server menerimanya sebagai "niche" dan
+        // menyimpannya di kolom keyword - nama lama yang dipakai
+        // seluruh pipeline. Yang berganti namanya cuma di layar.
+        niche,
         brand_name: document.getElementById("brandName").value.trim(),
-        base_url: document.getElementById("baseUrl").value.trim(),
         provider: document.getElementById("provider").value,
         crawl: Number(document.getElementById("crawl").value) || 10,
-        reference: document.getElementById("reference").value.trim(),
         use_cache: document.getElementById("useCache").checked,
         analyze_only: document.getElementById("analyzeOnly").checked,
         region: document.getElementById("region").value,
@@ -420,9 +494,16 @@ form.addEventListener("submit", async (event) => {
         template_brand: document
             .getElementById("templateBrand")
             .value.trim(),
-        design_refs: document
-            .getElementById("designRefs")
+        // Alamat, semuanya opsional.
+        //
+        // Yang dikosongkan dikirim sebagai string kosong, dan string
+        // kosong berarti alamat yang sudah ada di template dibiarkan
+        // apa adanya. Tidak ada satu pun nilai cadangan di jalur ini -
+        // lihat generators/page_links.py.
+        canonical_url: document
+            .getElementById("canonicalUrl")
             .value.trim(),
+        amphtml_url: document.getElementById("amphtmlUrl").value.trim(),
         cta_url: document.getElementById("ctaUrl").value.trim(),
         logo_url: document.getElementById("logoUrl").value.trim(),
         favicon_url: document.getElementById("faviconUrl").value.trim(),
@@ -459,7 +540,7 @@ form.addEventListener("submit", async (event) => {
     }
 });
 
-jobList.addEventListener("click", async (event) => {
+jobList?.addEventListener("click", async (event) => {
     const button = event.target.closest("[data-delete]");
 
     if (!button) {
@@ -500,6 +581,15 @@ jobList.addEventListener("click", async (event) => {
 
 // ---------- Template milik pengguna ----------
 
+// Bagian ini berdiri di DUA halaman, dan masing-masing cuma memakai
+// separuhnya. Halaman generator punya pemilih template tapi tidak
+// punya formulir unggah; halaman pengelola template kebalikannya.
+// Karena itu tiap simpul diperiksa dulu sebelum dipakai - yang
+// tidak ada bukan kesalahan, cuma bagian yang tidak dipakai halaman
+// ini. Satu berkas untuk keduanya supaya cara memanggil
+// /api/neiiu/templates tidak ditulis dua kali lalu berbeda suatu
+// saat.
+
 const templateForm = document.getElementById("templateForm");
 const templateNotice = document.getElementById("templateNotice");
 const templateList = document.getElementById("templateList");
@@ -507,9 +597,39 @@ const templateSelect = document.getElementById("templateId");
 const uploadBtn = document.getElementById("uploadBtn");
 
 function showTemplateNotice(message, kind) {
+    if (!templateNotice) {
+        return;
+    }
+
     templateNotice.textContent = message;
     templateNotice.className = "notice" + (kind ? " " + kind : "");
     templateNotice.hidden = false;
+}
+
+/**
+ * Waktu simpan yang bisa dibaca sekilas.
+ *
+ * Yang disimpan database ISO UTC. Ditampilkan apa adanya, kolomnya
+ * jadi deretan angka dan huruf T yang tidak terbaca sebagai tanggal
+ * oleh siapa pun yang cuma ingin tahu mana template yang paling
+ * baru.
+ */
+function tanggalPendek(value) {
+    if (!value) {
+        return "-";
+    }
+
+    const waktu = new Date(value);
+
+    if (Number.isNaN(waktu.getTime())) {
+        return String(value).slice(0, 10);
+    }
+
+    return waktu.toLocaleDateString("id-ID", {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+    });
 }
 
 function formatBytes(value) {
@@ -524,14 +644,33 @@ function renderTemplates(items) {
     // Pilihan yang sedang aktif dipertahankan, supaya daftar yang
     // dimuat ulang setelah unggahan tidak diam-diam mengganti
     // template yang sudah dipilih pengguna.
-    const chosen = templateSelect.value;
+    const chosen = templateSelect ? templateSelect.value : "0";
 
-    templateSelect.innerHTML =
-        '<option value="0">Tanpa template (tiru struktur kompetitor)</option>';
+    if (templateSelect) {
+        // Pilihan pertama BUKAN "tanpa template" lagi, melainkan
+        // ajakan memilih yang tidak sah dikirim.
+        //
+        // Halaman ini ditulis di atas template dan hanya di atas
+        // template; tidak ada lagi jalur yang merakit struktur
+        // sendiri. Menyisakan pilihan lamanya berarti menjanjikan
+        // sesuatu yang akan ditolak server sesudah tombolnya
+        // ditekan.
+        templateSelect.innerHTML =
+            '<option value="0">' +
+            "-- pilih template --</option>";
+    }
+
+    if (!templateList) {
+        // Halaman generator: yang perlu diisi cuma pemilihnya.
+        isiPemilihTemplate(items, chosen);
+        return;
+    }
 
     if (!items.length) {
         templateList.innerHTML =
-            '<div class="empty">Belum ada template yang diunggah.</div>';
+            '<div class="empty">Belum ada template yang diunggah. ' +
+            '<a href="/neiiu/template">Unggah satu</a> untuk mulai.</div>';
+        isiPemilihTemplate(items, chosen);
         return;
     }
 
@@ -545,9 +684,14 @@ function renderTemplates(items) {
                 <div class="job-card">
                     <div class="job-head">
                         <strong>${escapeHtml(item.name)}</strong>
-                        <button class="link-btn" data-hapus-template="${item.id}">
-                            Hapus
-                        </button>
+                        <span>
+                            <button class="link-btn" data-ganti-nama="${item.id}">
+                                Ganti nama
+                            </button>
+                            <button class="link-btn" data-hapus-template="${item.id}">
+                                Hapus
+                            </button>
+                        </span>
                     </div>
                     <div class="job-meta">
                         landing ${formatBytes(item.landing_bytes)}
@@ -555,6 +699,16 @@ function renderTemplates(items) {
                             item.amp_bytes
                                 ? "&middot; AMP " + formatBytes(item.amp_bytes)
                                 : "&middot; tanpa AMP"
+                        }
+                    </div>
+                    <div class="job-meta">
+                        dibuat ${escapeHtml(tanggalPendek(item.created_at))}
+                        ${
+                            item.updated_at &&
+                            item.updated_at !== item.created_at
+                                ? "&middot; diubah " +
+                                  escapeHtml(tanggalPendek(item.updated_at))
+                                : ""
                         }
                     </div>
                     <div class="job-meta">Bagian yang akan diisi: ${
@@ -570,6 +724,21 @@ function renderTemplates(items) {
         })
         .join("");
 
+    isiPemilihTemplate(items, chosen);
+}
+
+/**
+ * Mengisi pemilih template di formulir generator.
+ *
+ * Dipisah supaya halaman yang cuma punya pemilihnya - tanpa daftar
+ * kartu dan tanpa formulir unggah - tetap kebagian isi yang sama
+ * dari satu tempat.
+ */
+function isiPemilihTemplate(items, chosen) {
+    if (!templateSelect) {
+        return;
+    }
+
     for (const item of items) {
         const option = document.createElement("option");
         option.value = String(item.id);
@@ -583,18 +752,24 @@ function renderTemplates(items) {
 }
 
 async function refreshTemplates() {
+    if (!templateSelect && !templateList) {
+        return;
+    }
+
     try {
         const payload = await api("/api/neiiu/templates");
         renderTemplates(payload.templates || []);
     } catch (error) {
-        templateList.innerHTML =
-            '<div class="empty">Gagal memuat template: ' +
-            escapeHtml(error.message) +
-            "</div>";
+        if (templateList) {
+            templateList.innerHTML =
+                '<div class="empty">Gagal memuat template: ' +
+                escapeHtml(error.message) +
+                "</div>";
+        }
     }
 }
 
-templateForm.addEventListener("submit", async (event) => {
+templateForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     templateNotice.hidden = true;
 
@@ -647,7 +822,10 @@ templateForm.addEventListener("submit", async (event) => {
 
         templateForm.reset();
         await refreshTemplates();
-        templateSelect.value = String(payload.template_id);
+
+        if (templateSelect) {
+            templateSelect.value = String(payload.template_id);
+        }
     } catch (error) {
         showTemplateNotice(error.message, "error");
     } finally {
@@ -655,7 +833,43 @@ templateForm.addEventListener("submit", async (event) => {
     }
 });
 
-templateList.addEventListener("click", async (event) => {
+templateList?.addEventListener("click", async (event) => {
+    const rename = event.target.closest("[data-ganti-nama]");
+
+    if (rename) {
+        const kartu = rename.closest(".job-card");
+        const lama = kartu?.querySelector("strong")?.textContent?.trim() || "";
+
+        // Kotak isian bawaan browser, bukan dialog sendiri. Yang
+        // diubah cuma satu baris teks, dan membuat dialog khusus
+        // untuk itu menambah tiga bagian antarmuka yang harus dijaga
+        // demi satu kolom.
+        const baru = window.prompt("Nama baru untuk template ini:", lama);
+
+        if (baru === null || !baru.trim() || baru.trim() === lama) {
+            return;
+        }
+
+        try {
+            const data = new FormData();
+            data.append("name", baru.trim());
+
+            // Nomor templatenya TIDAK berganti - itu yang mengikat
+            // landing dan AMP jadi satu pasangan, dan job yang sudah
+            // menunjuknya tetap menunjuk yang benar.
+            await api("/api/neiiu/templates/" + rename.dataset.gantiNama, {
+                method: "PUT",
+                body: data,
+            });
+
+            await refreshTemplates();
+        } catch (error) {
+            showTemplateNotice(error.message, "error");
+        }
+
+        return;
+    }
+
     const button = event.target.closest("[data-hapus-template]");
 
     if (!button) {

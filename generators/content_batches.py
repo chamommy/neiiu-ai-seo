@@ -60,6 +60,38 @@ ROLE_PRIORITY = (
     "nav_label",
 )
 
+# Peran yang tiap butirnya harus berbunyi BERBEDA.
+#
+# Berdiri di sini, bukan di content_planner, karena dua lapis
+# memerlukannya dan keduanya harus memakai daftar yang sama persis:
+# penyusun prompt memintanya berbeda sejak awal, penyusun isi
+# memeriksa hasilnya. Kalau keduanya menyimpan daftar sendiri, yang
+# satu bisa bergeser tanpa yang lain tahu - dan gejalanya adalah
+# label yang diminta berbeda tapi tidak pernah diperiksa, atau
+# sebaliknya.
+#
+# Yang TIDAK masuk sama pentingnya. Nama pengulas diambil dari daftar
+# zona dan kembarnya diurus di sana. Tag ulasan memang boleh
+# berulang: dua ulasan yang sama-sama memuji kecepatan pantas
+# bertanda sama. Yang berdiri di sini hanya peran yang tiap slotnya
+# menunjuk tempat, kartu, atau tombol yang berbeda - dua tautan
+# footer berbunyi sama berarti dua halaman berbeda dengan satu nama.
+DISTINCT_ROLES = frozenset(
+    {
+        "nav_label",
+        "label",
+        "list_item",
+        "card_title",
+        "caption",
+        "table_cell",
+        "heading",
+        "faq_question",
+        "breadcrumb",
+        "paragraph",
+        "review_text",
+    }
+)
+
 # Peran yang jawabannya satu teks untuk semua slotnya, bukan daftar.
 # Judul halaman muncul di <title>, og:title, dan twitter:title, dan
 # ketiganya memang harus berbunyi sama.
@@ -201,7 +233,7 @@ def slice_rule(rule: dict, mulai: int, jumlah: int) -> dict:
     potongan["count"] = jumlah
     potongan["offset"] = mulai
 
-    for kunci in ("samples", "budgets", "floors", "partners"):
+    for kunci in ("samples", "budgets", "floors", "partners", "fresh"):
         nilai = rule.get(kunci)
 
         if nilai:

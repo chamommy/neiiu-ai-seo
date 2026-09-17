@@ -103,9 +103,22 @@
     gap: 6px;
 }
 
-.field label {
+.field label,
+.field .field-label {
     font-size: 13px;
     color: var(--muted);
+}
+
+/* Keterangan yang menempati tempat sebuah isian, tapi bukan isian.
+
+   Dibuat sengaja BERBEDA dari kotak isian di sebelahnya - tanpa
+   bingkai, tanpa latar - supaya tidak ada yang mencoba mengetik ke
+   dalamnya lalu bertanya kenapa tidak bisa. */
+.field-static {
+    padding: 11px 2px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
 }
 
 .field input[type="text"],
@@ -129,6 +142,79 @@
     font-size: 12px;
     color: var(--muted);
     line-height: 1.5;
+}
+
+/*
+    Kelompok pilihan yang dilipat.
+
+    Yang wajib diisi berdiri di atas tanpa pembungkus; sisanya masuk
+    ke sini. Semuanya tetap ada di DOM - <details> cuma
+    menyembunyikan, bukan melepas - jadi apa pun yang dilipat tetap
+    ikut terkirim, dan skripnya tidak perlu tahu bentuknya berubah.
+*/
+.more {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--panel-2);
+    margin-top: 14px;
+}
+
+.more > summary {
+    cursor: pointer;
+    padding: 12px 14px;
+    font-size: 14px;
+    font-weight: 600;
+    list-style: none;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex-wrap: wrap;
+    border-radius: 12px;
+}
+
+/* Segitiga bawaan diganti supaya arahnya sama di semua browser. */
+.more > summary::-webkit-details-marker {
+    display: none;
+}
+
+.more > summary::before {
+    content: "\25B8";
+    color: var(--muted);
+    font-size: 12px;
+    transition: transform 0.15s ease;
+    display: inline-block;
+}
+
+.more[open] > summary::before {
+    transform: rotate(90deg);
+}
+
+.more > summary:hover {
+    color: var(--green);
+}
+
+.more > summary:focus-visible {
+    outline: 2px solid var(--green-dark);
+    outline-offset: -2px;
+}
+
+/*
+    Isi ringkas dari yang disembunyikan, supaya kelompok yang tertutup
+    tetap bisa dinilai isinya tanpa dibuka satu per satu.
+*/
+.more-hint {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--muted);
+}
+
+.more > .grid,
+.more > p {
+    padding: 0 14px 14px;
+}
+
+.more > .grid {
+    padding-top: 2px;
 }
 
 .checks {
@@ -340,6 +426,15 @@
     flex-wrap: wrap;
 }
 
+/* Dua tombol teks berdampingan di kepala kartu template: ganti nama
+   dan hapus. Diberi jarak sendiri supaya keduanya tidak menempel
+   jadi satu kata panjang di layar sempit. */
+.job-head > span {
+    display: inline-flex;
+    gap: 14px;
+    flex-wrap: wrap;
+}
+
 .job-keyword {
     font-weight: 700;
     font-size: 15.5px;
@@ -485,5 +580,119 @@
 
     .ask .popup-button {
         flex: 1;
+    }
+}
+
+/* ---------- alur empat langkah ---------- */
+
+/*
+    Janji halaman ini, ditulis sebagai langkah yang menyambung.
+
+    Panahnya milik <li>, pilnya milik <span> di dalamnya. Kalau
+    keduanya ditumpuk di simpul yang sama, panah ikut terbawa masuk
+    ke dalam pil dan yang terbaca "-> Template kamu", bukan langkah
+    yang saling menyambung.
+*/
+.flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 6px;
+    margin: 0 0 26px;
+    padding: 0;
+    list-style: none;
+    font-size: 12.5px;
+    color: var(--muted);
+}
+
+.flow li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.flow li + li::before {
+    content: "\2192";
+    color: var(--border);
+}
+
+.flow li span {
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--panel);
+    white-space: nowrap;
+}
+
+/* Langkah terakhir adalah hasilnya, jadi ia yang ditegaskan. */
+.flow li:last-child span {
+    color: var(--green);
+    border-color: var(--green-dark);
+}
+
+/* ---------- kartu generator ---------- */
+
+.generate-card {
+    border-color: var(--green-dark);
+}
+
+.generate-card h2 {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+/*
+    Keadaan job, dinyatakan satu kata di sebelah judul kartu.
+
+    Bilah kemajuan sudah menjawab "sampai mana"; yang ini menjawab
+    "sedang apa" - dan keduanya terbaca sekilas tanpa harus membaca
+    barisan log di bawahnya.
+*/
+.status-chip {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+.status-chip[data-state="starting"],
+.status-chip[data-state="running"] {
+    color: #ffd166;
+    border-color: #7a5c1e;
+}
+
+.status-chip[data-state="success"] {
+    color: var(--green);
+    border-color: var(--green-dark);
+}
+
+.status-chip[data-state="error"] {
+    color: var(--danger);
+    border-color: var(--danger);
+}
+
+.gen-help {
+    margin: 12px 0 0;
+    font-size: 12.5px;
+    line-height: 1.65;
+    color: var(--muted);
+    max-width: 66ch;
+}
+
+.primary-btn.is-loading {
+    opacity: 0.7;
+    cursor: progress;
+}
+
+@media (max-width: 640px) {
+    .primary-btn {
+        width: 100%;
     }
 }

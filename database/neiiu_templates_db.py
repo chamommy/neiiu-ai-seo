@@ -51,6 +51,7 @@ def init_templates_db() -> None:
                 slot_summary TEXT NOT NULL DEFAULT '{}',
                 notes TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY(user_id)
                     REFERENCES users(id)
                     ON DELETE CASCADE
@@ -60,6 +61,31 @@ def init_templates_db() -> None:
             ON neiiu_templates(user_id, id DESC);
             """
         )
+
+        # Tabel yang sudah ada sejak sebelum kolom ini lahir
+        # ditambahi di tempat, bukan dibuat ulang. Template yang
+        # sudah tersimpan berisi berkas di disk yang terikat ke
+        # nomor barisnya; membuat ulang tabelnya memutus ikatan itu.
+        kolom = {
+            baris["name"]
+            for baris in db.execute(
+                "PRAGMA table_info(neiiu_templates)"
+            ).fetchall()
+        }
+
+        if "updated_at" not in kolom:
+            db.execute(
+                "ALTER TABLE neiiu_templates "
+                "ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"
+            )
+
+            # Yang belum pernah diubah dianggap terakhir diubah saat
+            # dibuat. Dikosongkan, antarmuka harus menebak-nebak
+            # antara "belum pernah diubah" dan "kolomnya baru".
+            db.execute(
+                "UPDATE neiiu_templates SET updated_at = created_at "
+                "WHERE updated_at = ''"
+            )
 
 
 def template_dir(user_id: int, template_id: int) -> Path:
@@ -99,9 +125,9 @@ def create_template(
             """
             INSERT INTO neiiu_templates (
                 user_id, name, landing_bytes, amp_bytes,
-                slot_summary, notes, created_at
+                slot_summary, notes, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -110,7 +136,8 @@ def create_template(
                 len(amp_html.encode("utf-8")),
                 slot_summary,
                 notes,
-                utc_now(),
+                waktu := utc_now(),
+                waktu,
             ),
         )
 
@@ -147,7 +174,7 @@ def list_templates(user_id: int):
         return db.execute(
             """
             SELECT id, name, landing_bytes, amp_bytes,
-                   slot_summary, notes, created_at
+                   slot_summary, notes, created_at, updated_at
             FROM neiiu_templates
             WHERE user_id = ?
             ORDER BY id DESC
@@ -189,6 +216,87 @@ def read_template_files(template_id: int, user_id: int) -> dict:
             else ""
         ),
     }
+
+
+def update_template(
+    template_id: int,
+    user_id: int,
+    name: str | None = None,
+    landing_html: str | None = None,
+    amp_html: str | None = None,
+    slot_summary: str | None = None,
+    notes: str | None = None,
+) -> None:
+    """
+    Mengubah template yang sudah tersimpan, di tempatnya sendiri.
+
+    Nomornya TIDAK berganti, dan itu yang membedakannya dari "simpan
+    baru lalu hapus yang lama": nomor template adalah yang mengikat
+    landing page dan AMP jadi satu pasangan, dan halaman yang sudah
+    menunjuk template itu akan menunjuk yang salah begitu nomornya
+    bergeser.
+
+    Yang bernilai None tidak disentuh sama sekali - berkasnya tidak
+    ditulis ulang, kolomnya tidak ikut di-UPDATE. Jadi mengganti nama
+    saja tidak menyentuh satu byte pun di disk.
+
+    Berkasnya mendarat di folder yang sama seperti waktu dibuat, dan
+    namanya tetap ditetapkan program - lihat keterangan di kepala
+    berkas soal nama berkas yang datang dari klien.
+    """
+    if get_template(template_id, user_id) is None:
+        raise TemplateError("Template tidak ditemukan.")
+
+    kolom: list[str] = []
+    nilai: list = []
+
+    if name is not None:
+        kolom.append("name = ?")
+        nilai.append(name.strip()[:120] or "Template")
+
+    if landing_html is not None:
+        kolom.append("landing_bytes = ?")
+        nilai.append(len(landing_html.encode("utf-8")))
+
+    if amp_html is not None:
+        kolom.append("amp_bytes = ?")
+        nilai.append(len(amp_html.encode("utf-8")))
+
+    if slot_summary is not None:
+        kolom.append("slot_summary = ?")
+        nilai.append(slot_summary)
+
+    if notes is not None:
+        kolom.append("notes = ?")
+        nilai.append(notes)
+
+    # Waktu ubah selalu ikut, dan selalu jadi kolom terakhir yang
+    # ditulis. Berkas di disk boleh berubah tanpa satu kolom pun
+    # berubah - mengganti isi landing saja tidak menyentuh nama
+    # maupun catatan - jadi tanpa baris ini "terakhir diubah" akan
+    # berbohong justru untuk perubahan yang paling besar.
+    kolom.append("updated_at = ?")
+    nilai.append(utc_now())
+
+    if kolom:
+        with db_connection() as db:
+            # Nama kolomnya seluruhnya tulisan tetap di atas; yang
+            # datang dari pengguna cuma nilainya, dan itu tetap lewat
+            # tanda tanya.
+            db.execute(
+                f"UPDATE neiiu_templates SET {', '.join(kolom)} "
+                "WHERE id = ? AND user_id = ?",
+                (*nilai, template_id, user_id),
+            )
+
+    folder = template_dir(user_id, template_id)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    if landing_html is not None:
+        (folder / LANDING_FILE).write_text(landing_html, encoding="utf-8")
+
+    if amp_html is not None:
+        (folder / AMP_FILE).write_text(amp_html, encoding="utf-8")
 
 
 def delete_template(template_id: int, user_id: int) -> None:

@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="id">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>NEIIU — Template Milikku</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v=4">
+    <link rel="stylesheet" href="{{ url_for('static', path='/neiiu.css') }}?v=8">
+</head>
+<body class="neiiu-body">
+
+<header class="neiiu-top">
+    <a href="/neiiu" class="brand">
+        <img
+            src="/static/logo.jpg"
+            alt="NEIIU AI"
+        >
+        <span>NEIIU AI</span>
+    </a>
+
+    <nav class="neiiu-nav">
+        <a href="/neiiu">Generator</a>
+        <a href="/chat">Chat</a>
+        {% if user.role == 'admin' %}
+        <a href="/admin">Admin</a>
+        {% endif %}
+        <span class="badge">
+            Token: <b id="tokenBalance">{{ user.token_balance }}</b>
+        </span>
+        <form method="post" action="/logout" style="margin:0">
+            <button type="submit">Keluar</button>
+        </form>
+    </nav>
+</header>
+
+<main class="neiiu-wrap">
+
+    <h1 class="neiiu-title">Template Milikku</h1>
+    <p class="neiiu-sub">
+        Unggah landing page dan AMP milikmu sendiri. NEIIU hanya
+        mengganti judul, deskripsi, heading, paragraf, FAQ, dan
+        ulasan di dalamnya. Struktur, link, dan iklan yang sudah ada
+        tidak disentuh. Tandai bagian yang tidak boleh berubah dengan
+        <code>data-neiiu-skip</code>.
+        Maksimal {{ max_template_mb }} MB per berkas.
+    </p>
+
+    <section class="card">
+        <h2>Unggah Template Baru</h2>
+
+        <form id="templateForm">
+            <div class="grid">
+                <div class="field">
+                    <label for="templateName">Nama template</label>
+                    <input
+                        type="text"
+                        id="templateName"
+                        placeholder="contoh: Tema Wayang v2"
+                        maxlength="120"
+                        autocomplete="off"
+                    >
+                </div>
+
+                <div class="field">
+                    <label for="landingFile">Berkas landing page (HTML)</label>
+                    <input
+                        type="file"
+                        id="landingFile"
+                        accept=".html,.htm,text/html"
+                        required
+                    >
+                </div>
+
+                <div class="field">
+                    <label for="ampFile">Berkas AMP (HTML, opsional)</label>
+                    <input
+                        type="file"
+                        id="ampFile"
+                        accept=".html,.htm,text/html"
+                    >
+                    <span class="hint">
+                        Kosongkan kalau belum punya. NEIIU akan
+                        membuatkan versi AMP dari isi yang sama.
+                    </span>
+                </div>
+            </div>
+
+            <button type="submit" class="primary-btn" id="uploadBtn">
+                Unggah Template
+            </button>
+
+            <div id="templateNotice" class="notice" hidden></div>
+        </form>
+    </section>
+
+    <section class="card">
+        <h2>Sudah Diunggah</h2>
+
+        <div id="templateList">
+            <div class="empty">Memuat...</div>
+        </div>
+
+        <p class="hint" style="margin-top:16px">
+            Sudah selesai?
+            <a href="/neiiu">Kembali ke generator</a> untuk memakai
+            template ini membuat landing page dan AMP.
+        </p>
+    </section>
+
+</main>
+
+<!--
+    Kotak konfirmasi hapus. Bentuknya sama persis dengan yang di
+    halaman generator, dan itu memang disengaja: yang menanganinya
+    fungsi tanya() yang sama di neiiu.js, jadi simpul yang dicarinya
+    harus ada di kedua halaman.
+-->
+<dialog class="ask popup-dialog" id="askDialog">
+    <form method="dialog">
+        <h2 id="askTitle">Konfirmasi</h2>
+        <p id="askText"></p>
+
+        <div class="popup-actions">
+            <button
+                type="submit"
+                value="batal"
+                class="popup-button secondary"
+                id="askCancel"
+            >
+                Batal
+            </button>
+            <button
+                type="submit"
+                value="ya"
+                class="popup-button danger"
+                id="askOk"
+            >
+                Hapus
+            </button>
+        </div>
+    </form>
+</dialog>
+
+<!--
+    Berkas skrip yang SAMA dengan halaman generator.
+
+    Bagian yang tidak dipakai halaman ini - formulir job dan
+    daftar riwayat - memeriksa dulu apakah simpulnya ada dan
+    diam kalau tidak. Menyalin bagian template ke berkas kedua akan
+    berarti dua tempat yang harus diubah setiap kali cara memanggil
+    /api/neiiu/templates berubah.
+-->
+<script src="{{ url_for('static', path='/neiiu.js') }}?v=11"></script>
+</body>
+</html>

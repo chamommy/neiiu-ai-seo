@@ -7,12 +7,16 @@ dua pipeline sekaligus justru membuat keduanya berebut CPU dan
 jadi lebih lambat daripada dijalankan berurutan.
 """
 
-import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
+from ai.brief import build_creative_brief
 from database.app_db import refund_one_token
-from database.neiiu_history_db import load_used_text, save_used_text
+from database.neiiu_history_db import (
+    SCOPE_LIVE,
+    load_used_text,
+    save_used_text,
+)
 from database.neiiu_jobs_db import (
     finish_job,
     get_job,
@@ -37,25 +41,28 @@ _lock = threading.Lock()
 _active_job_id: int | None = None
 
 
-def split_refs(value) -> list[str]:
-    """
-    Memecah daftar URL acuan yang tersimpan sebagai satu teks.
-
-    Formulirnya menerima satu URL per baris, tapi orang terbiasa
-    memisahkannya dengan koma atau spasi juga. Ketiganya diterima
-    supaya isian yang wajar tidak ditolak hanya karena pemisahnya
-    beda.
-    """
-    return [
-        part.strip()
-        for part in re.split(r"[\s,]+", str(value or ""))
-        if part.strip()
-    ]
-
-
 def active_job_id() -> int | None:
     with _lock:
         return _active_job_id
+
+
+def kolom(job, nama: str, bawaan: str = ""):
+    """
+    Membaca satu kolom job yang mungkin belum ada di baris itu.
+
+    sqlite3.Row melempar IndexError untuk kolom yang tidak dikenal,
+    bukan mengembalikan None. Kolom brief ditambahkan lewat ALTER
+    TABLE saat server naik, jadi seharusnya selalu ada - tapi job
+    yang barisnya sudah terlanjur dibaca sebelum migrasi, dan
+    pemasangan yang databasenya disalin dari mesin lain, tidak boleh
+    menggagalkan seluruh job hanya karena satu kolom pilihan.
+    """
+    try:
+        nilai = job[nama]
+    except (IndexError, KeyError):
+        return bawaan
+
+    return bawaan if nilai is None else nilai
 
 
 def build_summary(result: dict) -> dict:
@@ -190,11 +197,22 @@ def run_job(job_id: int) -> None:
         # di sini karena hanya lapisan ini yang tahu job ini milik
         # siapa. Job sendiri dikecualikan supaya job yang diulang
         # tidak menghitung dirinya sendiri sebagai halaman lain.
+        # Ruang ingatan job ini. Kosong berarti produksi.
+        #
+        # Run pemeriksaan memakai ruangnya sendiri: penolak kembar
+        # tetap berjalan penuh di dalamnya, tapi ia tidak membaca
+        # ingatan produksi dan tidak menambahinya. Tanpa pemisahan
+        # ini, memeriksa satu template berkali-kali membuat run
+        # berikutnya kehabisan kalimat yang belum pernah dipakai - dan
+        # yang terukur jadi sisa ruang gerak, bukan mutu pipeline.
+        lingkup = kolom(job, "history_scope") or SCOPE_LIVE
+
         riwayat = load_used_text(
             user_id=int(job["user_id"]),
             keyword=job["keyword"],
             template_id=int(job["template_id"] or 0),
             exclude_job=job_id,
+            scope=lingkup,
         )
 
         result = run_neiiu(
@@ -211,7 +229,6 @@ def run_job(job_id: int) -> None:
             city=job["city"],
             user_template=user_template,
             template_brand=job["template_brand"],
-            design_refs=split_refs(job["design_refs"]),
             cta_url=job["cta_url"],
             article_words=int(job["article_words"] or 0),
             assets={
@@ -219,7 +236,26 @@ def run_job(job_id: int) -> None:
                 "favicon": job["favicon_url"],
                 "poster": job["poster_url"],
             },
+            # Alamat halaman. Dibaca lewat kolom() karena kedua kolom
+            # ini ditambahkan lewat ALTER TABLE saat server naik, dan
+            # baris job yang sudah terlanjur dibaca sebelum migrasi
+            # tidak boleh menggagalkan seluruh job hanya karena satu
+            # kolom pilihan.
+            links={
+                "canonical": kolom(job, "canonical_url"),
+                "amphtml": kolom(job, "amphtml_url"),
+            },
             history=riwayat,
+            # Kolom yang dikosongkan menghasilkan brief yang tidak
+            # menyumbang satu baris pun ke prompt, jadi job lama tetap
+            # berjalan dengan prompt yang sama persis seperti dulu.
+            brief=build_creative_brief(
+                tone=kolom(job, "tone"),
+                page_purpose=kolom(job, "page_purpose"),
+                target_audience=kolom(job, "target_audience"),
+                secondary_keywords=kolom(job, "secondary_keywords"),
+                language=job["region"],
+            ),
             on_event=on_event,
         )
 
@@ -238,6 +274,7 @@ def run_job(job_id: int) -> None:
                 brand_name=job["brand_name"],
                 template_id=int(job["template_id"] or 0),
                 content=result.get("content") or {},
+                scope=lingkup,
             )
         except Exception:
             pass

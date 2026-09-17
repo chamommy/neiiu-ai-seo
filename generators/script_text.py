@@ -220,7 +220,15 @@ def script_edits(
         ).strip(),
     }
 
-    if not pola and not diganti:
+    # Berhenti hanya kalau memang tidak ada yang bisa dikerjakan:
+    # tidak ada nama brand lama untuk ditukar, DAN tidak ada isi baru
+    # untuk mengisi kunci konfigurasi.
+    #
+    # Dulu yang diperiksa "diganti" - peta gema - dan itu jadi salah
+    # sejak peta itu tidak lagi dipakai di sini. Template yang punya
+    # META_TITLE tapi tidak diberi nama brand lama akan berhenti di
+    # baris ini tanpa pernah mengisi judulnya.
+    if not pola and not any(isi_baru.values()):
         return [], 0
 
     edits: list[dict] = []
@@ -251,6 +259,34 @@ def script_edits(
             kunci = CONFIG_KEYS.get(config_key(badan, mulai - 1))
             baru = isi_baru.get(kunci) if kunci else None
 
+            # Kunci konfigurasi hanya diisi kalau nilainya SEKARANG
+            # memang milik template ini sendiri.
+            #
+            # Nama kuncinya saja tidak cukup, dan template 488
+            # membuktikannya: payload analitiknya memuat
+            #
+            #     "brand": "Hey siriusly"
+            #
+            # yang menyebut nama DESAINER kaosnya, bukan nama situs.
+            # Diisi hanya karena kuncinya bernama "brand", data yang
+            # dikirim ke sistem pelacakan berubah jadi nama situs yang
+            # tidak ada hubungannya - dan itu persis yang diminta
+            # pengguna jangan disentuh.
+            #
+            # Yang dianggap milik template: nilai yang sama dengan nama
+            # brand lama, atau sama dengan teks halaman yang memang
+            # ikut ditulis ulang di run ini (judul, deskripsi). Di
+            # luar itu, kuncinya boleh bernama apa saja - isinya milik
+            # orang lain.
+            if baru is not None:
+                sendiri = (
+                    normalize(asli) in nama_lama
+                    or normalize(asli) in diganti
+                )
+
+                if not sendiri:
+                    baru = None
+
             # Nama brand yang berdiri sendiri juga diganti meski
             # bentuknya seperti slug. "OSB99" di BRAND: "OSB99" adalah
             # nama yang dibaca orang, bukan bagian dari alamat.
@@ -260,9 +296,31 @@ def script_edits(
             if not baru and is_address(asli):
                 continue
 
-            if baru is None:
-                baru = diganti.get(normalize(asli))
-
+            # Peta gema TIDAK dipakai di dalam skrip, dan ini
+            # pembatasan yang disengaja.
+            #
+            # Di badan halaman, teks lama yang kembar memang harus
+            # ikut memakai kalimat barunya. Di dalam skrip, "teks
+            # yang kebetulan sama" bukan gema melainkan DATA - dan
+            # menimpanya mengubah perilaku halaman, bukan isinya.
+            #
+            # Terukur pada halaman yang benar-benar terbit 21 Agustus
+            # 2026, di dua blok <script> milik template toko:
+            #
+            #     "Hey siriusly"   -> "BATARATOTO"
+            #     "Adult Apparel"  -> "Tidak ada"
+            #
+            # Keduanya nama kategori dan nama penjual di dalam data
+            # produk, bukan tulisan yang dibaca siapa pun sebagai isi
+            # halaman. Yang kedua bahkan menerbitkan kalimat yang
+            # artinya kebalikan dari yang tertulis semula.
+            #
+            # Yang tetap dikerjakan di sini dua-duanya sempit dan
+            # bisa dipertanggungjawabkan: nilai di bawah kunci
+            # konfigurasi yang namanya sudah menyatakan isinya
+            # (CONFIG_KEYS), dan nama brand lama di mana pun ia
+            # tertulis. Keduanya memang menimpa halaman lewat
+            # JavaScript; sisanya tidak.
             if baru is None and pola:
                 baru = pola.sub(
                     lambda cocok: match_case(cocok.group(0), new_brand),

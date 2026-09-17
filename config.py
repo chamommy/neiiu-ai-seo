@@ -1,5 +1,4 @@
 import os
-import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -196,6 +195,31 @@ AI_MODEL_INSIGHT = os.getenv(
     "",
 ).strip() or AI_MODEL
 
+# Model khusus tahap menulis title dan meta description.
+#
+# Dipisah dengan alasan yang sama seperti AI_MODEL_INSIGHT, dan
+# angkanya berpihak lebih jauh lagi: kedua teks ini bersama-sama cuma
+# 250 karakter, ditulis SEKALI per run, sementara isi halaman ratusan
+# potong yang ditulis berkali-kali. Jadi model yang tiga kali lebih
+# lambat di sini menambah beberapa puluh detik pada run yang belasan
+# menit - dan yang dibeli dua baris yang paling menentukan sebuah
+# halaman diklik atau tidak dari hasil pencarian.
+#
+# Urutan prioritas ini yang diminta pengguna sendiri: title,
+# description, H1, isi halaman, structured data, teknis crawl.
+#
+# Dikosongkan berarti ikut AI_MODEL, dan itu bawaannya - tanpa
+# pengaturan tambahan, tidak ada satu pun perilaku yang berubah.
+#
+# Harganya yang perlu diketahui sebelum diisi: Ollama memuat ulang
+# model setiap kali modelnya berganti, jadi mengisinya berarti dua
+# kali muat per run. Untuk mesin yang memorinya pas-pasan, itu bisa
+# lebih mahal daripada mutu yang didapat.
+AI_MODEL_HEAD = os.getenv(
+    "AI_MODEL_HEAD",
+    "",
+).strip() or AI_MODEL
+
 # Analisis SERP butuh ruang jawaban jauh lebih besar
 # dibanding audit satu halaman.
 AI_MAX_TOKENS_INSIGHT = int(
@@ -359,16 +383,3 @@ SITE_CTA_URL = os.getenv(
     "SITE_CTA_URL",
     "",
 ).strip()
-
-# URL halaman yang dipakai sebagai acuan gaya saat NEIIU membuat
-# halaman tanpa template. Dipisah koma atau baris baru. Yang
-# diambil hanya warna, font, radius, dan komponen yang dipakai —
-# teks dan HTML-nya tidak pernah ikut tersalin.
-DESIGN_REFERENCES = [
-    url.strip()
-    for url in re.split(
-        r"[,\n]",
-        os.getenv("DESIGN_REFERENCES", ""),
-    )
-    if url.strip()
-]

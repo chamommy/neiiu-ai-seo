@@ -19,20 +19,29 @@ import re
 
 from datetime import datetime, timedelta
 
-from generators.schema_generator import json_for_html
+from ai.niche import GENERIC_FAQ_BANK
+from generators.content_batches import DISTINCT_ROLES
+from generators.schema_generator import build_faq_schema, json_for_html
 from generators.brand_swap import (
     brand_edits,
+    brand_sweep_edits,
     build_pattern,
     collapse_repeats,
     echo_edits,
     normalize,
     swap_brand,
 )
-from generators.jsonld_filler import has_reviews, jsonld_edits
+from generators.claim_guard import claim_edits
+from generators.jsonld_filler import (
+    has_faq_schema,
+    has_reviews,
+    jsonld_edits,
+)
 from generators.page_numbers import FIGURE_FREE_ROLES, strip_figures
 from generators.page_prices import localize_price, price_edits
 from generators.script_text import script_edits
 from generators.template_assets import asset_edits
+from generators.page_links import link_edits
 from generators.template_guard import verify
 from generators.template_scanner import apply_edits, scan
 from generators.template_slots import (
@@ -48,6 +57,7 @@ from utils.text import (
     content_tokens,
     display_width,
     drop_dangling,
+    finish_clause,
     trim_to_sentence,
     trim_to_width,
 )
@@ -395,15 +405,169 @@ FAQ_BANK = {
 }
 
 
+# Ulasan cadangan, ditulis Python, untuk slot yang tidak terjawab model
+# sesudah semua permintaan susulan habis.
+#
+# Alasannya sama persis dengan FAQ_BANK di atas: slot ulasan yang
+# dibiarkan kosong terbit dengan ULASAN PEMILIK TEMPLATE - kalimat
+# tentang situs lain, di halaman yang seluruh isinya sudah berganti.
+# Terukur di dua case E2E berturut-turut.
+#
+# Batas isinya diambil dari aturan pengguna sendiri: boleh membahas
+# tampilan, navigasi, kemudahan menemukan permainan, responsivitas,
+# dan kemudahan akses. TIDAK boleh menyebut nominal, persentase,
+# jadwal, atau hasil permainan. Tidak satu kalimat pun di bawah
+# menyebut salah satunya - dan semuanya tetap lewat penyapu klaim di
+# ujung, sama seperti teks yang ditulis model.
+REVIEW_BANK = {
+    "id": (
+        "Tampilannya rapi dan menunya gampang dibaca dari layar HP, "
+        "jadi tidak perlu memperbesar halaman dulu.",
+        "Mencari permainan tidak bikin bingung karena daftarnya "
+        "dikelompokkan dan kolom pencariannya berfungsi.",
+        "Halamannya terbuka cepat di jaringan biasa dan tidak ada "
+        "bagian yang lompat-lompat waktu digulir.",
+        "Masuk dari ponsel maupun komputer sama saja, tata letaknya "
+        "menyesuaikan sendiri tanpa ada yang terpotong.",
+        "Tombol yang penting berada di tempat yang mudah dijangkau "
+        "jempol, tidak perlu mencari-cari.",
+        "Keterangan di tiap bagian ditulis singkat dan tidak "
+        "berputar-putar, jadi cepat paham harus ke mana.",
+        "Berpindah antar halaman terasa mulus dan tidak ada tautan "
+        "yang membawa ke halaman kosong.",
+        "Ukuran huruf dan jarak antar barisnya nyaman dibaca lama "
+        "tanpa bikin mata cepat lelah.",
+    ),
+    "th": (
+        "หน้าเว็บจัดวางเรียบร้อย เมนูอ่านง่ายบนหน้าจอมือถือ "
+        "ไม่ต้องขยายหน้าจอก่อน",
+        "หาเกมได้ไม่สับสน เพราะรายการถูกจัดกลุ่มไว้ "
+        "และช่องค้นหาใช้งานได้จริง",
+        "หน้าเว็บเปิดเร็วบนเครือข่ายทั่วไป และไม่มีส่วนไหนกระตุก "
+        "ตอนเลื่อนหน้าจอ",
+        "เข้าจากมือถือหรือคอมพิวเตอร์ก็เหมือนกัน "
+        "หน้าจอปรับขนาดเองโดยไม่มีส่วนไหนขาดหาย",
+        "ปุ่มสำคัญอยู่ในตำแหน่งที่กดถึงง่าย ไม่ต้องเลื่อนหาไปมา",
+        "คำอธิบายในแต่ละส่วนเขียนสั้นและตรงประเด็น "
+        "จึงเข้าใจได้เร็วว่าต้องไปทางไหน",
+        "การเปลี่ยนหน้าราบรื่น และไม่มีลิงก์ไหนพาไปหน้าว่าง",
+        "ขนาดตัวอักษรและระยะห่างระหว่างบรรทัดอ่านสบายตา "
+        "แม้อ่านต่อเนื่องนาน",
+    ),
+}
+
+# Judul bagian cadangan, untuk slot heading yang tidak terjawab.
+#
+# Dituliskan dengan lubang {topik} - keyword halaman ini - karena itu
+# satu-satunya hal yang pasti diketahui pipeline tentang isi bagian
+# yang mau dinamainya. Nama situs sengaja TIDAK ikut: judul bagian di
+# tengah halaman yang menyebut nama situs berulang kali terbaca
+# seperti label, bukan seperti judul.
+HEADING_BANK = {
+    "id": (
+        "Sekilas Tentang {topik}",
+        "Cara Memulai {topik}",
+        "Hal Yang Perlu Disiapkan",
+        "Pertanyaan Yang Sering Muncul",
+        "Yang Membedakan Halaman Ini",
+    ),
+    "th": (
+        "ภาพรวมของ {topik}",
+        "วิธีเริ่มต้นกับ {topik}",
+        "สิ่งที่ต้องเตรียม",
+        "คำถามที่พบบ่อย",
+        "จุดเด่นของหน้านี้",
+    ),
+}
+
+
+def spare_reviews(brand: dict, keyword: str = "") -> list[str]:
+    """
+    Ulasan cadangan untuk zona ini, urutannya digilir dari nama brand.
+
+    Penggiliran dari nama brand, sama seperti faq_bank_cards, supaya
+    dua halaman yang lubangnya sama tidak menambalnya dengan kalimat
+    yang sama persis.
+    """
+    region = brand.get("region", "id")
+    daftar = REVIEW_BANK.get(region) or REVIEW_BANK["id"]
+
+    benih = int.from_bytes(
+        hashlib.sha1(
+            "{}|{}|review".format(
+                brand.get("site_name", ""),
+                brand.get("variation", ""),
+            ).encode("utf-8")
+        ).digest()[:4],
+        "big",
+    )
+
+    mulai = benih % len(daftar)
+
+    return [daftar[(mulai + langkah) % len(daftar)]
+            for langkah in range(len(daftar))]
+
+
+def spare_headings(brand: dict, keyword: str = "") -> list[str]:
+    """
+    Judul bagian cadangan untuk zona ini, sudah diisi topiknya.
+    """
+    region = brand.get("region", "id")
+    daftar = HEADING_BANK.get(region) or HEADING_BANK["id"]
+
+    topik = " ".join(
+        kata[:1].upper() + kata[1:] for kata in str(keyword or "").split()
+    ) or str(brand.get("site_name", "")).strip()
+
+    benih = int.from_bytes(
+        hashlib.sha1(
+            "{}|{}|heading".format(
+                brand.get("site_name", ""),
+                brand.get("variation", ""),
+            ).encode("utf-8")
+        ).digest()[:4],
+        "big",
+    )
+
+    mulai = benih % len(daftar)
+
+    return [
+        daftar[(mulai + langkah) % len(daftar)].format(topik=topik)
+        for langkah in range(len(daftar))
+    ]
+
+
+# Peran yang bahan cadangannya datang dari bank yang ditulis Python,
+# bukan dari hasil crawl. Dipakai membedakan bunyi peringatan - lihat
+# fit_content_to_spec.
+BANK_ROLES = frozenset({"review_text", "heading"})
+
+
 def faq_bank_cards(brand: dict, keyword: str = "") -> list[tuple[str, str]]:
     """
     Tanya-jawab cadangan untuk zona ini, sudah diisi nama brand.
 
     Urutannya digilir dari nama brand supaya dua halaman yang
     lubangnya sama tidak menambalnya dengan pertanyaan yang sama.
+
+    Banknya dipilih menurut bidang halaman. FAQ_BANK seluruhnya
+    tentang slot, dan itu benar untuk halaman slot - tapi menambal
+    lubang di halaman kursus dengan pertanyaan "Apa itu slot gacor?"
+    menerbitkan halaman yang bertanya tentang bidang yang bukan
+    bidangnya, yang persis kesalahan yang bank ini dibuat untuk
+    mencegah.
+
+    Bank cadangan bidang lain ditulis dengan lubang {topik}, karena
+    keyword adalah satu-satunya hal yang benar-benar diketahui
+    pipeline tentang halaman di bidang yang tidak dikenalnya.
     """
     region = brand.get("region", "id")
-    kartu = FAQ_BANK.get(region) or FAQ_BANK["id"]
+    niche = brand.get("niche", "gambling")
+
+    if niche == "gambling":
+        kartu = FAQ_BANK.get(region) or FAQ_BANK["id"]
+    else:
+        kartu = GENERIC_FAQ_BANK.get(region) or GENERIC_FAQ_BANK["id"]
 
     nama = str(brand.get("site_name", "")).strip() or str(keyword or "").strip()
 
@@ -419,10 +583,16 @@ def faq_bank_cards(brand: dict, keyword: str = "") -> list[tuple[str, str]]:
 
     mulai = benih % len(kartu)
 
+    # Bank bidang lain memakai lubang {topik} juga. Diisi keyword,
+    # atau nama brand kalau keywordnya kosong - satu di antaranya
+    # selalu ada, dan pertanyaan yang menyebut salah satunya tetap
+    # menanyakan sesuatu yang benar.
+    topik = str(keyword or "").strip() or nama
+
     return [
         (
-            tanya.format(brand=nama).strip(),
-            jawab.format(brand=nama).strip(),
+            tanya.format(brand=nama, topik=topik).strip(),
+            jawab.format(brand=nama, topik=topik).strip(),
         )
         for tanya, jawab in (
             kartu[(mulai + urutan) % len(kartu)]
@@ -731,6 +901,30 @@ def derive_spec(slot_map: dict) -> dict:
         # paragraf di template pengguna berjatah 542 sampai 79
         # karakter, dan angka yang pas untuk yang terlebar akan
         # meledakkan yang tersempit keluar dari kotaknya.
+        # Pertanyaan yang BENAR-BENAR berdiri di atas tiap jawaban,
+        # dibaca dari halaman, bukan disimpulkan dari nomor urut.
+        #
+        # Pasangan tanya-jawab selama ini dicocokkan lewat nomor:
+        # jawaban ke-N menjawab pertanyaan ke-N. Itu benar selama
+        # kedua daftarnya sama panjang dan sejajar, dan di template
+        # nyata keduanya sering tidak. Waktu pertanyaannya berupa teks
+        # template yang tidak ikut jadi slot - akordeon di dalam
+        # <button>, misalnya - daftar pertanyaannya lebih pendek
+        # daripada daftar jawabannya, dan sisa jawabannya ditulis
+        # tanpa melihat pertanyaan apa pun.
+        #
+        # pair_faq_cards sudah mencatat bunyi pertanyaannya di tiap
+        # slot jawaban; di sini ia ikut ke spec supaya prompt punya
+        # jalan kedua yang tidak bergantung nomor sama sekali.
+        if role == "faq_answer":
+            tanya = [
+                " ".join(str(slot.get("asks") or "").split())
+                for slot in slots
+            ]
+
+            if any(tanya):
+                spec[role]["asks"] = tanya
+
         lantai = [length_floor(role, jatah) for jatah in budgets]
 
         if any(lantai):
@@ -742,6 +936,32 @@ def derive_spec(slot_map: dict) -> dict:
                 )
 
         if samples:
+            # Teks lama milik SITUS LAIN ditandai, bukan disembunyikan.
+            #
+            # Contoh dikirim supaya arti dan panjangnya dipertahankan,
+            # dan untuk label yang memang milik halaman ini itu benar.
+            # Untuk salinan demo justru itu yang merusak: model melihat
+            # "Gift Cards" lalu menuliskan padanannya. Halaman Thai
+            # 15 Agustus 2026 terbit dengan footer toko mainan yang
+            # rapi berbahasa Thai - "เซ็ตใหม่", "บัตรส่งของ",
+            # "ชิ้นส่วนหาย" - diterjemahkan dengan benar dan salah
+            # seluruhnya, karena halamannya bukan toko mainan.
+            #
+            # Contohnya tetap dikirim - pasangannya dicocokkan lewat
+            # teks lama itu di pair_by_old_text, jadi menghapusnya
+            # memutus pemasangan - tapi diberi tanda supaya prompt
+            # memintanya ditulis baru, bukan dialihbahasakan.
+            asing_teks = {
+                normalize(sample_text(slot["current"], role))
+                for slot in slots
+                if slot.get("foreign")
+            }
+
+            segar = [normalize(teks) in asing_teks for teks in samples]
+
+            if any(segar):
+                spec[role]["fresh"] = segar
+
             # Teks lamanya ikut dikirim ke AI. Untuk menu dan tombol
             # supaya artinya dipertahankan: tanpa ini label ditulis
             # sebagai daftar bebas lalu dibagikan urut dokumen, dan
@@ -919,6 +1139,23 @@ def scale_spec(spec: dict, chars_per_column: float) -> dict:
 
     for role, rule in spec.items():
         salinan = dict(rule)
+
+        # Jatah asli dalam KOLOM disimpan, bukan dibuang.
+        #
+        # Yang menilai dua teks bakal terbit kembar atau tidak harus
+        # memotongnya persis seperti build_edits memotongnya, dan
+        # build_edits memotong dalam kolom - bukan dalam karakter, dan
+        # bukan dengan jatah yang sudah dilebarkan untuk model.
+        #
+        # Tanpa ini penolak kembar memotong 46 karakter sementara
+        # halamannya memotong 40 kolom, dan dua judul yang cuma
+        # berbeda di ekor yang dibuang lolos sebagai "berbeda". Terukur
+        # pada halaman Thai terbit: dua judul yang berangkat dari dua
+        # teks asal berbeda sama-sama terbit "NAGAJITU | <keyword>",
+        # dan tidak ada satu pun tahap sebelum pemasangan yang
+        # keberatan.
+        if salinan.get("budgets"):
+            salinan["columns"] = list(salinan["budgets"])
 
         for kunci in ("max_length", "max_length_any", "min_length"):
             if kunci in salinan:
@@ -1441,7 +1678,7 @@ def clean_line(value, limit: int, role: str = "", floor: int = 0) -> str:
         badan = " ".join(str(value or "").split())
         potongan = trim_to_width(badan, limit, OVERFLOW_TOLERANCE)
 
-        teks = drop_dangling(potongan, dipotong=potongan != badan)
+        teks = finish_clause(potongan, dipotong=potongan != badan)
 
     if role == "faq_question" and teks and teks[-1] not in "?？":
         # Pertanyaan yang kehilangan tanda tanyanya waktu dipotong
@@ -1731,13 +1968,31 @@ def fit_content_to_spec(
         # dibajak. Sumbernya sudah dibereskan di build_blueprint;
         # catatan ini supaya kejadian sejenis kelihatan dari log,
         # bukan baru ketahuan setelah halamannya dibaca orang.
+        # Sumber cadangannya disebut apa adanya, karena keduanya
+        # menuntut perhatian yang berbeda. Bahan dari hasil crawl
+        # adalah salinan mentah milik situs lain dan HARUS dibaca
+        # ulang; bahan dari bank yang ditulis Python sudah ditulis
+        # untuk keperluan ini dan tidak mengaku-ngaku apa pun.
+        # Menyebut keduanya "salinan dari kompetitor" membuat
+        # peringatan yang benar terbaca seperti alarm palsu, dan
+        # peringatan yang dianggap alarm palsu berhenti dibaca.
         if dari_cadangan:
-            warnings.append(
-                f"{dari_cadangan} {role} tidak ditulis model dan "
-                "ditambal dari pertanyaan yang dipakai kompetitor. "
-                "Periksa teksnya - itu salinan mentah dari hasil "
-                "crawl."
-            )
+            if role in BANK_ROLES:
+                warnings.append(
+                    f"{dari_cadangan} {role} tidak ditulis model "
+                    "sesudah semua permintaan susulan, dan ditambal "
+                    "dari bank cadangan NEIIU. Teksnya netral dan "
+                    "tidak menyebut angka, jadwal, maupun hasil - "
+                    "tapi ia bukan tulisan yang khusus untuk halaman "
+                    "ini."
+                )
+            else:
+                warnings.append(
+                    f"{dari_cadangan} {role} tidak ditulis model dan "
+                    "ditambal dari pertanyaan yang dipakai kompetitor. "
+                    "Periksa teksnya - itu salinan mentah dari hasil "
+                    "crawl."
+                )
 
         filled[role] = items
 
@@ -1842,6 +2097,52 @@ def drop_broken_pairs(content: dict) -> list[str]:
         )
 
     return catatan
+
+
+def slot_identity(slot: dict, role: str, urutan: int) -> str:
+    """
+    Nama tetap untuk satu slot, yang tidak pernah dipakai slot lain.
+
+    Sebelum ini yang dipakai teks lamanya sendiri, dan itu cukup
+    selama tidak ada dua slot berteks sama - padahal ada. Terukur
+    pada template pengguna: dua puluh slot heading berisi enam belas
+    bunyi, jadi empat slot berbagi kunci dengan slot lain, dan
+    apa pun yang ditulis untuk yang satu ikut terpasang di yang lain.
+
+    Yang menyusun nama ini empat hal, dan tiga di antaranya tetap
+    meski teksnya berubah: perannya, letak elemennya di dokumen, dan
+    nomor kemunculannya di antara slot berteks sama. Teks lamanya
+    ikut supaya satu slot yang sama tetap ketemu padanannya waktu
+    berkas AMP dipetakan memakai contoh milik landing - di situ nomor
+    urut dokumen berbeda, tapi teks dan nomor kemunculannya sama.
+    """
+    return "|".join(
+        (
+            role,
+            normalize(sample_text(slot.get("current", ""), role)),
+            str(urutan),
+        )
+    )
+
+
+def identity_list(slots: list, role: str) -> list[str]:
+    """
+    Nama tetap untuk sederet slot, urut dokumen.
+
+    Nomor kemunculan dihitung di sini, bukan diminta dari pemanggil,
+    supaya kedua sisi - waktu peta disusun dan waktu dipakai - selalu
+    menghitungnya dengan cara yang sama.
+    """
+    hitung: dict[str, int] = {}
+    nama: list[str] = []
+
+    for slot in slots:
+        kunci = normalize(sample_text(slot.get("current", ""), role))
+        urutan = hitung.get(kunci, 0)
+        hitung[kunci] = urutan + 1
+        nama.append(slot_identity(slot, role, urutan))
+
+    return nama
 
 
 def pair_by_old_text(spec: dict, filled: dict) -> dict:
@@ -2316,6 +2617,10 @@ def build_edits(
     edits: list[dict] = []
     notes: list[str] = []
 
+    # Berapa slot yang terpaksa terbit berbunyi sama karena tidak ada
+    # lagi teks lain yang tersisa untuk menggantikannya.
+    bentrok = 0
+
     content, kembar = drop_repeats(
         content,
         [role for role in UNIQUE_ROLES if role in slot_map["roles"]],
@@ -2585,6 +2890,13 @@ def build_edits(
                 if str(teks).strip() and teks not in terpakai
             ]
 
+            # Bunyi yang sudah terpasang di berkas ini, beserta teks
+            # asal yang berhak atas bunyi itu. Dihitung ulang tiap
+            # peran dan tiap berkas: landing dan AMP dipasang
+            # terpisah, dan bunyi yang sama di kedua berkas memang
+            # benar - yang salah cuma dua slot BERBEDA di SATU berkas.
+            dipakai: dict[str, str] = {}
+
             for slot in slots:
                 # Kuncinya dipotong sama persis seperti waktu contoh
                 # disusun. Tanpa itu, teks lama yang lebih panjang
@@ -2636,6 +2948,64 @@ def build_edits(
                 if not teks or copies_sample(teks, slot["current"], role):
                     continue
 
+                # Dua slot yang BERBEDA tidak boleh terbit berbunyi
+                # sama, dan pemeriksaannya harus di sini.
+                #
+                # Penolak kembar di content_planner memeriksa daftar
+                # jawaban; yang menentukan halaman adalah teks
+                # sesudah dipotong ke jatah slotnya masing-masing,
+                # dan pemotongan itu baru terjadi di baris di atas.
+                # Terukur pada halaman Thai terbit: lima slot heading
+                # dengan empat teks asal berbeda semuanya terbit
+                # "NAGAJITU <keyword>", karena model memang menulis
+                # bunyi itu berkali-kali dan tidak ada satu pun tahap
+                # sesudahnya yang melihat hasil akhirnya.
+                #
+                # Slot yang teks LAMANYA memang sama dibiarkan
+                # berbunyi sama: template itu sendiri yang menamai
+                # keduanya dengan satu nama, dan memaksa keduanya
+                # berbeda berarti melawan maksud templatenya.
+                #
+                # Yang dipakai menggantikan teks yang MEMANG sudah
+                # ditulis model untuk peran ini, diambil dari antrean
+                # sisa - bukan kata karangan dan bukan tempelan.
+                if role in DISTINCT_ROLES:
+                    bentuk = " ".join(teks.split()).casefold()
+                    asal = normalize(sample_text(slot["current"], role))
+                    pemilik = dipakai.get(bentuk)
+
+                    if pemilik is not None and pemilik != asal:
+                        ganti = ""
+
+                        while antre:
+                            calon = clean_line(
+                                antre.pop(0),
+                                max(4, slot["budget"] - display_width(awalan)),
+                                role,
+                            )
+
+                            if awalan:
+                                calon = restore_lead(calon, slot["current"])
+
+                            if not calon or copies_sample(
+                                calon, slot["current"], role
+                            ):
+                                continue
+
+                            if " ".join(calon.split()).casefold() in dipakai:
+                                continue
+
+                            ganti = calon
+                            break
+
+                        if ganti:
+                            teks = ganti
+                            bentuk = " ".join(teks.split()).casefold()
+                        else:
+                            bentrok += 1
+
+                    dipakai.setdefault(bentuk, asal)
+
                 edits.append({**slot, "text": teks})
 
             continue
@@ -2669,6 +3039,99 @@ def build_edits(
                     ),
                 }
             )
+
+    # Slot berbahasa lain yang tidak kebagian teks baru tidak boleh
+    # terbit apa adanya.
+    #
+    # "Dibiarkan memakai teks asli template" itu keputusan yang benar
+    # selama teks aslinya sebahasa dengan halamannya: di halaman
+    # Indonesia, heading Indonesia yang tidak tertulis ulang tetap
+    # heading yang bisa dibaca. Di halaman Thai teks yang sama adalah
+    # kalimat Indonesia yang terbit utuh - dan model yang kurang
+    # menulis satu heading saja sudah cukup membuatnya terjadi.
+    #
+    # Terukur pada halaman terbit: model kurang menulis heading, dua
+    # slot bertanda asing jatuh ke jalur ini, dan halaman Thai terbit
+    # dengan <h2>Keamanan dan Kepercayaan: Fondasi ...</h2> dan
+    # <h3>Kemudahan Akses Kapan Saja</h3>.
+    #
+    # Yang dipakai menambal teks yang SUDAH ditulis untuk peran yang
+    # sama. Teksnya jadi berulang, dan itu memang kerugiannya - tapi
+    # heading Thai yang kembar jauh lebih ringan daripada heading
+    # Indonesia di halaman Thai, dan pengulangan masih bisa dilihat
+    # pengguna sementara salah bahasa tidak.
+    #
+    # Hanya slot bertanda asing yang ditambal. Halaman yang teks
+    # lamanya memang sebahasa sama sekali tidak lewat sini.
+    terisi = {(x["start"], x["end"]): x["text"] for x in edits}
+    ditambal = 0
+
+    for role, slots in roles.items():
+        # Kolamnya dihitung per BUNYI, bukan per slot.
+        #
+        # Dua slot bisa sudah terisi teks yang berbeda di data tapi
+        # sama begitu dipotong di jatahnya masing-masing. Dihitung
+        # per slot, kolam yang sebenarnya berisi dua bunyi terbaca
+        # berisi delapan - dan pemerataan di bawah membagi rata
+        # sesuatu yang sebenarnya tidak ada.
+        tersedia: list[str] = []
+        terlihat: set[str] = set()
+
+        for slot in slots:
+            teks = terisi.get((slot["start"], slot["end"]))
+
+            if not teks:
+                continue
+
+            kunci = " ".join(str(teks).split()).casefold()
+
+            if kunci in terlihat:
+                continue
+
+            terlihat.add(kunci)
+            tersedia.append(teks)
+
+        if not tersedia:
+            continue
+
+        # Yang paling jarang dipakai yang diambil, bukan yang
+        # berikutnya dalam lingkaran. Bedanya baru terasa waktu
+        # kolamnya jauh lebih kecil daripada jumlah lubangnya:
+        # lingkaran sederhana menumpuk pemakaian di beberapa bunyi
+        # saja begitu sebagian calon ditolak copies_sample, sedangkan
+        # yang ini menyebarkannya serata mungkin.
+        pakai = dict.fromkeys(range(len(tersedia)), 0)
+
+        for slot in slots:
+            if (slot["start"], slot["end"]) in terisi:
+                continue
+
+            if not slot.get("foreign"):
+                continue
+
+            urut = min(pakai, key=lambda index: (pakai[index], index))
+
+            teks = clean_line(tersedia[urut], slot["budget"], role)
+
+            if not teks or copies_sample(teks, slot["current"], role):
+                continue
+
+            pakai[urut] += 1
+            edits.append({**slot, "text": teks})
+            ditambal += 1
+
+    if bentrok:
+        notes.append(
+            f"{bentrok} slot terbit berbunyi sama dengan slot lain: "
+            "tidak ada teks lain yang tersisa untuk membedakannya."
+        )
+
+    if ditambal:
+        notes.append(
+            f"{ditambal} slot berbahasa template tidak kebagian teks baru "
+            "dan ditambal dengan teks sejenis, supaya tidak terbit dalam "
+            "bahasa yang salah."
+        )
 
     used = len(edits)
     total = sum(len(items) for items in roles.values())
@@ -2865,6 +3328,102 @@ def build_review_block(
     )
 
 
+def html_lang_edit(scanned: dict, kode: str) -> dict | None:
+    """
+    Menambahkan lang="id" ke <html> yang belum punya.
+
+    Halaman tanpa atribut ini dilaporkan seo_validator sebagai masalah
+    di setiap run, dan laporannya benar: pembaca layar tidak tahu
+    bahasa apa yang sedang dibacakan, dan mesin pencari menebaknya
+    dari isi. Template 616 milik pengguna membuka dengan
+    <html data-theme='default'> - tidak ada lang sama sekali, jadi
+    tidak ada slot yang bisa diisi lapis mana pun.
+
+    Yang ditulis SATU atribut, disisipkan tepat sesudah nama tagnya.
+    Tidak ada tag yang ditambah, tidak ada yang dibuang, dan tidak
+    satu byte pun di luar titik itu bergeser.
+
+    Menghasilkan None kalau <html> sudah punya lang. Yang sudah ada
+    diisi build_edits lewat peran "lang", dan menyisipkan yang kedua
+    di sebelahnya menghasilkan tag berisi dua atribut bernama sama.
+    """
+    bahasa = str(kode or "").strip()
+
+    if not bahasa:
+        return None
+
+    for item in (scanned or {}).get("elements", []):
+        if item.get("tag") != "html":
+            continue
+
+        atribut = item.get("attrs") or {}
+
+        # Pemindai menyerahkan atribut sebagai dict, tapi bentuk
+        # daftar pasangan juga masih beredar di pemanggil uji.
+        nama_atribut = {
+            str(nama).lower()
+            for nama in (
+                atribut.keys()
+                if isinstance(atribut, dict)
+                else (pasang[0] for pasang in atribut)
+            )
+        }
+
+        if "lang" in nama_atribut:
+            return None
+
+        titik = int(item["start"]) + len("<html")
+
+        return {
+            "kind": "raw",
+            "start": titik,
+            "end": titik,
+            "text": ' lang="' + bahasa + '"',
+        }
+
+    return None
+
+
+def build_faq_block(content: dict) -> str:
+    """
+    Blok schema FAQPage dari tanya jawab yang TERBIT di halaman.
+
+    Yang dipakai isi terbitnya, bukan isi yang diminta - dengan alasan
+    yang sama seperti blok Review: Google mensyaratkan teks FAQ di
+    schema sama persis dengan teks yang terbaca di halaman, dan teks
+    dari model dipotong menyesuaikan lebar slotnya. Lihat
+    published_content.
+    """
+    tanya = [
+        str(x).strip()
+        for x in (content.get("faq_question") or [])
+        if str(x).strip()
+    ]
+    jawab = [
+        str(x).strip()
+        for x in (content.get("faq_answer") or [])
+        if str(x).strip()
+    ]
+
+    pasangan = [{"question": q, "answer": a} for q, a in zip(tanya, jawab)]
+
+    if not pasangan:
+        return ""
+
+    payload = build_faq_schema(pasangan)
+
+    if not payload:
+        return ""
+
+    payload = {"@context": "https://schema.org", **payload}
+
+    return (
+        '<script type="application/ld+json">'
+        + json_for_html(payload)
+        + "</script>"
+    )
+
+
 def review_insert_point(html: str, scanned: dict | None = None) -> int:
     """
     Mencari tempat menyisipkan blok schema.
@@ -2896,6 +3455,7 @@ def fill_template(
     old_brand: str = "",
     is_amp: bool = False,
     assets: dict | None = None,
+    links: dict | None = None,
 ) -> dict:
     """
     Mengisi satu berkas template dan membuktikan strukturnya utuh.
@@ -2918,7 +3478,11 @@ def fill_template(
     dengan jumlah paragraf di template unggahan.
     """
     scanned = scan(html)
-    slot_map = build_slot_map(scanned, old_brand)
+    slot_map = build_slot_map(
+        scanned,
+        old_brand,
+        str(brand.get("region") or "id"),
+    )
 
     edits, notes = build_edits(slot_map, content, brand)
 
@@ -2951,6 +3515,34 @@ def fill_template(
 
     notes.extend(catatan_gambar)
 
+    # Alamat halaman, dengan alasan urutan yang sama seperti gambar:
+    # href yang sudah ada sering memuat nama brand lama, dan lapis
+    # nama brand di bawah menyentuh setiap slot yang belum kebagian
+    # isi. Dikerjakan sekarang, rentangnya sudah terdaftar sebelum
+    # lapis mana pun sempat menulisinya.
+    #
+    # Kolom yang dikosongkan tidak menghasilkan satu edit pun. Itu
+    # yang membuat template yang alamatnya dibiarkan terbit byte demi
+    # byte seperti aslinya - lihat generators/page_links.py.
+    tautan, tukar_tautan, tambah_tautan, catatan_tautan = link_edits(
+        scanned,
+        html,
+        links or {},
+        sudah,
+    )
+
+    if tautan:
+        edits.extend(tautan)
+        sudah.update(
+            {
+                (x["start"], x["end"]): x
+                for x in tautan
+                if x.get("kind") != "raw"
+            }
+        )
+
+    notes.extend(catatan_tautan)
+
     # Peta teks lama -> teks baru, dengan urutan siapa yang menang.
     #
     # Satu bunyi lama bisa dipakai beberapa slot berperan berbeda. Di
@@ -2967,27 +3559,41 @@ def fill_template(
     # yang diulang di seluruh halaman memang judul halamannya.
     diganti: dict[str, str] = {}
 
+    # Peta kedua, kuncinya teks lama APA ADANYA. Dipakai mencari judul
+    # lama yang berdiri di dalam teks lain - lihat echo_edits.
+    mentah: dict[str, str] = {}
+
     for peran in ECHO_PRIORITY:
         for item in edits:
             if item.get("role") != peran:
                 continue
 
-            if item.get("kind") == "attribute":
+            # Sisipan mentah tidak punya teks lama.
+            #
+            # Peta ini memetakan teks LAMA ke teks BARU, jadi edit
+            # yang tidak membuang teks apa pun - satu baris <link>
+            # yang ditambahkan ke dalam <head>, blok schema yang
+            # disisipkan - tidak punya kunci untuk dipetakan. Sebelum
+            # baris ini ada, edit seperti itu menghentikan seluruh
+            # pengisian dengan KeyError: 'current'.
+            if item.get("kind") in ("attribute", "raw"):
                 continue
 
             teks = str(item.get("text", ""))
 
             if teks.strip():
                 diganti.setdefault(normalize(item["current"]), teks)
+                mentah.setdefault(str(item["current"]).strip(), teks)
 
     for item in edits:
-        if item.get("kind") == "attribute":
+        if item.get("kind") in ("attribute", "raw"):
             continue
 
         teks = str(item.get("text", ""))
 
         if teks.strip():
             diganti.setdefault(normalize(item["current"]), teks)
+            mentah.setdefault(str(item["current"]).strip(), teks)
 
     # Teks kembar didahulukan atas penggantian nama. Kalimat lama
     # yang muncul dua kali - judul yang diulang di footer, misalnya -
@@ -2995,7 +3601,7 @@ def fill_template(
     # lama dengan nama brand yang ditukar. Kalau urutannya dibalik,
     # footer terbit berbunyi "DEEFGE Situs Slot Terpercaya" padahal
     # judul barunya "DEEFGE Situs Slot Resmi".
-    gema, jumlah_gema = echo_edits(slot_map, sudah, diganti)
+    gema, jumlah_gema = echo_edits(slot_map, sudah, diganti, mentah)
 
     if gema:
         edits.extend(gema)
@@ -3022,6 +3628,35 @@ def fill_template(
             f"{jumlah_brand} tempat yang tidak kebagian teks baru."
         )
 
+    # Sisa brand lama yang tidak berdiri di slot mana pun.
+    #
+    # Dijalankan SESUDAH brand_edits, bukan menggantikannya. Yang di
+    # atas menyapu slot dan tahu perannya; yang ini menyapu sisanya
+    # dan tidak tahu apa-apa selain bentuk teksnya, jadi ia harus
+    # berjalan paling akhir supaya setiap wilayah yang sudah punya
+    # pemiliknya lewat lebih dulu.
+    #
+    # Terukur pada template 616: 39 dari 64 sebutan berdiri di slot,
+    # 25 sisanya tidak - dan yang 25 itu memuat SELURUH blok JSON-LD,
+    # tempat halaman menyatakan namanya kepada mesin pencari.
+    sisa_brand, jumlah_sisa = brand_sweep_edits(
+        html,
+        slot_map,
+        edits,
+        old_brand,
+        brand.get("site_name", ""),
+    )
+
+    if sisa_brand:
+        edits.extend(sisa_brand)
+        sudah.update({(x["start"], x["end"]): x for x in sisa_brand})
+
+        notes.append(
+            f"{jumlah_sisa} sebutan brand lama di luar slot ikut "
+            "diganti - keterangan gambar, atribut bertulisan, dan "
+            "teks yang bersarang terlalu dalam untuk jadi slot."
+        )
+
     # Harga yang tertinggal ikut pindah zona, dengan alasan yang sama
     # seperti nama brand di atas: slot yang dilewati dilewati karena
     # "belum tentu ini isi artikel", bukan karena isinya boleh tetap
@@ -3041,6 +3676,22 @@ def fill_template(
         notes.append(
             f"{jumlah_harga} harga yang tertinggal ditukar ke mata uang "
             f"{brand.get('region_label', 'Indonesia')}."
+        )
+
+    # Klaim di teks yang tidak kebagian jawaban model dibuang PALING
+    # AKHIR - sesudah nama brand dan harga ditukar, supaya yang
+    # diperiksa teks yang benar-benar terbit. Lihat claim_edits.
+    klaim, jumlah_klaim = claim_edits(slot_map, sudah)
+
+    if klaim:
+        edits.extend(klaim)
+        sudah.update({(x["start"], x["end"]): x for x in klaim})
+
+    if jumlah_klaim:
+        notes.append(
+            f"{jumlah_klaim} teks yang tidak ditulis model memuat klaim "
+            "yang tidak bisa dibuktikan pipeline; klaimnya dibuang, "
+            "sisa kalimatnya tetap dipakai."
         )
 
     # Data terstruktur ditulis ulang dari isi yang sama dengan yang
@@ -3190,7 +3841,7 @@ def fill_template(
             "menjawab dalam bahasa yang diminta, lalu ulangi."
         )
 
-    allowance: dict[str, int] = {}
+    allowance: dict[str, int] = dict(tambah_tautan)
 
     # Tidak ada satu byte pun yang disisipkan untuk artikel di sini,
     # dan itu bukan kelalaian melainkan bentuk yang diminta.
@@ -3272,9 +3923,62 @@ def fill_template(
                 "terbaca di halaman."
             )
 
+    # Atribut lang, kalau <html> belum punya.
+    baris_lang = html_lang_edit(scanned, brand.get("html_lang", "id"))
+
+    if baris_lang:
+        edits.append(baris_lang)
+        notes.append(
+            "Atribut lang ditambahkan ke <html>; template ini tidak "
+            "membawanya."
+        )
+
+    # Blok FAQPage, dengan syarat yang sama seperti blok Review.
+    #
+    # Halaman harus benar-benar MENAMPILKAN tanya jawabnya. Schema FAQ
+    # untuk pertanyaan yang tidak ada di halaman adalah persis yang
+    # dilarang Google, dan hukumannya tindakan manual untuk seluruh
+    # situs - bukan cuma halaman itu.
+    tampil_faq = bool(slot_map["roles"].get("faq_question")) and bool(
+        slot_map["roles"].get("faq_answer")
+    )
+
+    if has_faq_schema(scanned, html):
+        notes.append(
+            "Template sudah punya FAQPage sendiri, jadi isinya "
+            "diperbarui di tempat - bukan ditambah blok kedua."
+        )
+    elif tampil_faq:
+        blok_faq = build_faq_block(terbit)
+
+        if blok_faq:
+            titik_faq = review_insert_point(html, scanned)
+
+            edits.append(
+                {
+                    "kind": "raw",
+                    "start": titik_faq,
+                    "end": titik_faq,
+                    "text": blok_faq,
+                }
+            )
+
+            allowance["script"] = allowance.get("script", 0) + 1
+            notes.append(
+                "Blok schema FAQPage ditambahkan untuk "
+                + str(len(terbit.get("faq_question", [])))
+                + " tanya jawab yang terbaca di halaman."
+            )
+
     filled = apply_edits(html, edits)
 
-    check = verify(html, filled, edits, allowance, tukar_gambar)
+    check = verify(
+        html,
+        filled,
+        edits,
+        allowance,
+        tukar_gambar + tukar_tautan,
+    )
 
     if not check["ok"]:
         raise ValueError(
@@ -3289,4 +3993,33 @@ def fill_template(
         "skipped": len(slot_map["skipped"]),
         "notes": notes,
         "stats": check["stats"],
+        # Rentang yang benar-benar ditulis, apa adanya.
+        #
+        # Dikembalikan supaya pemeriksa terakhir bisa membuktikan
+        # SEKALI LAGI - atas teks yang persis akan mendarat di disk -
+        # bahwa tidak ada satu byte pun di luar rentang ini yang
+        # berbeda dari template aslinya. Pembuktian yang sama sudah
+        # berjalan di atas, tapi yang di atas memeriksa "filled",
+        # sedangkan yang ditulis pemanggil bisa saja bukan itu.
+        #
+        # Yang disalin cuma tiga kunci yang dibutuhkan
+        # verify_untouched_regions. Mengembalikan edits utuh berarti
+        # mengembalikan seluruh teks halaman untuk kedua kalinya,
+        # dan nilai balik fungsi ini ikut ke laporan job.
+        "ranges": [
+            {
+                "start": int(item["start"]),
+                "end": int(item["end"]),
+                # kind dan quote ikut karena prepare_replacement
+                # membutuhkan keduanya untuk menghitung panjang teks
+                # yang benar-benar ditulis: nilai atribut di-escape
+                # berbeda dari teks di antara dua tag, dan panjang
+                # yang meleset menggeser seluruh perbandingan
+                # sesudahnya lalu melaporkan kerusakan palsu.
+                "kind": item.get("kind", "text"),
+                "quote": item.get("quote"),
+                "text": item.get("text", ""),
+            }
+            for item in edits
+        ],
     }

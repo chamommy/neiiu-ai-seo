@@ -324,6 +324,18 @@ def named_role(slot: dict) -> str:
     attr = slot.get("attr", "")
     attrs = slot.get("attrs", {})
 
+    # <a> tidak pernah memuat alamat gambar.
+    #
+    # href milik <a> ikut dipindai sejak tujuan tombol login/daftar
+    # bisa ditukar - lihat generators/page_links.py. Ia lolos seluruh
+    # tahap di bawah dengan sendirinya, KECUALI satu: penanda
+    # data-neiiu yang dibaca paling dulu. Template yang membungkus
+    # logonya dengan <a data-neiiu="logo"> akan membuat alamat
+    # gambar ditulis ke dalam href-nya, dan tombolnya menuju berkas
+    # PNG. Ditutup di sini, sebelum penanda itu sempat dibaca.
+    if tag == "a":
+        return ""
+
     # Penanda pengguna menang atas tebakan apa pun. Ini jalan keluar
     # untuk template yang menamai gambarnya dengan cara yang tidak
     # bisa ditebak siapa pun.

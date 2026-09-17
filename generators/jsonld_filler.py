@@ -147,6 +147,42 @@ def as_list(value) -> list:
     return [value]
 
 
+def first_text(nilai) -> str:
+    """
+    Satu teks dari isi slot, yang bentuknya bisa daftar atau string.
+
+    Isi halaman datang dalam dua bentuk sekaligus, dan itu memang
+    begitu bentuknya: peran bertekstunggal seperti title dan
+    meta_description dipegang sebagai STRING oleh content_planner,
+    sementara peran berdaftar seperti faq_question dipegang sebagai
+    daftar. published_content menghasilkan bentuk kedua untuk
+    semuanya.
+
+    Jadi berkas ini bisa menerima dua-duanya tergantung siapa yang
+    memanggilnya, dan str() apa adanya benar untuk yang satu tapi
+    tidak untuk yang lain - daftar berisi satu kalimat berubah jadi
+    repr Python-nya, kurung siku dan tanda kutipnya ikut:
+
+        "name": "['ABECE | Link Alternatif Togel Online']"
+
+    Ini BELUM pernah terbit. Jalur produksi mengirim string, dan
+    halaman yang terbit 30 Agustus 2026 memuat nama yang benar. Yang
+    dijaga di sini bahwa ia tetap begitu kalau suatu saat pemanggil
+    kedua mengirim bentuk yang satu lagi - bentuk yang sudah beredar
+    di berkas ini lewat published_content.
+    """
+    if isinstance(nilai, (list, tuple)):
+        for satu in nilai:
+            teks = str(satu or "").strip()
+
+            if teks:
+                return teks
+
+        return ""
+
+    return str(nilai or "").strip()
+
+
 def node_type(node: dict) -> str:
     tipe = node.get("@type")
 
@@ -333,8 +369,8 @@ def rewrite_node(
     diganti = 0
 
     tipe = node_type(node)
-    judul = str(content.get("title") or content.get("h1") or "").strip()
-    ringkas = str(content.get("meta_description") or "").strip()
+    judul = first_text(content.get("title") or content.get("h1"))
+    ringkas = first_text(content.get("meta_description"))
     nama_situs = str(brand.get("site_name", "")).strip()
 
     if tipe in BRAND_TYPES and nama_situs and "name" in node:
@@ -459,6 +495,28 @@ def has_reviews(scanned: dict, html: str) -> bool:
 
         for simpul in walk(blok["data"]):
             if simpul.get("review") or simpul.get("aggregateRating"):
+                return True
+
+    return False
+
+
+def has_faq_schema(scanned: dict, html: str) -> bool:
+    """
+    Apakah template sudah punya blok FAQPage sendiri.
+
+    Kembaran has_reviews, dan ada karena alasan yang sama: blok kedua
+    yang ditambahkan di atas blok yang sudah ada bukan tambahan
+    melainkan pertentangan. Dua FAQPage di satu halaman membuat mesin
+    pencari melihat dua daftar tanya jawab yang berbeda untuk halaman
+    yang sama, dan yang sudah ada memang sudah terisi tanya jawab baru
+    lewat jsonld_edits.
+    """
+    for blok in jsonld_blocks(scanned, html):
+        if blok["data"] is None:
+            continue
+
+        for simpul in walk(blok["data"]):
+            if node_type(simpul) == "FAQPage":
                 return True
 
     return False

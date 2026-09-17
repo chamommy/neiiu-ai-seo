@@ -141,6 +141,57 @@ def init_jobs_db() -> None:
                     f"ADD COLUMN {kolom} TEXT NOT NULL DEFAULT ''"
                 )
 
+        # Brief kreatif: nada tulisan, jenis halaman, pembaca yang
+        # dituju, dan keyword pendukung.
+        #
+        # Keempatnya kosong secara bawaan, dan kosong berarti tidak
+        # menyumbang satu baris pun ke prompt. Job lama karena itu
+        # tetap berperilaku persis seperti sebelum kolom ini ada -
+        # bukan cuma "mirip", melainkan promptnya sama byte per byte.
+        #
+        # secondary_keywords disimpan sebagai satu teks dipisah baris
+        # baru, bukan tabel sendiri, dengan alasan yang sama dengan
+        # design_refs: isinya beberapa potong yang selalu dibaca
+        # sekaligus dan tidak pernah dicari satu-satu.
+        for kolom in (
+            "tone",
+            "page_purpose",
+            "target_audience",
+            "secondary_keywords",
+        ):
+            if kolom not in columns:
+                db.execute(
+                    f"ALTER TABLE neiiu_jobs "
+                    f"ADD COLUMN {kolom} TEXT NOT NULL DEFAULT ''"
+                )
+
+        # Alamat halaman yang diketik pengguna: canonical dan
+        # amphtml. Kosong berarti alamat di template dibiarkan apa
+        # adanya - yaitu perilaku setiap job sebelum kolom ini ada,
+        # dan yang memang diminta pengguna sebagai bawaan.
+        for kolom in ("canonical_url", "amphtml_url"):
+            if kolom not in columns:
+                db.execute(
+                    f"ALTER TABLE neiiu_jobs "
+                    f"ADD COLUMN {kolom} TEXT NOT NULL DEFAULT ''"
+                )
+
+        # Ruang ingatan yang dipakai job ini. Kosong berarti produksi,
+        # jadi seluruh job lama tetap berjalan persis seperti dulu.
+        #
+        # Daftar kolom di atas dibaca sekali di awal, sedangkan fungsi
+        # ini bisa dipanggil lebih dari sekali dalam satu proses.
+        # Panggilan kedua sempat gagal dengan "duplicate column name"
+        # karena daftarnya sudah basi, jadi yang menentukan di sini
+        # hasil ALTER-nya sendiri - bukan daftar kolomnya.
+        try:
+            db.execute(
+                "ALTER TABLE neiiu_jobs "
+                "ADD COLUMN history_scope TEXT NOT NULL DEFAULT ''"
+            )
+        except Exception:
+            pass
+
 
 def create_job(
     user_id: int,
@@ -163,6 +214,13 @@ def create_job(
     logo_url: str = "",
     favicon_url: str = "",
     poster_url: str = "",
+    canonical_url: str = "",
+    amphtml_url: str = "",
+    tone: str = "",
+    page_purpose: str = "",
+    target_audience: str = "",
+    secondary_keywords: str = "",
+    history_scope: str = "",
 ) -> int:
     now = utc_now()
 
@@ -176,11 +234,16 @@ def create_job(
                 region, city, template_id, template_brand,
                 design_refs, cta_url, article_words,
                 logo_url, favicon_url, poster_url,
+                canonical_url, amphtml_url,
+                tone, page_purpose, target_audience,
+                secondary_keywords, history_scope,
                 status, created_at, updated_at
             )
             VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?,
+                ?, ?,
+                ?, ?, ?, ?, ?,
                 'queued', ?, ?
             )
             """,
@@ -205,6 +268,13 @@ def create_job(
                 logo_url,
                 favicon_url,
                 poster_url,
+                canonical_url,
+                amphtml_url,
+                tone,
+                page_purpose,
+                target_audience,
+                secondary_keywords,
+                history_scope,
                 now,
                 now,
             ),

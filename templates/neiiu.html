@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>NEIIU — Generator Landing Page</title>
     <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}?v=4">
-    <link rel="stylesheet" href="{{ url_for('static', path='/neiiu.css') }}?v=3">
+    <link rel="stylesheet" href="{{ url_for('static', path='/neiiu.css') }}?v=9">
 </head>
 <body class="neiiu-body">
 
@@ -19,6 +19,7 @@
     </a>
 
     <nav class="neiiu-nav">
+        <a href="/neiiu/template">Template</a>
         <a href="/chat">Chat</a>
         {% if user.role == 'admin' %}
         <a href="/admin">Admin</a>
@@ -36,35 +37,51 @@
 
     <h1 class="neiiu-title">Generator Landing Page + AMP</h1>
     <p class="neiiu-sub">
-        Masukkan keyword. NEIIU akan mencari di Google, menganalisis
-        halaman yang sedang ngerank, lalu menyusun landing page dan
-        versi AMP baru dari pola yang mereka pakai.
-        Satu run butuh puluhan menit, jadi prosesnya jalan di belakang
-        layar dan halaman ini menampilkan kemajuannya.
+        Isi brand, niche, dan template. NEIIU membaca halaman yang
+        sedang ngerank di Google untuk niche itu, lalu menulis landing
+        page beserta versi AMP-nya dari satu isi yang sama.
     </p>
 
-    <section class="card">
-        <h2>Buat Halaman Baru</h2>
+    <!--
+        Alur halaman ini, ditulis sebagai empat langkah.
+
+        Yang paling sering ditanyakan tentang generator adalah apa
+        yang akan diubahnya. Jawabannya - hanya isi SEO yang dikenali -
+        lebih cepat terbaca sebagai alur daripada sebagai paragraf.
+    -->
+    <ol class="flow">
+        <li><span>Template kamu</span></li>
+        <li><span>Struktur dipertahankan</span></li>
+        <li><span>Hanya isi SEO</span></li>
+        <li><span>Landing + AMP</span></li>
+    </ol>
+
+    <section class="card generate-card">
+        <h2>
+            Generator
+            <span class="status-chip" id="genStatus" data-state="idle">
+                Siap
+            </span>
+        </h2>
 
         <form id="jobForm">
-            <div class="grid">
-                <div class="field">
-                    <label for="keyword">Keyword</label>
-                    <input
-                        type="text"
-                        id="keyword"
-                        name="keyword"
-                        placeholder="contoh: slot gacor"
-                        maxlength="120"
-                        required
-                        autocomplete="off"
-                    >
-                    <span class="hint">
-                        Topik yang dicari orang di Google, dan yang
-                        mau di-rank.
-                    </span>
-                </div>
+            <!--
+                Alur utama: enam hal, dalam urutan yang dipakai orang
+                waktu memikirkan halamannya.
 
+                Brand dulu, karena itu yang jadi nama halamannya.
+                Niche kedua, karena itu topiknya. Template ketiga,
+                karena struktur halaman datang dari sana. Sisanya
+                keterangan atas ketiganya.
+
+                Yang TIDAK ada di sini bukan yang dilipat, melainkan
+                yang dibuang: nada tulisan, pembaca yang dituju,
+                keyword pendukung, dan URL halaman acuan. Keempatnya
+                menambah kolom yang harus dibaca setiap kali, untuk
+                pengaruh yang tidak pernah diminta lagi sesudah
+                dicoba sekali.
+            -->
+            <div class="grid">
                 <div class="field">
                     <label for="brandName">Brand</label>
                     <input
@@ -76,70 +93,66 @@
                         autocomplete="off"
                     >
                     <span class="hint">
-                        Nama situs yang muncul di halamannya.
-                        Berbeda dari keyword. Kosongkan untuk memakai
-                        SITE_NAME dari .env
+                        Nama situs yang muncul di halamannya, dan
+                        yang menggantikan nama pemilik template lama
+                        sampai ke sudut halaman.
                     </span>
                 </div>
 
-                <div class="field" style="grid-column: 1 / -1">
-                    <label for="baseUrl">Domain brand</label>
+                <div class="field">
+                    <label for="niche">Niche</label>
                     <input
                         type="text"
-                        id="baseUrl"
-                        name="baseUrl"
-                        placeholder="contoh: https://abece.com"
-                        maxlength="200"
+                        id="niche"
+                        name="niche"
+                        placeholder="contoh: slot gacor"
+                        maxlength="120"
+                        required
                         autocomplete="off"
                     >
                     <span class="hint">
-                        Dipakai untuk canonical dan
-                        structured data. Kosongkan untuk memakai
-                        SITE_BASE_URL dari .env
-                    </span>
-                </div>
-
-                <div class="field">
-                    <label for="region">Zona</label>
-                    <select id="region" name="region">
-                        {% for zona in regions %}
-                        <option
-                            value="{{ zona.code }}"
-                            {% if zona.code == default_region %}selected{% endif %}
-                        >{{ zona.label }}</option>
-                        {% endfor %}
-                    </select>
-                    <span class="hint">
-                        Menentukan Google negara mana yang dipakai
-                        mencari, sekaligus bahasa landing page dan
-                        AMP yang dibuat.
-                    </span>
-                </div>
-
-                <div class="field">
-                    <label for="city">Kota pencarian</label>
-                    <select id="city" name="city"></select>
-                    <span class="hint">
-                        Google memberi urutan yang berbeda antar kota
-                        di negara yang sama. Pilih kota tempat kamu
-                        biasa mengecek supaya peringkatnya cocok.
+                        Topik halaman ini, ditulis seperti yang
+                        diketik orang di Google. Ini juga yang dipakai
+                        mencari halaman pesaing untuk dibaca, jadi
+                        tulis yang spesifik &mdash; <b>slot gacor</b>
+                        lebih berguna daripada <b>judi</b>.
                     </span>
                 </div>
 
                 <div class="field">
                     <label for="templateId">Template</label>
-                    <select id="templateId" name="templateId">
-                        <option value="0">
-                            Tanpa template (NEIIU rakit halaman baru)
-                        </option>
+                    <select id="templateId" name="templateId" required>
+                        <option value="0">-- pilih template --</option>
                     </select>
                     <span class="hint">
-                        Kalau template dipilih, NEIIU hanya mengganti
-                        isinya dan tidak menyentuh struktur, link,
-                        atau iklan di dalamnya. Kalau dikosongkan,
-                        NEIIU merakit halaman sendiri lengkap dengan
-                        tombol daftar, bilah mengambang, popup,
-                        testimoni, dan rating.
+                        Halaman ditulis DI ATAS template ini. Yang
+                        diganti hanya teksnya; struktur, iklan,
+                        skrip, tautan, gambar, dan kelas CSS-nya
+                        tetap byte demi byte seperti aslinya.
+                        <a href="/neiiu/template">Kelola template</a>
+                    </span>
+                </div>
+
+                <!--
+                    Halaman yang dibuat ditulis sebagai keterangan,
+                    bukan sebagai pilihan.
+
+                    Generator ini selalu menerbitkan dua berkas dari
+                    SATU isi yang sama, jadi tidak ada yang bisa
+                    dipilih di sini. Menaruh dropdown berisi satu
+                    pilihan akan menjanjikan kendali yang tidak ada -
+                    dan yang ditanyakan pengguna memang bukan "boleh
+                    pilih?" melainkan "yang keluar apa saja?".
+                -->
+                <div class="field">
+                    <span class="field-label">Halaman yang dibuat</span>
+                    <output class="field-static" id="pageOutputs">
+                        Landing Page + AMP
+                    </output>
+                    <span class="hint">
+                        Keduanya dibuat sekaligus dari satu isi yang
+                        sama, jadi title, description, dan H1-nya
+                        dijamin cocok.
                     </span>
                 </div>
 
@@ -151,14 +164,21 @@
                         type="text"
                         id="templateBrand"
                         name="templateBrand"
-                        placeholder="ABECEDE"
-                        maxlength="60"
+                        placeholder="ABECEDE, TeePublic"
+                        maxlength="120"
                     >
                     <span class="hint">
-                        Nama brand yang sudah tertulis di template.
-                        Semua kemunculannya diganti dengan Nama brand
-                        di atas, termasuk di logo, alt gambar, dan
-                        teks footer.
+                        Nama brand yang <b>sudah tertulis</b> di
+                        template &mdash; nama pemilik sebelumnya,
+                        bukan brand barumu. Semua kemunculannya
+                        diganti dengan Brand di atas, termasuk di
+                        logo, alt gambar, dan teks footer.
+                        <br>
+                        Boleh diisi <b>lebih dari satu</b>, dipisah
+                        koma. Template bekas sering berlapis &mdash;
+                        struktur milik satu pemilik, branding milik
+                        pemilik berikutnya &mdash; dan yang tidak
+                        disebut di sini akan tertinggal di halaman.
                     </span>
                 </div>
 
@@ -178,14 +198,221 @@
                     <span class="hint">
                         Isi angka kalau artikelnya mau lebih panjang.
                         Yang dilebarkan <b>isi paragraf yang sudah ada
-                        di templatemu</b> — tidak ada satu paragraf
-                        pun yang ditambahkan, jumlahnya tetap sama
-                        persis. <b>Kosongkan</b> berarti tiap paragraf
-                        ditulis sepanjang jatah aslinya. Satu paragraf
-                        paling banyak dilebarkan tiga kali lipat, jadi
-                        target yang melewati itu dilaporkan apa adanya
-                        di log. Makin panjang makin lama: sekitar 3
-                        menit tiap 1.000 kata di kecepatan sekarang.
+                        di templatemu</b> &mdash; tidak ada satu
+                        paragraf pun yang ditambahkan, jumlahnya tetap
+                        sama persis. <b>Kosongkan</b> berarti tiap
+                        paragraf ditulis sepanjang jatah aslinya.
+                        Makin panjang makin lama: sekitar 3 menit tiap
+                        1.000 kata.
+                    </span>
+                </div>
+            </div>
+
+            <!--
+                Alamat, dilipat dan seluruhnya opsional.
+
+                Kosong berarti alamat yang sudah tertulis di template
+                DIBIARKAN APA ADANYA. Itu bukan sekadar bawaan yang
+                masuk akal, melainkan perbaikan atas perilaku
+                sebelumnya: dulu kolom domain yang dikosongkan jatuh
+                ke SITE_BASE_URL di .env, yang bawaannya
+                "https://example.com" - alamat situs contoh milik IANA
+                yang terbaca sah di mana-mana dan karena itu tidak
+                pernah ketahuan sebelum halamannya terbit.
+            -->
+            <details class="more">
+                <summary>
+                    Domain, tautan, dan gambar
+                    <span class="more-hint">
+                        opsional &mdash; kosong berarti ikut template
+                    </span>
+                </summary>
+
+                <p class="hint" style="margin:0 0 10px">
+                    Semua kolom di bawah boleh dikosongkan.
+                    <b>Kosong berarti alamat yang sudah ada di
+                    templatemu dipakai apa adanya</b> &mdash; tidak
+                    ada satu alamat pun yang dikarang. Isi alamat
+                    lengkap yang diawali <code>https://</code>, atau
+                    alamat di dalam situs sendiri yang diawali
+                    <code>/</code>.
+                </p>
+
+                <div class="grid">
+                <div class="field" style="grid-column: 1 / -1">
+                    <label for="canonicalUrl">Domain canonical</label>
+                    <input
+                        type="text"
+                        id="canonicalUrl"
+                        name="canonicalUrl"
+                        placeholder="https://brandmu.com/slot-gacor/"
+                        maxlength="300"
+                        autocomplete="off"
+                    >
+                    <span class="hint">
+                        Alamat resmi halaman ini, ditulis ke
+                        <code>&lt;link rel="canonical"&gt;</code>.
+                        Asal domainnya juga dipakai sebagai pengenal
+                        situs di data terstruktur. Kalau template
+                        belum punya canonical, satu baris ditambahkan
+                        di dalam <code>&lt;head&gt;</code>.
+                    </span>
+                </div>
+
+                <div class="field" style="grid-column: 1 / -1">
+                    <label for="amphtmlUrl">
+                        Domain amphtml (di landing page)
+                    </label>
+                    <input
+                        type="text"
+                        id="amphtmlUrl"
+                        name="amphtmlUrl"
+                        placeholder="https://brandmu.com/slot-gacor/amp/"
+                        maxlength="300"
+                        autocomplete="off"
+                    >
+                    <span class="hint">
+                        Alamat versi AMP, ditulis ke
+                        <code>&lt;link rel="amphtml"&gt;</code> di
+                        halaman landing &mdash; itu yang memberi tahu
+                        Google bahwa kedua berkas ini sepasang. Berkas
+                        AMP sendiri tidak menunjuk dirinya lagi;
+                        canonical-nya menunjuk ke landing.
+                    </span>
+                </div>
+
+                <div class="field" style="grid-column: 1 / -1">
+                    <label for="ctaUrl">
+                        Tujuan tombol LOGIN dan DAFTAR (pada AMP)
+                    </label>
+                    <input
+                        type="text"
+                        id="ctaUrl"
+                        name="ctaUrl"
+                        placeholder="https://link-tujuan-mu/"
+                        maxlength="300"
+                        autocomplete="off"
+                    >
+                    <span class="hint">
+                        Dipasang ke tombol yang tulisannya menyebut
+                        login, masuk, daftar, register, atau
+                        padanannya dalam bahasa Thai &mdash; di berkas
+                        AMP maupun landing. Tombol bergambar dikenali
+                        dari class dan id-nya. Tautan dalam-halaman
+                        seperti <code>#daftar</code> dan isi blok
+                        iklan tidak disentuh. Tombol yang tulisannya
+                        tidak umum bisa kamu tandai sendiri dengan
+                        <code>data-neiiu="daftar"</code>.
+                    </span>
+                </div>
+
+                <div class="field" style="grid-column: 1 / -1">
+                    <label for="logoUrl">Link logo</label>
+                    <input
+                        type="text"
+                        id="logoUrl"
+                        name="logoUrl"
+                        placeholder="https://cdn-mu.example/logo-baru.png"
+                        maxlength="500"
+                        autocomplete="off"
+                    >
+                    <span class="hint">
+                        Yang diganti gambar yang class, id, alt, atau
+                        nama berkasnya menyebut <b>logo</b>. Kalau
+                        template tidak menamai satu pun, yang dipakai
+                        gambar pertama di dalam
+                        <code>&lt;header&gt;</code> atau
+                        <code>&lt;nav&gt;</code>. Alamat di
+                        <code>Organization.logo</code> ikut berganti.
+                    </span>
+                </div>
+
+                <div class="field">
+                    <label for="faviconUrl">Link icon</label>
+                    <input
+                        type="text"
+                        id="faviconUrl"
+                        name="faviconUrl"
+                        placeholder="https://cdn-mu.example/favicon.ico"
+                        maxlength="500"
+                        autocomplete="off"
+                    >
+                    <span class="hint">
+                        Mengganti semua
+                        <code>&lt;link rel="icon"&gt;</code>,
+                        <code>shortcut icon</code>,
+                        <code>apple-touch-icon</code>, dan
+                        <code>mask-icon</code>.
+                    </span>
+                </div>
+
+                <div class="field">
+                    <label for="posterUrl">
+                        Link gambar poster / banner
+                    </label>
+                    <input
+                        type="text"
+                        id="posterUrl"
+                        name="posterUrl"
+                        placeholder="https://cdn-mu.example/poster.jpg"
+                        maxlength="500"
+                        autocomplete="off"
+                    >
+                    <span class="hint">
+                        Mengganti <code>og:image</code>,
+                        <code>twitter:image</code>, atribut
+                        <code>poster</code> milik video, lalu
+                        <b>semua gambar isi yang tersisa</b>. Yang
+                        <b>tidak</b> ikut: gambar seukuran ikon,
+                        berkas <code>.svg</code>, logo, favicon, dan
+                        isi blok iklan. Gambar yang meleset bisa
+                        ditandai sendiri dengan
+                        <code>data-neiiu="poster"</code> atau
+                        <code>data-neiiu-skip</code>.
+                    </span>
+                </div>
+                </div>
+            </details>
+
+            <!--
+                Setelan mesin pencarian. Dilipat karena jarang
+                disentuh, tapi TIDAK dibuang: bahasa menentukan
+                bahasa seluruh halaman, dan ketiga sisanya menentukan
+                halaman siapa yang dibaca sebagai pesaing.
+            -->
+            <details class="more">
+                <summary>
+                    Pencarian di Google
+                    <span class="more-hint">
+                        bahasa, kota, sumber SERP, jumlah crawl
+                    </span>
+                </summary>
+
+                <div class="grid">
+                <div class="field">
+                    <label for="region">Bahasa</label>
+                    <select id="region" name="region">
+                        {% for zona in regions %}
+                        <option
+                            value="{{ zona.code }}"
+                            {% if zona.code == default_region %}selected{% endif %}
+                        >{{ zona.label }}</option>
+                        {% endfor %}
+                    </select>
+                    <span class="hint">
+                        Bahasa landing page dan AMP yang dibuat,
+                        sekaligus Google negara mana yang dipakai
+                        mencari.
+                    </span>
+                </div>
+
+                <div class="field">
+                    <label for="city">Kota pencarian</label>
+                    <select id="city" name="city"></select>
+                    <span class="hint">
+                        Google memberi urutan yang berbeda antar kota
+                        di negara yang sama. Pilih kota tempat kamu
+                        biasa mengecek supaya peringkatnya cocok.
                     </span>
                 </div>
 
@@ -215,144 +442,8 @@
                         Makin sedikit, makin cepat selesai.
                     </span>
                 </div>
-
-                <div class="field" style="grid-column: 1 / -1">
-                    <label for="reference">
-                        URL halaman acuan (opsional)
-                    </label>
-                    <input
-                        type="text"
-                        id="reference"
-                        name="reference"
-                        placeholder="kosongkan biar NEIIU yang pilih sendiri"
-                        autocomplete="off"
-                    >
-                    <span class="hint">
-                        Yang diambil dari halaman ini hanya struktur
-                        section dan gaya visualnya, bukan teks atau
-                        kodenya.
-                    </span>
                 </div>
-
-                <div class="field" style="grid-column: 1 / -1">
-                    <label for="designRefs">
-                        URL acuan gaya (opsional, satu per baris)
-                    </label>
-                    <textarea
-                        id="designRefs"
-                        name="designRefs"
-                        rows="3"
-                        maxlength="1000"
-                        placeholder="https://situs-yang-desainnya-saya-suka.com/"
-                        autocomplete="off"
-                    ></textarea>
-                    <span class="hint">
-                        Dipakai saat Template dikosongkan. NEIIU
-                        membaca warna, font, sudut lengkung, dan
-                        komponen yang dipakai halaman ini, lalu
-                        merakit halaman barunya sendiri. Teks dan
-                        kode halaman acuan tidak ikut tersalin.
-                    </span>
-                </div>
-
-                <div class="field" style="grid-column: 1 / -1">
-                    <label for="ctaUrl">
-                        Tujuan tombol LOGIN dan DAFTAR (opsional)
-                    </label>
-                    <input
-                        type="text"
-                        id="ctaUrl"
-                        name="ctaUrl"
-                        placeholder="https://link-tujuan.example/"
-                        maxlength="300"
-                        autocomplete="off"
-                    >
-                    <span class="hint">
-                        Dipakai seluruh tombol ajakan: sepasang tombol
-                        di hero, bilah mengambang di bawah, popup
-                        pembuka, dan tombol di footer. Kalau
-                        dikosongkan, tombolnya menunjuk ke beranda
-                        brand ini sendiri.
-                    </span>
-                </div>
-
-                <div class="field" style="grid-column: 1 / -1">
-                    <label for="logoUrl">Link logo (opsional)</label>
-                    <input
-                        type="text"
-                        id="logoUrl"
-                        name="logoUrl"
-                        placeholder="https://cdn-mu.example/logo-baru.png"
-                        maxlength="500"
-                        autocomplete="off"
-                    >
-                    <span class="hint">
-                        Yang diganti gambar yang class, id, alt, atau
-                        nama berkasnya menyebut <b>logo</b>. Kalau
-                        template tidak menamai satu pun, yang dipakai
-                        gambar pertama di dalam
-                        <code>&lt;header&gt;</code> atau
-                        <code>&lt;nav&gt;</code>. Alamat di
-                        <code>Organization.logo</code> ikut berganti,
-                        supaya logo di hasil pencarian bukan logo
-                        pemilik template sebelumnya.
-                    </span>
-                </div>
-
-                <div class="field">
-                    <label for="faviconUrl">Link favicon (opsional)</label>
-                    <input
-                        type="text"
-                        id="faviconUrl"
-                        name="faviconUrl"
-                        placeholder="https://cdn-mu.example/favicon.ico"
-                        maxlength="500"
-                        autocomplete="off"
-                    >
-                    <span class="hint">
-                        Mengganti semua
-                        <code>&lt;link rel="icon"&gt;</code>,
-                        <code>shortcut icon</code>,
-                        <code>apple-touch-icon</code>, dan
-                        <code>mask-icon</code>.
-                    </span>
-                </div>
-
-                <div class="field">
-                    <label for="posterUrl">Link gambar poster (opsional)</label>
-                    <input
-                        type="text"
-                        id="posterUrl"
-                        name="posterUrl"
-                        placeholder="https://cdn-mu.example/poster.jpg"
-                        maxlength="500"
-                        autocomplete="off"
-                    >
-                    <span class="hint">
-                        Mengganti <code>og:image</code>,
-                        <code>twitter:image</code>, atribut
-                        <code>poster</code> milik video, lalu
-                        <b>semua gambar isi yang tersisa</b> —
-                        termasuk yang tidak menamai dirinya apa pun.
-                        Yang <b>tidak</b> ikut: gambar seukuran ikon
-                        (di bawah 64px atau ber-class
-                        <code>w-6</code>, <code>h-12</code>), berkas
-                        <code>.svg</code>, logo, favicon, dan isi blok
-                        iklan. Kalau ada satu gambar yang meleset,
-                        tandai sendiri di template dengan
-                        <code>data-neiiu="poster"</code> atau
-                        <code>data-neiiu-skip</code>.
-                    </span>
-                </div>
-            </div>
-
-            <p class="hint" style="margin:2px 0 0">
-                Ketiganya cuma berlaku kalau Template dipilih, dan
-                cuma menukar alamat gambarnya — ukuran, posisi, dan
-                CSS-nya tetap milik templatemu. Isi alamat lengkap
-                yang diawali <code>https://</code>, atau alamat di
-                dalam situs sendiri yang diawali <code>/</code>.
-            </p>
+            </details>
 
             <div class="checks">
                 <label class="check">
@@ -366,72 +457,20 @@
             </div>
 
             <button type="submit" class="primary-btn" id="submitBtn">
-                Jalankan
+                Generate Landing Page + AMP
             </button>
+
+            <p class="gen-help">
+                Template yang kamu pilih dipertahankan apa adanya.
+                Iklan, banner, CSS, JavaScript, gambar, dan tautan
+                sponsor tidak disentuh - hanya isi SEO yang ditandai
+                yang dibuat ulang.
+            </p>
 
             <div id="formNotice" class="notice" hidden></div>
         </form>
     </section>
 
-    <section class="card">
-        <h2>Template Milikku</h2>
-        <p class="neiiu-sub" style="margin-top:0">
-            Unggah landing page dan AMP milikmu sendiri. NEIIU hanya
-            mengganti judul, deskripsi, heading, paragraf, FAQ, dan
-            ulasan di dalamnya. Struktur, link, dan iklan yang sudah
-            ada tidak disentuh. Tandai bagian yang tidak boleh
-            berubah dengan <code>data-neiiu-skip</code>.
-            Maksimal {{ max_template_mb }} MB per berkas.
-        </p>
-
-        <form id="templateForm">
-            <div class="grid">
-                <div class="field">
-                    <label for="templateName">Nama template</label>
-                    <input
-                        type="text"
-                        id="templateName"
-                        placeholder="contoh: Tema Wayang v2"
-                        maxlength="120"
-                        autocomplete="off"
-                    >
-                </div>
-
-                <div class="field">
-                    <label for="landingFile">Berkas landing page (HTML)</label>
-                    <input
-                        type="file"
-                        id="landingFile"
-                        accept=".html,.htm,text/html"
-                        required
-                    >
-                </div>
-
-                <div class="field">
-                    <label for="ampFile">Berkas AMP (HTML, opsional)</label>
-                    <input
-                        type="file"
-                        id="ampFile"
-                        accept=".html,.htm,text/html"
-                    >
-                    <span class="hint">
-                        Kosongkan kalau belum punya. NEIIU akan
-                        membuatkan versi AMP dari isi yang sama.
-                    </span>
-                </div>
-            </div>
-
-            <button type="submit" class="primary-btn" id="uploadBtn">
-                Unggah Template
-            </button>
-
-            <div id="templateNotice" class="notice" hidden></div>
-        </form>
-
-        <div id="templateList" style="margin-top:18px">
-            <div class="empty">Memuat...</div>
-        </div>
-    </section>
 
     <!--
         Tampilan saat job berjalan.
@@ -509,6 +548,6 @@
 </dialog>
 
 <script id="regionData" type="application/json">{{ regions | tojson }}</script>
-<script src="{{ url_for('static', path='/neiiu.js') }}?v=6"></script>
+<script src="{{ url_for('static', path='/neiiu.js') }}?v=12"></script>
 </body>
 </html>

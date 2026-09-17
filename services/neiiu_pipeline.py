@@ -14,19 +14,18 @@ from pathlib import Path
 from analyzer.serp_analyzer import analyze_serp
 from config import (
     CRAWL_TOP_N,
-    DESIGN_REFERENCES,
     OUTPUT_DIR,
     SERP_PROVIDER,
     SERP_REGION,
     SERP_TOP_N,
-    SITE_BASE_URL,
     SITE_CTA_URL,
     SITE_DISCLAIMER,
     SITE_LICENSE,
     SITE_NAME,
 )
+from ai.brief import DEFAULT_TONE, PURPOSES, TONES
+from ai.niche import detect_niche
 from utils.region import (
-    city_label,
     format_date,
     get_region,
     iso_date,
@@ -44,12 +43,11 @@ from generators.article_block import (
 from generators.content_planner import (
     check_language,
     count_plan_words,
-    generate_content_plan,
     generate_serp_insight,
     generate_template_content,
     normalize_breadcrumb,
 )
-from generators.landing_generator import generate_landing_page
+from generators.final_verify import verify_pages
 from generators.seo_validator import validate_page
 from generators.template_extractor import (
     extract_template_from_url,
@@ -61,28 +59,39 @@ from generators.template_assets import (
     clean_assets,
 )
 from generators.template_filler import (
+    spare_headings,
+    spare_reviews,
     derive_spec,
     fill_template,
     merge_specs,
 )
-from generators.inspiration import build_design_dna
 from generators.jsonld_filler import breadcrumb_levels
+from generators.page_links import (
+    UnsafeLinkUrl,
+    clean_link,
+    clean_links,
+)
 from generators.template_scanner import scan
 from generators.template_slots import BREADCRUMB_WIDTH, build_slot_map
-from generators.theme import build_theme
 from serp.serp_search import search_keyword, slugify
 
 
 TOTAL_STEPS = 8
 
+# Nama langkah yang tampil di layar. Ditulis sebagai yang BENAR-BENAR
+# dikerjakan langkah itu, bukan sebagai judul yang enak dibaca:
+# langkah 4 tidak lagi mengambil struktur halaman kompetitor - ia
+# membaca template pilihan pengguna dan menghitung slotnya - dan
+# langkah 7 bukan cuma validasi, melainkan gerbang yang bisa
+# membatalkan penulisan berkas.
 STEP_LABELS = {
     1: "Mencari di Google",
     2: "Menganalisis rank 1 sampai 10",
     3: "AI membaca pola ranking",
-    4: "Mengambil struktur halaman acuan",
-    5: "AI menyusun konten baru",
-    6: "Merender landing page dan AMP",
-    7: "Validasi AMP dan SEO",
+    4: "Membaca template dan slotnya",
+    5: "AI menyusun isi untuk tiap slot",
+    6: "Mengisi template landing dan AMP",
+    7: "Memeriksa mutu halaman jadi",
     8: "Menyimpan hasil",
 }
 
@@ -257,6 +266,8 @@ def build_brand(
     base_url: str = "",
     region: str = SERP_REGION,
     cta_url: str = "",
+    brief: dict | None = None,
+    keyword: str = "",
 ) -> dict:
     """
     Menyusun identitas situs untuk satu run.
@@ -273,7 +284,21 @@ def build_brand(
     bisa lagi berbeda tanpa disadari.
     """
     clean_name = brand_name.strip() or SITE_NAME
-    clean_url = (base_url.strip() or SITE_BASE_URL).rstrip("/")
+
+    # Alamat TIDAK punya nilai cadangan, dan itu perbaikan atas
+    # perilaku sebelumnya.
+    #
+    # Dulu baris ini berbunyi (base_url.strip() or SITE_BASE_URL),
+    # dan SITE_BASE_URL bawaannya "https://example.com". Selama
+    # pengguna belum mengisi .env, setiap halaman yang dibuat memakai
+    # alamat situs contoh milik IANA sebagai alamatnya sendiri -
+    # bukan sebagai penanda "belum diisi" yang kelihatan, melainkan
+    # sebagai alamat yang terbaca sah di mana-mana.
+    #
+    # Sekarang kosong berarti kosong. Yang membutuhkan alamat
+    # menurunkannya dari canonical milik template, dan yang tidak
+    # menemukannya melaporkan kolom kosong - bukan alamat karangan.
+    clean_url = base_url.strip().rstrip("/")
 
     if clean_url and not clean_url.startswith(("http://", "https://")):
         clean_url = "https://" + clean_url
@@ -298,6 +323,37 @@ def build_brand(
         "direction": spec["direction"],
         "disclaimer": SITE_DISCLAIMER,
         "license": SITE_LICENSE,
+        # Brief kreatif: nada, jenis halaman, pembaca yang dituju, dan
+        # keyword pendukung. Menumpang di sini dengan alasan yang sama
+        # dengan zona - dict ini sudah sampai ke setiap penyusun
+        # prompt tanpa satu pun parameter tambahan.
+        #
+        # None berarti pengguna tidak memilih apa pun, dan penyusun
+        # prompt memperlakukannya persis seperti sebelum brief ada.
+        "brief": brief or None,
+        # Bidang halaman, dikenali dari keyword dan nama brand.
+        #
+        # Dititipkan di sini, bukan dihitung ulang di tiap penyusun
+        # prompt, supaya seluruh halaman berbicara sebagai bidang yang
+        # SAMA. Dihitung dua kali dengan bahan yang sedikit berbeda -
+        # satu tempat memakai keyword, satu lagi lupa - menghasilkan
+        # halaman yang FAQ-nya tentang satu bidang dan janji brandnya
+        # tentang bidang lain.
+        "niche": detect_niche(keyword, clean_name),
+        # Bidang yang DIKETIK pengguna, apa adanya.
+        #
+        # Berdampingan dengan "niche" di atas, dan keduanya menjawab
+        # pertanyaan yang berbeda. "niche" menjawab aturan mana yang
+        # dipakai - judi punya daftar kesanggupan dan aturan FAQ
+        # sendiri yang sudah disetel berkali-kali. "niche_text"
+        # menjawab bidang ini NAMANYA apa, dan itu yang membuat
+        # aturannya menunjuk sesuatu: "ISI FAQ SEPUTAR toko sepatu",
+        # bukan "ISI FAQ SEPUTAR TOPIK HALAMAN INI".
+        #
+        # Tanpa nama, model 4B mengisi rujukannya sendiri dari bahan
+        # terdekat di prompt - contoh gaya dan teks template - lalu
+        # menulis FAQ tentang bidang milik pemilik template.
+        "niche_text": keyword.strip(),
         # Penanda run, dipakai memilih contoh gaya mana yang dikirim
         # ke model.
         #
@@ -316,6 +372,43 @@ def build_brand(
         "today": format_date(now, spec["code"]),
         "today_iso": iso_date(now),
     }
+
+
+def brief_summary(brief: dict | None) -> str:
+    """
+    Ringkasan brief kreatif untuk log job, atau kosong kalau tidak ada.
+    """
+    if not brief:
+        return ""
+
+    bagian: list[str] = []
+
+    tujuan = brief.get("purpose")
+
+    if tujuan and tujuan in PURPOSES:
+        bagian.append(f"jenis halaman {PURPOSES[tujuan]['label']}")
+
+    nada = brief.get("tone")
+
+    # Nada bawaan tidak disebut. Ia tidak menyumbang satu baris pun ke
+    # prompt, jadi menyebutnya di log berarti melaporkan pengaturan
+    # yang tidak pernah berlaku.
+    if nada and nada != DEFAULT_TONE and nada in TONES:
+        bagian.append(f"nada {TONES[nada]['label']}")
+
+    if brief.get("audience"):
+        bagian.append(f"pembaca \"{brief['audience']}\"")
+
+    kunci_dua = brief.get("secondary_keywords") or []
+
+    if kunci_dua:
+        bagian.append(
+            f"{len(kunci_dua)} keyword pendukung ("
+            + ", ".join(kunci_dua)
+            + ")"
+        )
+
+    return ", ".join(bagian)
 
 
 def prepare_output_dir(
@@ -593,11 +686,68 @@ def sections_from_parts(
     return sections
 
 
+def on_topic_questions(daftar, keyword: str) -> list[str]:
+    """
+    Pertanyaan hasil crawl yang benar-benar menyinggung topik halaman.
+
+    Bahan ini dipanen dari halaman pertama Google dan dipakai menambal
+    slot FAQ yang tidak dijawab model. Selama tidak disaring, yang
+    tertambal bisa pertanyaan milik situs yang sama sekali lain -
+    terukur, halaman slot terbit dengan:
+
+        Seberapa Pancasila Dirimu?
+
+    Pertanyaan milik situs lembaga negara, di halaman judi. Aturannya
+    sudah tertulis di prompt sejak lama ("pertanyaan yang tidak
+    nyambung dengan topik halaman ini lebih baik tidak ditulis sama
+    sekali"), tapi aturan prompt cuma mengikat MODEL - dan yang
+    menaruh kalimat ini ke halaman bukan model melainkan penambal di
+    Python, yang tidak pernah membaca aturan itu.
+
+    Syaratnya sengaja seringan mungkin: cukup satu kata isi yang sama
+    dengan keyword. Yang dicari bukan pertanyaan yang bagus melainkan
+    pertanyaan yang setidaknya membicarakan hal yang sama - sisanya
+    sudah diurus penambal kartu FAQ, yang punya bank tanya-jawab
+    berpasangan dan seluruhnya seputar topik.
+
+    Kalau tidak ada satu pun yang lolos, yang dikembalikan daftar
+    kosong - dan itu jawaban yang benar. Slot yang dibiarkan kosong
+    ditambal bank berpasangan; slot yang ditambal pertanyaan asing
+    terbit apa adanya.
+    """
+    kata_kunci = {
+        potong.casefold()
+        for potong in re.findall(r"[^\W\d_]{3,}", str(keyword or ""))
+    }
+
+    if not kata_kunci:
+        return [str(x) for x in (daftar or []) if str(x or "").strip()]
+
+    lolos: list[str] = []
+
+    for item in daftar or []:
+        teks = str(item or "").strip()
+
+        if not teks:
+            continue
+
+        milik = {
+            potong.casefold()
+            for potong in re.findall(r"[^\W\d_]{3,}", teks)
+        }
+
+        if milik & kata_kunci:
+            lolos.append(teks)
+
+    return lolos
+
+
 def plan_from_template_content(
     content: dict,
     keyword: str,
     brand: dict,
     region: str,
+    breadcrumb_levels: int = 4,
 ) -> dict:
     """
     Menyusun ringkasan rencana dari isi template yang sudah dicocokkan.
@@ -657,6 +807,14 @@ def plan_from_template_content(
             h1=content.get("h1", ""),
             brand_name=brand.get("site_name", ""),
             region=region,
+            # Bidang halaman menentukan kosakata remah yang pantas.
+            # Halaman situs slot punya daftar bentuknya sendiri; di
+            # luar itu remah tetap disusun seperti sebelumnya.
+            niche=detect_niche(keyword, brand.get("site_name", "")),
+            # Panjang jalur mengikuti kedalaman remah di template.
+            # Lebih pendek dari itu, sisanya diisi rewrite_breadcrumb
+            # dengan mengulang tingkat terakhir.
+            levels=breadcrumb_levels,
         ),
         "intro": paragraphs[:2],
         # Artikelnya ada di dalam paragraphs ini, karena memang di situ
@@ -731,6 +889,44 @@ def extract_reference_template(
     )
 
 
+def amp_fallback_addresses(
+    canonical: str,
+    brand: dict,
+) -> tuple[dict, str, str]:
+    """
+    Alamat untuk berkas AMP yang dirakit NEIIU sendiri.
+
+    Dipakai hanya kalau pengguna tidak mengunggah template AMP.
+    Mengembalikan (brand untuk berkas AMP, canonical-nya, alamat
+    berkas AMP itu sendiri).
+
+    Tanpa canonical di template, dipakai alamat RELATIF. Berkas AMP
+    tinggal di subfolder "amp/", jadi ".." menunjuk halaman landing
+    di sebelahnya - benar di domain mana pun berkas itu nanti
+    diunggah, dan tidak menyebut satu domain pun.
+
+    base_url ikut diturunkan dari canonical template, bukan cuma
+    canonical-nya. Ini yang sempat terlewat waktu perbaikan ini
+    ditulis pertama kali: canonical dan og:url sudah bersih, tapi
+    build_schema_graph memakai brand["base_url"] langsung untuk
+    WebSite dan Organization, jadi berkas AMP-nya tetap memuat
+    "https://example.com#website" dan "https://example.com#organization".
+    Terukur pada berkas jadi: enam kali dalam satu berkas.
+
+    Berdiri di tingkat modul supaya bisa diuji tanpa menjalankan
+    pipeline. Yang dijaga di sini alamat yang tidak boleh dikarang,
+    dan itu justru bagian yang paling sepi kalau salah - berkasnya
+    tetap terbit, tetap valid, dan tetap menunjuk situs orang lain.
+    """
+    asal = str(canonical or "").strip()
+
+    amp_canonical = asal or "../"
+    amp_sendiri = f"{asal.rstrip('/')}/amp/" if asal else "./"
+    brand_amp = {**brand, "base_url": site_origin(asal)}
+
+    return brand_amp, amp_canonical, amp_sendiri
+
+
 def run_neiiu(
     keyword: str,
     brand_name: str = "",
@@ -745,18 +941,22 @@ def run_neiiu(
     city: str = "",
     user_template: dict | None = None,
     template_brand: str = "",
-    design_refs: list[str] | None = None,
     cta_url: str = "",
     assets: dict | None = None,
+    links: dict | None = None,
     history: dict | None = None,
-    color_variant: int | None = None,
     article_words: int = 0,
-    plain: bool = False,
-    kit_from_ref: bool = False,
+    brief: dict | None = None,
     on_event=None,
 ) -> dict:
     """
     Menjalankan pipeline penuh dari keyword sampai halaman jadi.
+
+    user_template WAJIB untuk menerbitkan halaman. Struktur halaman
+    datang dari template itu dan hanya dari sana; yang dikerjakan
+    pipeline ini menyusun teks lalu menaruhnya di slot yang sudah
+    ada. Tanpa template, satu-satunya mode yang jalan adalah
+    analyze_only, yang tidak menerbitkan berkas apa pun.
 
     on_event dipanggil dengan dict:
         {"step": int, "total": int, "label": str,
@@ -788,7 +988,71 @@ def run_neiiu(
     if not clean_keyword:
         raise PipelineError("Keyword tidak boleh kosong.")
 
-    brand = build_brand(brand_name, base_url, region, cta_url)
+    # Template adalah KONTRAK, dan kontrak yang boleh dikosongkan
+    # bukan kontrak.
+    #
+    # Sampai 19 Agustus 2026, template yang dikosongkan membuat
+    # pipeline ini merakit halamannya sendiri dari pustaka blok:
+    # layout, CSS, tombol, popup, dan urutan bagian ditentukan
+    # program, bukan template. Itu generator kedua yang hidup di
+    # dalam generator pertama, dan hasilnya tidak pernah bisa
+    # dijanjikan "strukturnya persis template yang kamu pilih"
+    # karena di jalur itu tidak ada template sama sekali.
+    #
+    # Sekarang berhenti di sini, dengan sebab yang bisa dibaca, bukan
+    # diam-diam jatuh ke jalur lain. Mode analisis tetap boleh jalan
+    # tanpa template: ia tidak menerbitkan satu halaman pun, jadi
+    # tidak ada struktur yang bisa dikarang.
+    if not user_template and not analyze_only:
+        raise PipelineError(
+            "Template belum dipilih. Generator ini menulis halaman "
+            "HANYA di atas template yang kamu unggah - struktur, "
+            "iklan, skrip, dan tautannya dipertahankan apa adanya, "
+            "dan yang diganti cuma teksnya. Pilih satu template di "
+            "Template Library, lalu jalankan lagi."
+        )
+
+    # Alamat halaman diperiksa SEKARANG, dengan alasan yang sama
+    # seperti alamat gambar di bawah: salah ketik adalah kesalahan
+    # yang paling murah diperbaiki sebelum belasan menit terpakai.
+    try:
+        clean_link_map = clean_links(links)
+    except UnsafeLinkUrl as error:
+        raise PipelineError(str(error)) from error
+
+    # Tujuan tombol ikut masuk peta tautan.
+    #
+    # Kolomnya sudah ada sejak lama, tapi selama ini cuma sampai ke
+    # generators/blocks.py - yang hanya dipakai kalau template AMP
+    # TIDAK diunggah. Untuk template yang lengkap, kolom itu tidak
+    # pernah mengubah satu tombol pun; pengguna mengisinya lalu
+    # halamannya terbit dengan tombol yang masih menunjuk situs
+    # pemilik template. Sekarang ia dipasang lewat jalur template.
+    if cta_url.strip() and "cta" not in clean_link_map:
+        try:
+            clean_link_map["cta"] = clean_link(cta_url, "tujuan tombol")
+        except UnsafeLinkUrl as error:
+            raise PipelineError(str(error)) from error
+
+    # base_url adalah ASAL dari canonical, bukan canonical-nya.
+    #
+    # Keduanya beda dan bedanya menentukan: canonical adalah alamat
+    # halaman ini ("https://brand.id/slot-gacor/"), sedangkan
+    # base_url dipakai menyusun pengenal situs di data terstruktur
+    # ("https://brand.id#website"). Memakai canonical utuh untuk
+    # keduanya menghasilkan pengenal situs yang berbeda di tiap
+    # halaman, dan itu memberi tahu mesin pencari bahwa tiap halaman
+    # milik situs yang lain.
+    asal_canonical = site_origin(clean_link_map.get("canonical", ""))
+
+    brand = build_brand(
+        brand_name,
+        base_url or asal_canonical,
+        region,
+        cta_url,
+        brief,
+        keyword=clean_keyword,
+    )
 
     # Alamat gambar diperiksa SEKARANG, sebelum satu detik pun dipakai
     # untuk crawl dan menulis. Alamat yang salah ketik baru ketahuan di
@@ -811,6 +1075,16 @@ def run_neiiu(
         f"lokasi {resolve_location(region, city)}), "
         f"halaman ditulis dalam bahasa {brand['language_name']}",
     )
+
+    # Brief kreatif dilaporkan apa adanya.
+    #
+    # Kolom yang dikosongkan sengaja TIDAK disebut: yang kosong tidak
+    # mengubah apa pun, dan menuliskannya sebagai "nada: -" membuat
+    # log terbaca seakan ada pengaturan yang berlaku padahal tidak.
+    kabar_brief = brief_summary(brand.get("brief"))
+
+    if kabar_brief:
+        emit(1, "info", "brief: " + kabar_brief)
 
     if history:
         emit(
@@ -1000,12 +1274,32 @@ def run_neiiu(
     emit(4, "start")
 
     if user_template:
+        # Nama lama yang tidak ada di templatenya dikatakan sekarang.
+        #
+        # Kolomnya diisi orang dengan brand BARU cukup sering, dan
+        # akibatnya tidak terlihat sampai halaman jadi: penyapu nama
+        # tidak menemukan apa pun, lalu puluhan sudut halaman terbit
+        # masih menyebut pemilik template sebelumnya. Formulir web
+        # sudah menolak yang persis sama dengan brand baru; yang di
+        # sini menangkap sisanya - salah ketik, atau nama yang memang
+        # tidak pernah ada di berkas itu.
+        if template_brand and template_brand not in user_template["landing"]:
+            emit(
+                4,
+                "info",
+                f"PERINGATAN: '{template_brand}' tidak ditemukan sama "
+                "sekali di berkas template. Kolom brand lama diisi "
+                "nama yang tidak ada di sana, jadi tidak ada yang "
+                "akan diganti - periksa ejaannya di templatemu.",
+            )
+
         # Template pengguna menggantikan pencarian halaman acuan.
         # Strukturnya sudah ditentukan sendiri oleh pemiliknya, jadi
         # tidak ada gunanya meniru struktur kompetitor.
         slot_map = build_slot_map(
             scan(user_template["landing"]),
             template_brand,
+            region,
         )
 
         # Kebutuhan isi dihitung dari KEDUA berkas, bukan dari landing
@@ -1016,13 +1310,27 @@ def run_neiiu(
         specs = [derive_spec(slot_map)]
         counts = dict(slot_map["counts"])
 
+        # Peran yang benar-benar punya slot di berkas AMP.
+        #
+        # Dibawa sampai ke pemeriksa akhir supaya ia bisa membedakan
+        # dua hal yang dari berkas jadi terlihat sama: slot yang gagal
+        # kebagian teks baru, dan bagian yang memang tidak pernah bisa
+        # diisi karena template AMP-nya tidak menyediakan slotnya.
+        amp_roles: set[str] = set()
+
         if user_template.get("amp"):
             amp_map = build_slot_map(
                 scan(user_template["amp"]),
                 template_brand,
+                region,
             )
 
             specs.append(derive_spec(amp_map))
+            amp_roles = {
+                peran
+                for peran, daftar in amp_map["roles"].items()
+                if daftar
+            }
 
             for role, count in amp_map["counts"].items():
                 counts[role] = max(counts.get(role, 0), count)
@@ -1060,6 +1368,29 @@ def run_neiiu(
                 f"remah navigasi: {tingkat} tingkat diminta ke AI "
                 f"(template menyimpannya di JSON-LD, bukan di halaman)",
             )
+
+        # Kedalaman remah yang harus dipenuhi jalur baru.
+        #
+        # Diambil dari yang TERBANYAK antara remah di JSON-LD dan slot
+        # remah yang terlihat di halaman, karena keduanya diisi dari
+        # satu jalur yang sama dan yang lebih dangkal akan kekurangan
+        # tingkat. Yang kekurangan tidak dibiarkan kosong melainkan
+        # diisi rewrite_breadcrumb dengan mengulang tingkat terakhir -
+        # dan itu yang menerbitkan "... > RTP Slot > RTP Slot".
+        #
+        # Nol berarti template ini memang tidak punya remah sama
+        # sekali; angkanya tidak dipakai siapa pun, jadi dipakai
+        # bawaan lama supaya perilakunya tidak berubah.
+        tingkat_remah = (
+            max(
+                int(tingkat or 0),
+                int(
+                    (template_spec.get("breadcrumb") or {}).get("count")
+                    or 0
+                ),
+            )
+            or 4
+        )
 
         # Panjang artikel diatur di sini, sebelum satu permintaan pun
         # dikirim ke model: jatah tiap slot paragraf dilebarkan supaya
@@ -1189,70 +1520,77 @@ def run_neiiu(
     content_notes: list[str] = []
 
     # Isi yang terbit, dipakai lagi di luar untuk diingat sebagai
-    # "sudah dipakai". Kosong di jalur tanpa template, karena di situ
-    # halamannya dirakit dari plan, bukan dari peta slot.
+    # "sudah dipakai".
     content: dict = {}
 
     try:
-        if user_template:
-            # Jumlah teks ditentukan template, jadi yang diminta ke
-            # AI adalah potongan-potongan terpisah dengan jumlah dan
-            # panjang yang persis, bukan rencana halaman bebas.
-            content, fit_notes = generate_template_content(
-                analysis=analysis,
-                insight=insight,
-                spec=template_spec,
-                brand=brand,
-                fallbacks={
-                    "faq_question": blueprint["people_also_ask"]
+        # Jumlah teks ditentukan template, jadi yang diminta ke
+        # AI adalah potongan-potongan terpisah dengan jumlah dan
+        # panjang yang persis, bukan rencana halaman bebas.
+        content, fit_notes = generate_template_content(
+            analysis=analysis,
+            insight=insight,
+            spec=template_spec,
+            brand=brand,
+            fallbacks={
+                "faq_question": on_topic_questions(
+                    blueprint["people_also_ask"]
                     + blueprint["competitor_questions"],
-                },
-                riwayat=history or {},
-                on_progress=ai_progress(5),
-                old_brand=template_brand,
-            )
+                    clean_keyword,
+                ),
+                # Ulasan dan judul bagian ikut punya cadangan.
+                #
+                # Tanpa keduanya, slot yang tidak terjawab model
+                # sesudah dua permintaan susulan terbit dengan
+                # TEKS PEMILIK TEMPLATE - terukur dua kali di run
+                # E2E yang sama: satu judul bagian dan tiga ulasan
+                # milik pemilik berdiri di halaman yang seluruh
+                # isinya sudah berganti.
+                #
+                # Jalannya sama persis dengan cadangan FAQ di atas,
+                # lewat "spare" di fit_content_to_spec. Yang
+                # ditambahkan cuma bahannya, bukan mesin baru.
+                "review_text": spare_reviews(brand, clean_keyword),
+                "heading": spare_headings(brand, clean_keyword),
+            },
+            riwayat=history or {},
+            on_progress=ai_progress(5),
+            old_brand=template_brand,
+        )
 
-            for note in fit_notes:
-                emit(5, "info", f"  {note}")
+        for note in fit_notes:
+            emit(5, "info", f"  {note}")
 
-            content_notes = list(fit_notes)
+        content_notes = list(fit_notes)
 
-            # Keyword ikut dibawa di dalam isi supaya judul blok yang
-            # ditulis Python punya bahan kalau brandnya kosong.
-            content["_keyword"] = clean_keyword
+        # Keyword ikut dibawa di dalam isi supaya judul blok yang
+        # ditulis Python punya bahan kalau brandnya kosong.
+        content["_keyword"] = clean_keyword
 
-            plan = plan_from_template_content(
-                content,
-                clean_keyword,
-                brand,
-                region,
-            )
+        plan = plan_from_template_content(
+            content,
+            clean_keyword,
+            brand,
+            region,
+            breadcrumb_levels=tingkat_remah,
+        )
 
-            # Jalur remah dikembalikan ke isi supaya JSON-LD ikut
-            # kebagian, termasuk pada template yang TIDAK punya
-            # remah terlihat.
-            #
-            # Template pengguna adalah contohnya: remahnya cuma ada
-            # di JSON-LD, jadi tidak ada satu slot pun yang
-            # mengisinya, dan tanpa baris ini rewrite_breadcrumb
-            # menerima jalur kosong lalu tidak berbuat apa-apa.
-            # Yang terbit adalah remah bawaan template - "Home >
-            # OSB99" beralamat www.ilpompiere.it, situs Italia asal
-            # template itu di-scrape.
-            #
-            # Kalau slot remah memang ada, nilai dari slot yang
-            # menang: published_content menimpa kunci ini dengan
-            # teks yang benar-benar terbit.
-            content["breadcrumb"] = plan["breadcrumb"]
-        else:
-            plan = generate_content_plan(
-                analysis=analysis,
-                insight=insight,
-                template=template,
-                brand=brand,
-                verbose=False,
-                on_progress=ai_progress(5),
-            )
+        # Jalur remah dikembalikan ke isi supaya JSON-LD ikut
+        # kebagian, termasuk pada template yang TIDAK punya
+        # remah terlihat.
+        #
+        # Template pengguna adalah contohnya: remahnya cuma ada
+        # di JSON-LD, jadi tidak ada satu slot pun yang
+        # mengisinya, dan tanpa baris ini rewrite_breadcrumb
+        # menerima jalur kosong lalu tidak berbuat apa-apa.
+        # Yang terbit adalah remah bawaan template - "Home >
+        # OSB99" beralamat www.ilpompiere.it, situs Italia asal
+        # template itu di-scrape.
+        #
+        # Kalau slot remah memang ada, nilai dari slot yang
+        # menang: published_content menimpa kunci ini dengan
+        # teks yang benar-benar terbit.
+        content["breadcrumb"] = plan["breadcrumb"]
     except Exception as error:
         saran = content_failure_hint(error)
 
@@ -1281,275 +1619,216 @@ def run_neiiu(
     page_url = f"{brand['base_url']}/{plan['slug']}/"
     amp_url = f"{brand['base_url']}/{plan['slug']}/amp/"
 
-    if user_template:
+    # Kegagalan pengisian dijelaskan sebagai kegagalan yang dimengerti
+    # pengguna, bukan sebagai jejak galat.
+    #
+    # fill_template menolak hasil yang merusak struktur template, dan
+    # penolakan itu benar. Tapi tanpa dibungkus, yang sampai ke layar
+    # berbunyi "ValueError: Hasil pengisian mengubah struktur
+    # template: ..." - nama kelas galat di depan kalimat yang
+    # sebenarnya sudah siap dibaca.
+    try:
         landing_result = fill_template(
             html=user_template["landing"],
             content=content,
             brand=brand,
             old_brand=template_brand,
             assets=clean_assets_map,
+            links=clean_link_map,
         )
+    except ValueError as error:
+        raise PipelineError(
+            f"Template landing page tidak bisa diisi: {error}"
+        ) from error
 
-        landing_html = landing_result["html"]
+    landing_html = landing_result["html"]
 
-        # Alamat yang DILAPORKAN ikut mengikuti template.
-        #
-        # Berkasnya sudah tidak memuat alamat karangan, tapi layar
-        # hasil masih menampilkan "https://example.com/slug/" sebagai
-        # URL halaman - alamat yang tidak ada di berkas mana pun dan
-        # tidak pernah jadi alamat halaman ini. Yang dilaporkan
-        # sekarang alamat yang benar-benar tertulis di canonical
-        # berkasnya.
-        asal_template = template_canonical(landing_html)
+    # Alamat yang DILAPORKAN ikut mengikuti template.
+    #
+    # Berkasnya sudah tidak memuat alamat karangan, tapi layar
+    # hasil masih menampilkan "https://example.com/slug/" sebagai
+    # URL halaman - alamat yang tidak ada di berkas mana pun dan
+    # tidak pernah jadi alamat halaman ini. Yang dilaporkan
+    # sekarang alamat yang benar-benar tertulis di canonical
+    # berkasnya.
+    asal_template = template_canonical(landing_html)
 
-        if asal_template:
-            page_url = asal_template
-            amp_url = f"{asal_template.rstrip('/')}/amp/"
-        else:
-            # Tidak ada canonical berarti tidak ada yang bisa
-            # dilaporkan. Dikosongkan, bukan ditebak: kolom kosong
-            # menyuruh orang membuka berkasnya, sedangkan alamat
-            # karangan menyuruh orang mempercayainya.
-            page_url = ""
-            amp_url = ""
+    if asal_template:
+        page_url = asal_template
+        amp_url = f"{asal_template.rstrip('/')}/amp/"
 
-        emit(
-            6,
-            "info",
-            f"  landing page: {landing_result['edits']} bagian diisi, "
-            f"{landing_result['skipped']} dibiarkan apa adanya",
-        )
+        # Alamat AMP yang diisi pengguna menang atas tebakan
+        # "/amp/" di belakang canonical. Tebakan itu benar untuk
+        # susunan yang paling umum dan cuma itu; yang mengisi
+        # kolomnya sudah menyatakan susunannya sendiri.
+        if clean_link_map.get("amphtml"):
+            amp_url = clean_link_map["amphtml"]
+    else:
+        # Tidak ada canonical berarti tidak ada yang bisa
+        # dilaporkan. Dikosongkan, bukan ditebak: kolom kosong
+        # menyuruh orang membuka berkasnya, sedangkan alamat
+        # karangan menyuruh orang mempercayainya.
+        page_url = ""
+        amp_url = ""
 
-        for note in landing_result["notes"]:
-            emit(6, "info", f"  {note}")
+    emit(
+        6,
+        "info",
+        f"  landing page: {landing_result['edits']} bagian diisi, "
+        f"{landing_result['skipped']} dibiarkan apa adanya",
+    )
 
-        if user_template.get("amp"):
-            amp_result = fill_template(
+    for note in landing_result["notes"]:
+        emit(6, "info", f"  {note}")
+
+    # Namanya bukan amp_result, dan itu bukan selera.
+    #
+    # Langkah 7 memakai nama amp_result untuk hasil validasi AMP.
+    # Dipakai nama yang sama di sini, hasil pengisian ikut tertimpa
+    # sebelum pemeriksa akhir sempat membaca rentangnya - dan
+    # pembuktian byte-demi-byte untuk berkas AMP diam-diam
+    # dilewati tanpa satu baris pun yang menyebutnya.
+    amp_fill_result = None
+
+    if user_template.get("amp"):
+        try:
+            amp_fill_result = fill_template(
                 html=user_template["amp"],
                 content=content,
                 brand=brand,
                 old_brand=template_brand,
                 is_amp=True,
                 assets=clean_assets_map,
-            )
-
-            amp_html = amp_result["html"]
-
-            emit(
-                6,
-                "info",
-                f"  AMP: {amp_result['edits']} bagian diisi, "
-                f"{amp_result['skipped']} dibiarkan apa adanya",
-            )
-
-            # Catatan berkas AMP ikut ditampilkan. Sebelumnya hanya
-            # catatan landing yang muncul, jadi peringatan yang cuma
-            # berlaku di berkas AMP - slot yang tidak kebagian isi,
-            # atribut tanpa kutip - hilang tanpa jejak.
-            for note in amp_result["notes"]:
-                emit(6, "info", f"  {note}")
-        else:
-            # Tanpa template AMP, versi AMP dibuat generator biasa
-            # supaya halamannya tetap punya pasangan AMP yang sah.
-            #
-            # Alamatnya diambil dari canonical milik template landing,
-            # bukan dari SITE_BASE_URL. Berkas landing sudah memakai
-            # alamat template apa adanya; kalau berkas AMP di
-            # sebelahnya memakai alamat lain, keduanya menunjuk dua
-            # situs berbeda - dan yang satu itu selalu
-            # "https://example.com" selama pengguna belum mengisi
-            # .env, yang justru alamat karangan yang harus dihindari.
-            asal = asal_template
-
-            # Tanpa canonical di template, dipakai alamat relatif.
-            # Berkas AMP tinggal di subfolder "amp/", jadi "../"
-            # menunjuk halaman landing di sebelahnya - benar di domain
-            # mana pun berkas itu nanti diunggah, dan tidak menyebut
-            # satu domain pun.
-            amp_canonical = asal or "../"
-            amp_sendiri = f"{asal.rstrip('/')}/amp/" if asal else "./"
-
-            # base_url ikut diturunkan dari canonical template, bukan
-            # cuma canonical-nya.
-            #
-            # Ini yang sempat terlewat waktu perbaikan ini ditulis
-            # pertama kali: canonical dan og:url sudah bersih, tapi
-            # build_schema_graph memakai brand["base_url"] langsung
-            # untuk WebSite dan Organization, jadi berkas AMP-nya tetap
-            # memuat "https://example.com#website" dan
-            # "https://example.com#organization". Terukur pada berkas
-            # jadi: enam kali dalam satu berkas.
-            brand_amp = {**brand, "base_url": site_origin(asal)}
-
-            amp_html = generate_amp_page(
-                plan=plan,
-                design={},
-                brand=brand_amp,
-                page_url=amp_canonical,
-                amp_url=amp_sendiri,
-            )
-
-            emit(
-                6,
-                "info",
-                "  template AMP tidak diunggah, versi AMP dibuat "
-                "NEIIU dari isi yang sama; canonical-nya "
-                + (
-                    f"mengikuti template ({amp_canonical})"
-                    if asal
-                    else "memakai alamat relatif karena template "
-                    "tidak punya canonical"
-                ),
-            )
-    else:
-        design = template["design"]
-        kit = None
-
-        if not plain:
-            # Halaman baru dirakit dari pustaka blok. Gayanya
-            # diturunkan dari halaman acuan yang ditunjuk pengguna;
-            # kalau tidak ada, dari halaman acuan template; kalau
-            # itu pun tidak ada, dari palet bawaan.
-            ref_urls = [
-                url
-                for url in (design_refs or DESIGN_REFERENCES)
-                if url.strip()
-            ]
-
-            if not ref_urls and reference:
-                ref_urls = [reference]
-
-            if not ref_urls and str(
-                template.get("source_url", "")
-            ).startswith("http"):
-                ref_urls = [template["source_url"]]
-
-            def on_source(entry: dict) -> None:
-                if entry["ok"]:
-                    dipakai = ", ".join(
-                        name
-                        for name, present in entry["components"].items()
-                        if present
-                    )
-
-                    emit(
-                        6,
-                        "info",
-                        f"  acuan gaya {entry['domain']}: "
-                        f"radius {entry['radius']}px"
-                        + (f", komponen {dipakai}" if dipakai else ""),
-                    )
-                else:
-                    emit(
-                        6,
-                        "info",
-                        f"  acuan gaya {entry['domain']} tidak terbaca "
-                        f"({entry['error']}), dilewati",
-                    )
-
-            dna = build_design_dna(ref_urls, on_source=on_source)
-
-            # Benih warna memuat nama folder hasil, dan nama itu
-            # memuat waktu run. Dua halaman brand dan keyword yang
-            # sama karena itu tetap keluar dengan warna berbeda,
-            # tapi satu run yang diulang persis tetap bisa
-            # menghasilkan warna yang sama.
-            theme = build_theme(
-                dna,
-                seed_text=(
-                    f"{brand['site_name']}|{clean_keyword}|"
-                    f"{output_dir.name}"
-                ),
-                variant=color_variant,
-            )
-
-            design = {
-                "palette": theme["palette"],
-                "fonts": theme["fonts"],
-                "radius": theme["radius"],
-            }
-
-            if kit_from_ref:
-                kit = dna["components"]
-            else:
-                # Bawaannya seluruh blok dipasang, dan acuan hanya
-                # menentukan warna, font, serta sudut lengkung.
-                # Alasannya: halaman acuan yang kebetulan tidak punya
-                # popup akan menghasilkan halaman baru tanpa popup,
-                # padahal yang diminta dari acuan itu gayanya, bukan
-                # daftar komponennya. Yang ingin komponennya ikut
-                # menyesuaikan acuan bisa menyalakan kit_from_ref.
-                kit = {name: True for name in dna["components"]}
-
-            template["design_dna"] = {
-                "sources": [
-                    {
-                        "url": entry["url"],
-                        "domain": entry["domain"],
-                        "ok": entry["ok"],
-                        "error": entry["error"],
-                    }
-                    for entry in dna["sources"]
-                ],
-                "components": kit,
-                "components_detected": dna["components"],
-                "kit_from_ref": kit_from_ref,
-                "theme": {
-                    key: value
-                    for key, value in theme.items()
-                    if key != "palette"
+                # Berkas AMP mendapat peta tautannya sendiri.
+                #
+                # canonical-nya menunjuk ke halaman LANDING, bukan ke
+                # dirinya sendiri - itu memang bentuk yang diminta
+                # AMP, dan halaman AMP yang canonical-nya menunjuk
+                # diri sendiri membuat kedua berkas bersaing sebagai
+                # halaman yang sama.
+                #
+                # amphtml sengaja tidak ikut: yang menunjuk ke versi
+                # AMP adalah halaman landing, dan berkas AMP yang
+                # menunjuk ke versi AMP-nya sendiri adalah lingkaran
+                # yang tidak menjawab apa pun.
+                links={
+                    peran: alamat
+                    for peran, alamat in clean_link_map.items()
+                    if peran != "amphtml"
                 },
-                "palette": theme["palette"],
-            }
-
-            emit(
-                6,
-                "info",
-                f"  tema warna {theme['variant'] + 1}"
-                f"/{theme['variant_total']} "
-                f"(rona {theme['hue']}, {theme['mode']}), "
-                f"blok: "
-                + ", ".join(
-                    name for name, present in kit.items() if present
-                ),
             )
+        except ValueError as error:
+            raise PipelineError(
+                f"Template AMP tidak bisa diisi: {error}"
+            ) from error
 
-        landing_html = generate_landing_page(
-            plan=plan,
-            design=design,
-            brand=brand,
-            page_url=page_url,
-            amp_url=amp_url,
-            kit=kit,
+        amp_html = amp_fill_result["html"]
+
+        emit(
+            6,
+            "info",
+            f"  AMP: {amp_fill_result['edits']} bagian diisi, "
+            f"{amp_fill_result['skipped']} dibiarkan apa adanya",
+        )
+
+        # Catatan berkas AMP ikut ditampilkan. Sebelumnya hanya
+        # catatan landing yang muncul, jadi peringatan yang cuma
+        # berlaku di berkas AMP - slot yang tidak kebagian isi,
+        # atribut tanpa kutip - hilang tanpa jejak.
+        for note in amp_fill_result["notes"]:
+            emit(6, "info", f"  {note}")
+    else:
+        # Tanpa template AMP, versi AMP dibuat generator biasa
+        # supaya halamannya tetap punya pasangan AMP yang sah.
+        #
+        # Alamatnya diambil dari canonical milik template landing,
+        # bukan dari SITE_BASE_URL. Berkas landing sudah memakai
+        # alamat template apa adanya; kalau berkas AMP di
+        # sebelahnya memakai alamat lain, keduanya menunjuk dua
+        # situs berbeda - dan yang satu itu selalu
+        # "https://example.com" selama pengguna belum mengisi
+        # .env, yang justru alamat karangan yang harus dihindari.
+        asal = asal_template
+        brand_amp, amp_canonical, amp_sendiri = amp_fallback_addresses(
+            asal,
+            brand,
         )
 
         amp_html = generate_amp_page(
             plan=plan,
-            design=design,
-            brand=brand,
-            page_url=page_url,
-            amp_url=amp_url,
-            kit=kit,
+            design={},
+            brand=brand_amp,
+            page_url=amp_canonical,
+            amp_url=amp_sendiri,
         )
 
-    amp_dir = output_dir / "amp"
-    amp_dir.mkdir(parents=True, exist_ok=True)
-
-    (output_dir / "index.html").write_text(
-        landing_html,
-        encoding="utf-8",
-    )
-
-    (amp_dir / "index.html").write_text(
-        amp_html,
-        encoding="utf-8",
-    )
-
-
+        emit(
+            6,
+            "info",
+            "  template AMP tidak diunggah, versi AMP dibuat "
+            "NEIIU dari isi yang sama; canonical-nya "
+            + (
+                f"mengikuti template ({amp_canonical})"
+                if asal
+                else "memakai alamat relatif karena template "
+                "tidak punya canonical"
+            ),
+        )
     emit(6, "done", f"{len(landing_html)} byte")
 
     # 7. Validasi
     emit(7, "start")
+
+    # Pemeriksa terakhir, atas teks yang PERSIS akan ditulis ke disk.
+    #
+    # Berjalan SEBELUM satu berkas pun dibuat, dan itu bagian yang
+    # penting. Sebelumnya kedua berkas ditulis di langkah 6 lalu
+    # diperiksa di langkah 7, jadi halaman yang gagal pemeriksaan
+    # tetap mendarat di folder hasil, tetap bisa diunduh, dan tetap
+    # bisa diunggah orang ke situsnya - laporan cacatnya cuma jadi
+    # catatan di layar. Yang diminta pengguna kebalikannya: lebih
+    # baik generate GAGAL daripada terbit tapi abal-abal.
+    #
+    # Yang diperiksa berkasnya, bukan kamus isi. Beda keduanya bukan
+    # teori: pemetaan slot, pemotongan lebar, penukaran nama brand,
+    # dan penyisipan schema semuanya berdiri DI ANTARA kamus dan
+    # berkas.
+    hasil_periksa = verify_pages(
+        landing_html=landing_html,
+        amp_html=amp_html,
+        template_landing=user_template["landing"],
+        template_amp=user_template.get("amp") or "",
+        landing_ranges=landing_result.get("ranges"),
+        # Berkas AMP yang dirakit NEIIU sendiri tidak punya template
+        # asal, jadi tidak ada yang bisa dibandingkan byte demi byte.
+        # Dikosongkan, bukan diakali - pembuktian yang tidak bisa
+        # dilakukan lebih baik dilewati daripada dipalsukan.
+        amp_ranges=(
+            amp_fill_result.get("ranges") if amp_fill_result else None
+        ),
+        brand=brand.get("site_name", ""),
+        old_brand=template_brand,
+        keyword=clean_keyword,
+        region=region,
+        amp_roles=amp_roles,
+    )
+
+    for catatan in hasil_periksa["soft"]:
+        emit(7, "info", f"  catatan: {catatan}")
+
+    if hasil_periksa["hard"]:
+        for masalah in hasil_periksa["hard"]:
+            emit(7, "info", f"  TOLAK: {masalah}")
+
+        raise PipelineError(
+            "Halaman tidak ditulis karena gagal pemeriksaan akhir: "
+            + " | ".join(hasil_periksa["hard"][:3])
+            + (
+                f" (dan {len(hasil_periksa['hard']) - 3} lagi)"
+                if len(hasil_periksa["hard"]) > 3
+                else ""
+            )
+        )
 
     amp_result = validate_amp(amp_html)
 
@@ -1558,6 +1837,14 @@ def run_neiiu(
         keyword=clean_keyword,
         blueprint=blueprint,
         page_url=page_url,
+        # Berkas AMP ikut diperiksa BERSAMA landingnya, bukan
+        # sendiri-sendiri. validate_amp menjawab "apakah berkas ini
+        # AMP yang sah", dan itu pertanyaan yang lain sama sekali dari
+        # "apakah kedua halaman ini menjanjikan hal yang sama di hasil
+        # pencarian" - lihat check_head_pair.
+        amp_html=amp_html,
+        amp_url=amp_url,
+        brand_name=brand.get("site_name", ""),
     )
 
     emit(
@@ -1584,6 +1871,25 @@ def run_neiiu(
     # content_notes tetap dikembalikan lewat nilai balik dan tetap
     # dikirim ke log job, karena itulah satu-satunya keterangan kenapa
     # sebuah halaman bisa terbit setengah berganti.
+    #
+    # DI SINILAH kedua berkas ditulis, bukan di langkah 6. Sampai 19
+    # Agustus 2026 keduanya ditulis segera sesudah dirender, jadi
+    # halaman yang kemudian ditolak pemeriksa tetap ada di disk dan
+    # tetap bisa diunduh. Sekarang berkas hanya lahir sesudah seluruh
+    # pemeriksaan lulus: yang gagal tidak meninggalkan satu berkas
+    # pun untuk salah diunggah orang.
+    amp_dir = output_dir / "amp"
+    amp_dir.mkdir(parents=True, exist_ok=True)
+
+    (output_dir / "index.html").write_text(
+        landing_html,
+        encoding="utf-8",
+    )
+
+    (amp_dir / "index.html").write_text(
+        amp_html,
+        encoding="utf-8",
+    )
 
     emit(8, "done", str(output_dir))
 

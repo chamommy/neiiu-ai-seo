@@ -14,8 +14,10 @@ Contoh pakai:
 
 import argparse
 import sys
+from pathlib import Path
 
-from config import CRAWL_TOP_N, SERP_PROVIDER, SERP_TOP_N
+from ai.brief import PURPOSES, TONES, build_creative_brief
+from config import CRAWL_TOP_N, SERP_PROVIDER, SERP_REGION, SERP_TOP_N
 from serp.providers import SerpProviderError
 from services.neiiu_pipeline import PipelineError, run_neiiu
 
@@ -372,14 +374,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "--design-ref",
-        action="append",
-        default=[],
-        metavar="URL",
+        "--template",
+        default="",
+        metavar="BERKAS",
         help=(
-            "URL halaman yang gaya visualnya mau ditiru. Boleh "
-            "diulang. Yang diambil hanya warna, font, radius, dan "
-            "komponen yang dipakai"
+            "Berkas HTML template landing page. WAJIB kecuali "
+            "--analyze-only: halaman ditulis di atas template ini, "
+            "dan strukturnya tidak pernah diubah"
+        ),
+    )
+
+    parser.add_argument(
+        "--template-amp",
+        default="",
+        metavar="BERKAS",
+        help=(
+            "Berkas HTML template AMP. Kalau dikosongkan, versi AMP "
+            "dibuat dari isi yang sama dengan landing"
+        ),
+    )
+
+    parser.add_argument(
+        "--template-brand",
+        default="",
+        metavar="NAMA",
+        help=(
+            "Nama brand yang SUDAH tertulis di dalam template, supaya "
+            "semua kemunculannya diganti dengan --brand"
         ),
     )
 
@@ -404,33 +425,48 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # Brief kreatif. Keempatnya opsional, dan yang dikosongkan tidak
+    # mengubah apa pun - perintah tanpa satu pun dari empat opsi ini
+    # menghasilkan halaman yang sama persis seperti sebelum brief ada.
     parser.add_argument(
-        "--color",
-        type=int,
-        default=None,
-        metavar="N",
+        "--tone",
+        default="",
+        choices=[""] + list(TONES),
         help=(
-            "Pilih sendiri nomor varian warna. Kalau dikosongkan, "
-            "warnanya berganti tiap run"
+            "Nada tulisan. Kosong atau 'natural' berarti nada bawaan "
+            "NEIIU, yang sudah disetel supaya tidak terbaca seperti "
+            "tulisan mesin"
         ),
     )
 
     parser.add_argument(
-        "--plain",
-        action="store_true",
+        "--page-purpose",
+        default="",
+        choices=[""] + list(PURPOSES),
         help=(
-            "Halaman artikel polos tanpa pustaka blok, seperti "
-            "perilaku lama"
+            "Jenis halaman yang ditulis. Mengubah cara isinya "
+            "ditulis, bukan bentuk templatenya"
         ),
     )
 
     parser.add_argument(
-        "--kit-from-ref",
-        action="store_true",
+        "--audience",
+        default="",
+        metavar="TEKS",
         help=(
-            "Pasang hanya blok yang terdeteksi di halaman acuan. "
-            "Bawaannya seluruh blok dipasang dan acuan hanya "
-            "menentukan warna dan font"
+            "Pembaca yang dituju, ditulis bebas. Menentukan kata yang "
+            "dipakai dan hal yang perlu dijelaskan"
+        ),
+    )
+
+    parser.add_argument(
+        "--secondary-keyword",
+        action="append",
+        default=[],
+        metavar="KATA",
+        help=(
+            "Keyword pendukung, boleh diulang. Paling banyak delapan, "
+            "masing-masing dipakai sekali saja di seluruh halaman"
         ),
     )
 
@@ -448,6 +484,51 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
+    # Template dibaca dari disk di sini, bukan di dalam pipeline.
+    #
+    # Pipeline menerima ISI templatenya, bukan alamat berkasnya, dan
+    # itu disengaja: satu-satunya lapis yang boleh menyentuh disk
+    # adalah lapis yang tahu berkas itu milik siapa - halaman web
+    # membacanya dari folder pengguna, CLI dari jalur yang diketik
+    # sendiri pemiliknya.
+    user_template = None
+
+    if args.template:
+        jalur = Path(args.template)
+
+        if not jalur.is_file():
+            print(f"Template tidak ditemukan: {jalur}")
+            return 1
+
+        user_template = {
+            "name": jalur.stem,
+            "landing": jalur.read_text(encoding="utf-8-sig"),
+            "amp": "",
+        }
+
+        if args.template_amp:
+            jalur_amp = Path(args.template_amp)
+
+            if not jalur_amp.is_file():
+                print(f"Template AMP tidak ditemukan: {jalur_amp}")
+                return 1
+
+            user_template["amp"] = jalur_amp.read_text(encoding="utf-8-sig")
+
+    elif not args.analyze_only:
+        # Dikatakan di sini, sebelum satu permintaan SERP pun
+        # berangkat. Kalau dibiarkan pipeline yang menolaknya,
+        # pengguna menunggu crawl sepuluh halaman lebih dulu untuk
+        # sebuah pesan yang sudah bisa dibaca sekarang.
+        print(
+            "Template belum diberikan. Generator ini menulis halaman "
+            "HANYA di atas template yang kamu punya:\n"
+            "  python neiiu.py \"keyword\" --brand NAMA "
+            "--template landing.html [--template-amp amp.html]\n"
+            "Tanpa template, yang bisa dijalankan cuma --analyze-only."
+        )
+        return 1
+
     try:
         result = run_neiiu(
             keyword=args.keyword,
@@ -459,12 +540,19 @@ def main() -> int:
             reference=args.reference,
             use_cache=not args.no_cache,
             analyze_only=args.analyze_only,
-            design_refs=args.design_ref,
+            user_template=user_template,
+            template_brand=args.template_brand,
             cta_url=args.cta_url,
             article_words=args.article_words,
-            color_variant=args.color,
-            plain=args.plain,
-            kit_from_ref=args.kit_from_ref,
+            brief=build_creative_brief(
+                tone=args.tone,
+                page_purpose=args.page_purpose,
+                target_audience=args.audience,
+                secondary_keywords=args.secondary_keyword,
+                # CLI tidak punya opsi zona sendiri - ia mengikuti
+                # SERP_REGION di .env, sama seperti run_neiiu.
+                language=SERP_REGION,
+            ),
             on_event=on_event,
         )
 

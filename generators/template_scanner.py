@@ -20,6 +20,8 @@ import html as html_module
 import re
 from html.parser import HTMLParser
 
+from generators.ad_regions import protected_ranges
+
 # Lambang mata uang, satu-satunya entitas yang membuka rentang teks
 # sendiri. Alasannya di open_for_currency().
 #
@@ -125,6 +127,18 @@ TEXT_ATTRIBUTES_ANY_TAG = {
 # diketikkan pengguna sendiri.
 ASSET_ATTRIBUTES = {
     ("link", "href"),
+    # href milik <a>. Ditambahkan supaya tujuan tombol LOGIN dan
+    # DAFTAR bisa ditukar dengan alamat yang diketik pengguna, lewat
+    # jalur yang sama dengan gambar - splice byte di rentang nilai
+    # atributnya, bukan serialisasi ulang dokumen.
+    #
+    # Aman ikut di sini karena tidak ada satu pun tahap penentu peran
+    # gambar yang bisa mengenainya: named_role() menjawab "" untuk
+    # tag di luar link, meta, dan tag gambar, dan tahap_sisa()
+    # disaring is_photo() yang menolak tag "a". Jadi anchor cuma
+    # tercatat, dan yang boleh menulisinya cuma generators/
+    # page_links.py.
+    ("a", "href"),
     # Sudah ikut TEXT_ATTRIBUTES juga - og:title dan og:description
     # memang teks. Yang diambil di sini og:image dan saudaranya, dan
     # pemilahnya ada di template_assets, bukan di sini.
@@ -765,6 +779,15 @@ def scan(html: str) -> dict:
         "end_tags": scanner.end_tags,
         "opaque": scanner.opaque_blocks,
         "ads": scanner.ad_blocks,
+        # Wilayah titipan pihak ketiga, dihitung terpisah.
+        #
+        # Pemindai ini bekerja mengalir: waktu <div> pembuka dibaca,
+        # isinya belum ada yang tahu. Padahal bukti sebuah kreatif
+        # justru ada di dalamnya - ke domain mana tautannya pergi,
+        # dari mana gambarnya diambil, ada rel="sponsored" atau
+        # tidak. Karena itu penilaiannya dikerjakan sesudah seluruh
+        # berkas terbaca, di generators/ad_regions.py.
+        "protected": protected_ranges(html),
     }
 
 

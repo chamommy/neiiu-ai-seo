@@ -44,12 +44,16 @@ HISTORY_ROLES = (
 
 # Penanda yang ikut diingat, tapi BUKAN teks yang terbit.
 #
-# Isinya sudut dan cara bercerita judul halaman ini. Yang berguna dari
-# keduanya bukan kalimatnya, melainkan fakta bahwa topik itu sudah
-# terpakai - halaman berikutnya melewatinya dan mengambil topik lain.
-# Harus sama dengan TITLE_ANGLE_MARK/TITLE_FRAME_MARK di
-# ai/neiiu_prompts.py.
-MARK_ROLES = ("_title_angle", "_title_frame")
+# Isinya sudut dan cara bercerita judul, dari masa ketika NEIIU yang
+# memilihkan keduanya dan menggilirnya antar halaman. Penggiliran itu
+# sudah dicabut - sudut judul sekarang ditentukan model sendiri - jadi
+# tidak ada lagi yang MENULIS baris berperan ini.
+#
+# Daftarnya tetap dipakai, dan justru karena itu ia tidak boleh
+# dihapus: baris penanda dari run-run lama masih tersimpan di basis
+# data, dan daftar inilah yang menahannya supaya tidak ikut terbaca
+# sebagai teks halaman waktu riwayat disusun.
+MARK_ROLES = ("_title_angle", "_title_frame", "_title_build")
 
 # Berapa halaman terakhir yang diingat.
 #
@@ -83,6 +87,26 @@ KEEP_JOBS_PER_USER = 30
 MAX_TEXT_CHARS = 400
 
 
+# Ruang ingatan. Produksi dan pemeriksaan tidak saling melihat.
+#
+# Ini jawaban untuk soal yang muncul waktu satu template diperiksa
+# berulang kali: sesudah lima kali, 284 teks tersimpan untuk template
+# yang sama, dan run keenam harus mengarang judul yang berbeda dari
+# semuanya. Yang terukur bukan kemampuan pipeline lagi melainkan sisa
+# ruang gerak yang ditinggalkan pemeriksaan sebelumnya.
+#
+# Yang TIDAK dilakukan: menghapus ingatan. Ingatan itu milik halaman
+# yang sudah terbit, dan menghapusnya berarti halaman produksi
+# berikutnya boleh mengulangi halaman yang sudah ada.
+#
+# Yang dilakukan: memberi pemeriksaan ruangnya sendiri. Penolak
+# kembar tetap berjalan penuh di dalam ruang itu - jadi yang diuji
+# tetap perilaku yang sebenarnya - tapi isinya tidak pernah bercampur
+# dengan ingatan produksi, ke arah mana pun.
+SCOPE_LIVE = "live"
+SCOPE_QA = "qa"
+
+
 def init_history_db() -> None:
     with db_connection() as db:
         db.executescript(
@@ -103,6 +127,23 @@ def init_history_db() -> None:
             ON neiiu_used_text(user_id, job_id DESC);
             """
         )
+
+        # Baris lama tidak punya kolom ini dan semuanya milik
+        # produksi, jadi nilai bawaannya SCOPE_LIVE - dengan begitu
+        # perilaku produksi sesudah migrasi sama persis seperti
+        # sebelumnya.
+        kolom = {
+            row["name"]
+            for row in db.execute(
+                "PRAGMA table_info(neiiu_used_text)"
+            ).fetchall()
+        }
+
+        if "scope" not in kolom:
+            db.execute(
+                "ALTER TABLE neiiu_used_text "
+                f"ADD COLUMN scope TEXT NOT NULL DEFAULT '{SCOPE_LIVE}'"
+            )
 
 
 def key_of(value) -> str:
@@ -139,9 +180,13 @@ def save_used_text(
     brand_name: str,
     template_id: int,
     content: dict,
+    scope: str = SCOPE_LIVE,
 ) -> int:
     """
     Menyimpan teks yang terbit di satu job.
+
+    Run pemeriksaan menulis ke ruangnya sendiri, jadi ingatan
+    produksi tidak pernah bertambah karenanya.
 
     Mengembalikan jumlah baris yang tersimpan.
     """
@@ -157,9 +202,9 @@ def save_used_text(
             """
             INSERT INTO neiiu_used_text (
                 user_id, job_id, keyword, brand_name, template_id,
-                role, text, created_at
+                role, text, created_at, scope
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -171,6 +216,7 @@ def save_used_text(
                     role,
                     teks,
                     sekarang,
+                    str(scope or SCOPE_LIVE),
                 )
                 for role, teks in baris
             ],
@@ -183,17 +229,24 @@ def save_used_text(
             """
             DELETE FROM neiiu_used_text
             WHERE user_id = ?
+              AND scope = ?
               AND job_id NOT IN (
                   SELECT job_id FROM (
                       SELECT DISTINCT job_id
                       FROM neiiu_used_text
-                      WHERE user_id = ?
+                      WHERE user_id = ? AND scope = ?
                       ORDER BY job_id DESC
                       LIMIT ?
                   )
               )
             """,
-            (int(user_id), int(user_id), KEEP_JOBS_PER_USER),
+            (
+                int(user_id),
+                str(scope or SCOPE_LIVE),
+                int(user_id),
+                str(scope or SCOPE_LIVE),
+                KEEP_JOBS_PER_USER,
+            ),
         )
 
     return len(baris)
@@ -219,6 +272,7 @@ def load_used_text(
     keyword: str,
     template_id: int,
     exclude_job: int = 0,
+    scope: str = SCOPE_LIVE,
 ) -> dict[str, list[str]]:
     """
     Membaca teks yang sudah terbit di halaman-halaman sebelumnya.
@@ -231,8 +285,11 @@ def load_used_text(
 
     Menghasilkan {peran: [teks, ...]}, terbaru lebih dulu.
     """
-    syarat = ["user_id = ?"]
-    params: list = [int(user_id)]
+    # Ruangnya ikut jadi syarat, bukan sekadar kolom yang ditulis.
+    # Tanpa baris ini, run pemeriksaan tetap membaca ingatan produksi
+    # dan soal yang mau diselesaikan tidak berubah sama sekali.
+    syarat = ["user_id = ?", "scope = ?"]
+    params: list = [int(user_id), str(scope or SCOPE_LIVE)]
 
     cocok = ["keyword = ?"]
     params.append(key_of(keyword))
